@@ -1,0 +1,21 @@
+version: "3.9"
+
+services:
+  gutenberg-lab:
+    image: wordcracker-textlab
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./notebooks:/workspace/notebooks
+      - ./scripts:/workspace/scripts
+      - ./data:/workspace/data
+      - ./raw_books:/workspace/raw_books
+      - /media/standa/books:/workspace/books:ro
+      - /media/standa/clean_books:/workspace/clean_books
+    command: [
+      "sh", "-c",
+      "jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --ServerApp.token='' --ServerApp.password='' && echo '🟢 Открывай http://192.168.1.115:8888/lab'"
+    ]

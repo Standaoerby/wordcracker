@@ -1,0 +1,7 @@
+# игнорируем данные и временные файлы
+data/
+raw_books/
+__pycache__/
+*.pyc
+*.ipynb_checkpoints
+/media/
