@@ -41,7 +41,7 @@ DEFAULT_MODEL          = "qwen3:14b"
 DEFAULT_OLLAMA_HOST    = os.environ.get("OLLAMA_HOST", "http://ollama:11434")
 DEFAULT_MAX_ITER       = 5
 DEFAULT_TEMPERATURE    = 0.3
-DEFAULT_KEEP_ALIVE     = "-1"  # pin model in VRAM permanently — CF Free has 100s edge timeout
+DEFAULT_KEEP_ALIVE     = -1    # pin model in VRAM permanently (int seconds; -1 = forever)
 
 SYSTEM_PROMPT = """Ты — литературный аналитик и помощник по корпусу Project Gutenberg.
 
@@ -134,7 +134,7 @@ def ask(
     ollama_host: str = DEFAULT_OLLAMA_HOST,
     max_iterations: int = DEFAULT_MAX_ITER,
     temperature: float = DEFAULT_TEMPERATURE,
-    keep_alive: str = DEFAULT_KEEP_ALIVE,
+    keep_alive: int | str = DEFAULT_KEEP_ALIVE,
     verbose: bool = False,
 ) -> dict:
     """Run the agentic loop until the model returns a content answer.

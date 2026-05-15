@@ -124,13 +124,13 @@ def corpus_overview() -> dict:
     except Exception:
         out["rsync_running"] = None
 
-    # ChromaDB state
+    # ChromaDB state — count() doesn't need an embedder, so don't pay the
+    # CUDA context just to read a number (avoids conflict with an in-flight
+    # reindex that already holds GPU exclusively).
     try:
         import chromadb
-        from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
         client = chromadb.PersistentClient(path=CHROMA_PATH)
-        embed_fn = SentenceTransformerEmbeddingFunction(model_name=EMBEDDER_NAME, device="cuda")
-        col = client.get_collection(COLLECTION_NAME, embedding_function=embed_fn)
+        col = client.get_collection(COLLECTION_NAME)
         out["chromadb_chunks"] = col.count()
     except Exception as e:
         out["chromadb_error"] = str(e)
