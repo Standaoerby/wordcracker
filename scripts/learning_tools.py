@@ -1,0 +1,572 @@
+#!/usr/bin/env python3
+"""
+learning_tools.py — vocabulary-learning tools for the wordcracker agent.
+
+Goal: surface mid-frequency words a reader keeps stumbling over (CEFR B1-C1
+band), enrich them via LLM with translation/POS/etymology/examples, and
+export to Anki/markdown for spaced-repetition study.
+
+Tools exported (loaded by rag_query agent alongside rag_tools):
+  affinity_by_book(pg_id, ...)
+  learning_words(scope, level, ...)
+  enrich_word(word, contexts, target_lang)
+  export_word_list(words, format, out_path)
+
+Cache: /data/spgc/derived/word_dictionary.json — persistent enrich_word
+results keyed by (word, target_lang). Hits are instant on repeat queries.
+"""
+import csv
+import json
+import math
+import os
+import re
+import sys
+import time
+from collections import Counter
+from functools import lru_cache
+from pathlib import Path
+
+import pandas as pd
+import requests
+
+# Reuse path constants from rag_tools to keep one source of truth
+from rag_tools import (
+    SPGC_METADATA, SPGC_COUNTS_DIR, SPGC_TOKENS_DIR,
+    CHROMA_PATH, COLLECTION_NAME, EMBEDDER_NAME,
+    DERIVED_DIR, CORPUS_COUNTS, OLLAMA_HOST,
+    STOPWORDS, _metadata_df, _select_books, _slug,
+    _is_clean_token, _log,
+)
+
+# Spaced-repetition band-pass presets, anchored to corpus_count quantiles
+LEVELS = {
+    "basic":        {"min_corpus": 10000, "max_corpus": None,    "skip_top_n": 0},
+    "intermediate": {"min_corpus": 100,   "max_corpus": 10000,   "skip_top_n": 1000},
+    "advanced":     {"min_corpus": 10,    "max_corpus": 100,     "skip_top_n": 1000},
+    "rare":         {"min_corpus": 2,     "max_corpus": 10,      "skip_top_n": 1000},
+}
+
+WORD_DICT_PATH = DERIVED_DIR / "word_dictionary.json"
+
+
+# ============================ corpus_counts loader (cached) ============================
+@lru_cache(maxsize=1)
+def _corpus_counts() -> dict:
+    """word -> corpus_count, loaded once per process."""
+    out = {}
+    with open(CORPUS_COUNTS, encoding="utf-8") as fh:
+        rd = csv.reader(fh)
+        next(rd)
+        for w, c in rd:
+            try:
+                out[w] = int(c)
+            except ValueError:
+                continue
+    return out
+
+
+@lru_cache(maxsize=1)
+def _corpus_total_tokens() -> int:
+    return sum(_corpus_counts().values())
+
+
+# ============================ word dictionary cache ============================
+def _load_word_dict() -> dict:
+    if WORD_DICT_PATH.exists():
+        try:
+            return json.loads(WORD_DICT_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_word_dict(d: dict) -> None:
+    WORD_DICT_PATH.write_text(json.dumps(d, ensure_ascii=False, indent=2),
+                              encoding="utf-8")
+
+
+# ============================ TOOL: affinity_by_book ============================
+def affinity_by_book(pg_id: str, top: int = 50,
+                     min_author_count: int = 3) -> dict:
+    """Affinity for a single book vs the global corpus."""
+    t0 = time.perf_counter()
+    pg_id = pg_id.upper() if not pg_id.startswith("PG") else pg_id
+    if not pg_id.startswith("PG"):
+        pg_id = f"PG{pg_id}"
+    try:
+        f = SPGC_COUNTS_DIR / f"{pg_id}_counts.txt"
+        if not f.exists():
+            return {"error": "counts file not found for this PG id", "pg_id": pg_id}
+
+        df = _metadata_df()
+        row = df[df["id"] == pg_id]
+        title  = row.iloc[0]["title"]  if len(row) else ""
+        author = row.iloc[0]["author"] if len(row) else ""
+
+        book = Counter()
+        book_tokens = 0
+        with open(f, encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) != 2:
+                    continue
+                w, c = parts[0], int(parts[1])
+                book[w] = c
+                book_tokens += c
+
+        corpus = _corpus_counts()
+        corpus_total = _corpus_total_tokens()
+
+        rows = []
+        for w, bc in book.items():
+            if bc < min_author_count:
+                continue
+            cc = corpus.get(w, 0)
+            if cc == 0:
+                affinity = None
+            else:
+                affinity = (bc / book_tokens) / (cc / corpus_total)
+            rows.append({"word": w, "book_count": bc, "corpus_count": cc,
+                         "affinity": round(affinity, 2) if affinity else None})
+        rows.sort(key=lambda r: (r["affinity"] is None, -(r["affinity"] or 0)))
+        out = {"pg_id": pg_id, "title": title, "author": author,
+               "book_tokens": book_tokens, "book_vocab": len(book),
+               "top": rows[:top]}
+        _log(f"affinity_by_book({pg_id}) done in {time.perf_counter()-t0:.2f}s")
+        return out
+    except Exception as e:
+        return {"error": "affinity_by_book failed", "details": str(e)}
+
+
+# ============================ TOOL: learning_words ============================
+def _score(book_count: int, corpus_count: int, scope_tokens: int) -> float:
+    """Composite ranking: log(corpus_count) * affinity. Damps proper-noun spikes."""
+    if corpus_count <= 0 or scope_tokens <= 0:
+        return 0.0
+    corpus_total = _corpus_total_tokens() or 1
+    affinity = (book_count / scope_tokens) / (corpus_count / corpus_total)
+    return math.log10(corpus_count) * math.log10(1 + affinity)
+
+
+def _lemmatize_words(words: list[str]) -> dict:
+    """Word -> (lemma, pos). spaCy is loaded once per call."""
+    try:
+        import spacy
+        nlp = spacy.load("en_core_web_sm", disable=["ner", "parser"])
+    except Exception as e:
+        _log(f"spacy load failed: {e}")
+        return {w: (w, "") for w in words}
+    out = {}
+    for w in words:
+        doc = nlp(w)
+        if not len(doc):
+            out[w] = (w, "")
+        else:
+            out[w] = (doc[0].lemma_, doc[0].pos_)
+    return out
+
+
+def learning_words(
+    scope: dict | str,
+    level: str = "intermediate",
+    top: int = 50,
+    lemmatize: bool = True,
+    pos_filter: list[str] | None = None,
+    min_corpus_ratio: float = 2.5,
+) -> dict:
+    """Words a reader would actually want to study from a given scope.
+
+    scope: {"book": "PG1342"}  |  {"author": "^Doyle,"}  |  "all_corpus"
+    level: "basic" | "intermediate" | "advanced" | "rare"
+    pos_filter: e.g. ["NOUN", "VERB", "ADJ"]; None = no POS filter
+
+    Returns ranked candidates with corpus_count, scope_count, affinity, score,
+    plus lemma/POS hint if lemmatize=True. Result is what enrich_word should
+    consume next.
+    """
+    t0 = time.perf_counter()
+    if level not in LEVELS:
+        return {"error": f"unknown level {level!r}", "available": list(LEVELS)}
+    band = LEVELS[level]
+    pos_filter = [p.upper() for p in (pos_filter or [])]
+
+    # ---- aggregate scope_counts depending on scope type ----
+    scope_counts: Counter = Counter()
+    scope_tokens = 0
+    scope_label = ""
+    try:
+        if isinstance(scope, str) and scope == "all_corpus":
+            corpus = _corpus_counts()
+            scope_counts = Counter(corpus)
+            scope_tokens = _corpus_total_tokens()
+            scope_label = "all_corpus"
+        elif isinstance(scope, dict) and scope.get("book"):
+            pg_id = scope["book"]
+            if not pg_id.startswith("PG"):
+                pg_id = f"PG{pg_id}"
+            f = SPGC_COUNTS_DIR / f"{pg_id}_counts.txt"
+            if not f.exists():
+                return {"error": "counts file not found", "pg_id": pg_id}
+            with open(f, encoding="utf-8") as fh:
+                for line in fh:
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) != 2:
+                        continue
+                    w, c = parts[0], int(parts[1])
+                    scope_counts[w] = c
+                    scope_tokens += c
+            scope_label = f"book:{pg_id}"
+        elif isinstance(scope, dict) and scope.get("author"):
+            sel = _select_books(scope["author"])
+            if not len(sel):
+                return {"error": "no books matched", "author_regex": scope["author"]}
+            for pg in sel["id"]:
+                f = SPGC_COUNTS_DIR / f"{pg}_counts.txt"
+                if not f.exists():
+                    continue
+                with open(f, encoding="utf-8") as fh:
+                    for line in fh:
+                        parts = line.rstrip("\n").split("\t")
+                        if len(parts) != 2:
+                            continue
+                        w, c = parts[0], int(parts[1])
+                        scope_counts[w] += c
+                        scope_tokens += c
+            scope_label = f"author:{scope['author']}"
+        else:
+            return {"error": "bad scope; use {'book': PGid} or {'author': regex} or 'all_corpus'"}
+    except Exception as e:
+        return {"error": "scope aggregation failed", "details": str(e)}
+
+    if not scope_tokens:
+        return {"error": "scope has no tokens", "scope": scope_label}
+
+    # ---- which books to scan for example contexts ----
+    if isinstance(scope, dict) and scope.get("book"):
+        pg_id = scope["book"]
+        if not pg_id.startswith("PG"):
+            pg_id = f"PG{pg_id}"
+        context_book_ids = [pg_id]
+    elif isinstance(scope, dict) and scope.get("author"):
+        sel = _select_books(scope["author"])
+        context_book_ids = list(sel["id"])
+    else:
+        context_book_ids = []
+
+    # ---- band-pass filter + ranking ----
+    corpus = _corpus_counts()
+    # the top-N basic words to skip
+    skip_top_n = band["skip_top_n"]
+    basic_set: set[str] = set()
+    if skip_top_n:
+        # cheap top-N: read pre-sorted CSV header row order
+        with open(CORPUS_COUNTS, encoding="utf-8") as fh:
+            rd = csv.reader(fh); next(rd)
+            for i, (w, _c) in enumerate(rd):
+                if i >= skip_top_n:
+                    break
+                basic_set.add(w)
+
+    cmin = band["min_corpus"]
+    cmax = band["max_corpus"] or 10**12
+
+    # learn from past enrich_word verdicts — anything already tagged as a proper
+    # noun in the dictionary cache is poison for vocabulary study
+    known_proper: set[str] = set()
+    cache = _load_word_dict()
+    for key, info in cache.items():
+        if info.get("proper_noun"):
+            known_proper.add(key.split("|", 1)[0])
+
+    candidates = []
+    for w, sc in scope_counts.items():
+        if sc < 3 or len(w) < 3:
+            continue
+        if w in STOPWORDS or w in basic_set or w in known_proper:
+            continue
+        if not _is_clean_token(w):
+            continue
+        cc = corpus.get(w, 0)
+        if cc < cmin or cc > cmax:
+            continue
+        # heuristic: words whose corpus_count is close to scope_count are
+        # author-unique → almost always proper nouns we don't want for study
+        if cc < min_corpus_ratio * sc:
+            continue
+        candidates.append((w, sc, cc, _score(sc, cc, scope_tokens)))
+
+    candidates.sort(key=lambda r: r[3], reverse=True)
+    candidates = candidates[: top * 2 if lemmatize else top]  # extra room before POS filter
+
+    # ---- optional lemmatize + POS filter ----
+    if lemmatize and candidates:
+        words = [c[0] for c in candidates]
+        lem = _lemmatize_words(words)
+        filtered = []
+        seen_lemmas: set[str] = set()
+        for w, sc, cc, scr in candidates:
+            lemma, pos = lem.get(w, (w, ""))
+            if pos_filter and pos not in pos_filter:
+                continue
+            if lemma in seen_lemmas:
+                continue
+            seen_lemmas.add(lemma)
+            filtered.append((w, sc, cc, scr, lemma, pos))
+        candidates_out = filtered[:top]
+        rows = [{"word": w, "lemma": lemma, "pos": pos,
+                 "scope_count": sc, "corpus_count": cc,
+                 "affinity": round((sc / scope_tokens) / (cc / _corpus_total_tokens()), 2),
+                 "score": round(scr, 3)}
+                for w, sc, cc, scr, lemma, pos in candidates_out]
+    else:
+        rows = [{"word": w, "lemma": w, "pos": "",
+                 "scope_count": sc, "corpus_count": cc,
+                 "affinity": round((sc / scope_tokens) / (cc / _corpus_total_tokens()), 2),
+                 "score": round(scr, 3)}
+                for w, sc, cc, scr in candidates[:top]]
+
+    # ---- attach example contexts so enrich_word / LLM see how the word is used ----
+    if context_book_ids and rows:
+        target_words = {r["word"] for r in rows}
+        word_ctx: dict[str, str] = {}
+        for pg_id in context_book_ids:
+            if not target_words:
+                break
+            f = SPGC_TOKENS_DIR / f"{pg_id}_tokens.txt"
+            if not f.exists():
+                continue
+            with open(f, encoding="utf-8") as fh:
+                toks = [t.strip() for t in fh if t.strip()]
+            for i, t in enumerate(toks):
+                tl = t.lower()
+                if tl in target_words and tl not in word_ctx:
+                    lo, hi = max(0, i - 8), min(len(toks), i + 9)
+                    word_ctx[tl] = " ".join(toks[lo:i] + [f"[{tl.upper()}]"] + toks[i+1:hi])
+                    target_words.discard(tl)
+        for r in rows:
+            r["example_context"] = word_ctx.get(r["word"], "")
+
+    out = {
+        "scope": scope_label, "level": level,
+        "band": {"min_corpus": cmin, "max_corpus": band["max_corpus"], "skip_top_n": skip_top_n},
+        "scope_tokens": scope_tokens, "scope_vocab": len(scope_counts),
+        "lemmatize": lemmatize, "pos_filter": pos_filter,
+        "results": rows,
+    }
+    _log(f"learning_words({scope_label}, {level}) done in {time.perf_counter()-t0:.2f}s, "
+         f"{len(rows)} returned")
+    return out
+
+
+# ============================ TOOL: enrich_word ============================
+ENRICH_PROMPT = """You are a literary vocabulary tutor. The user is reading
+English literature and needs to learn a mid-frequency word.
+
+Word: {word}
+Lemma hint: {lemma}
+POS hint: {pos}
+Sample contexts from the book (lowercased, no punctuation):
+{contexts}
+
+Return JSON ONLY, no other text. Keys:
+- "proper_noun": true if this is a character / place name (skip it), else false
+- "lemma": canonical base form
+- "pos": part of speech (noun/verb/adj/adv/...)
+- "translation_{target_lang}": short translation (1-3 words)
+- "definition_en": one-sentence simple English definition (10-15 words)
+- "example_sentence": one short example sentence using the word
+- "etymology": short etymology hint (1 sentence, ok if approximate)
+- "cefr_estimate": "A2"/"B1"/"B2"/"C1"/"C2"
+"""
+
+
+def enrich_word(word: str, contexts: list[str] | None = None,
+                target_lang: str = "ru", lemma_hint: str = "",
+                pos_hint: str = "", force_refresh: bool = False) -> dict:
+    """LLM-enrich a single word. Result cached on disk by (word, target_lang)."""
+    t0 = time.perf_counter()
+    key = f"{word.lower()}|{target_lang}"
+    cache = _load_word_dict()
+    if not force_refresh and key in cache:
+        cached = cache[key]
+        cached["_cached"] = True
+        cached["_lookup_ms"] = round((time.perf_counter()-t0)*1000, 1)
+        return cached
+
+    ctx_block = "\n".join(f"- {c}" for c in (contexts or [])[:3]) or "(no contexts provided)"
+    prompt = ENRICH_PROMPT.format(
+        word=word, lemma=lemma_hint or word, pos=pos_hint or "?",
+        contexts=ctx_block, target_lang=target_lang,
+    )
+    payload = {
+        "model": "qwen3:14b", "prompt": prompt, "stream": False,
+        "keep_alive": "5m", "format": "json",
+        "options": {"temperature": 0.2}, "think": False,
+    }
+    try:
+        resp = requests.post(f"{OLLAMA_HOST}/api/generate", json=payload, timeout=90)
+        resp.raise_for_status()
+        raw = resp.json().get("response", "").strip()
+        # Qwen sometimes wraps json in ```; strip
+        if raw.startswith("```"):
+            raw = raw.strip("`")
+            if raw.startswith("json"):
+                raw = raw[4:]
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        return {"error": "LLM returned invalid JSON", "raw": raw[:300], "details": str(e)}
+    except Exception as e:
+        return {"error": "enrich_word failed", "details": str(e)}
+
+    parsed["_cached"] = False
+    parsed["_lookup_ms"] = round((time.perf_counter()-t0)*1000, 1)
+
+    # persist
+    cache[key] = {k: v for k, v in parsed.items() if not k.startswith("_")}
+    _save_word_dict(cache)
+    _log(f"enrich_word({word}) done in {time.perf_counter()-t0:.2f}s")
+    return parsed
+
+
+# ============================ TOOL: export_word_list ============================
+def export_word_list(words: list[dict] | list[str], format: str = "anki_csv",
+                     out_path: str | None = None,
+                     target_lang: str = "ru") -> dict:
+    """Export words to Anki CSV / markdown / plain JSON. Auto-enriches missing entries from cache."""
+    t0 = time.perf_counter()
+    if format not in ("anki_csv", "markdown", "json"):
+        return {"error": "format must be anki_csv / markdown / json"}
+
+    # accept either list of strings or list of dicts (from learning_words.results)
+    normalized = []
+    for w in words:
+        if isinstance(w, str):
+            normalized.append({"word": w})
+        elif isinstance(w, dict):
+            normalized.append(w)
+    cache = _load_word_dict()
+
+    enriched = []
+    for w in normalized:
+        word = w.get("word") or w.get("lemma") or ""
+        if not word:
+            continue
+        key = f"{word.lower()}|{target_lang}"
+        info = cache.get(key, {})
+        if info.get("proper_noun"):
+            continue
+        enriched.append({**w, **info})
+
+    out_path = out_path or str(DERIVED_DIR / f"export_{int(time.time())}.{('csv' if format=='anki_csv' else format[:2])}")
+
+    if format == "anki_csv":
+        with open(out_path, "w", encoding="utf-8", newline="") as fh:
+            w = csv.writer(fh, delimiter="\t")
+            w.writerow(["front", "back", "tags"])
+            for r in enriched:
+                front = r.get("word", "")
+                back_lines = [
+                    f"<b>{r.get('translation_'+target_lang,'')}</b>",
+                    f"<i>{r.get('pos','')}</i> · {r.get('cefr_estimate','')}",
+                    f"{r.get('definition_en','')}",
+                    f"<small>{r.get('example_sentence','')}</small>",
+                    f"<small>etym: {r.get('etymology','')}</small>",
+                ]
+                back = "<br>".join(s for s in back_lines if s.strip("<>/biemall, "))
+                tags = " ".join(["wordcracker", r.get("pos","").lower(), r.get("cefr_estimate","").lower()]).strip()
+                w.writerow([front, back, tags])
+    elif format == "markdown":
+        with open(out_path, "w", encoding="utf-8") as fh:
+            fh.write("# Vocabulary export\n\n")
+            for r in enriched:
+                fh.write(f"## {r.get('word','')}\n")
+                fh.write(f"- **lemma**: {r.get('lemma','')}  · **POS**: {r.get('pos','')}  · **CEFR**: {r.get('cefr_estimate','')}\n")
+                fh.write(f"- **translation ({target_lang})**: {r.get('translation_'+target_lang,'')}\n")
+                fh.write(f"- **definition**: {r.get('definition_en','')}\n")
+                fh.write(f"- **example**: *{r.get('example_sentence','')}*\n")
+                fh.write(f"- **etymology**: {r.get('etymology','')}\n\n")
+    else:
+        with open(out_path, "w", encoding="utf-8") as fh:
+            json.dump(enriched, fh, ensure_ascii=False, indent=2)
+
+    _log(f"export_word_list -> {out_path} ({len(enriched)} entries) in {time.perf_counter()-t0:.2f}s")
+    return {"out_path": out_path, "format": format, "entries": len(enriched),
+            "skipped_proper_nouns": len(normalized) - len(enriched)}
+
+
+# ============================ Ollama tool schemas ============================
+LEARNING_TOOLS_SPEC = [
+    {"type": "function", "function": {
+        "name": "affinity_by_book",
+        "description": (
+            "Фирменные слова конкретной книги (vs корпус). "
+            "Используй для «топ слов из книги X», «характерные слова конкретного произведения». "
+            "Принимает PG id (например PG1342 — Pride and Prejudice)."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "pg_id": {"type": "string", "description": "PG id (с префиксом PG или без)"},
+            "top": {"type": "integer", "description": "сколько вернуть (default 50)"},
+            "min_author_count": {"type": "integer", "description": "минимум встреч в книге (default 3)"},
+        }, "required": ["pg_id"]},
+    }},
+    {"type": "function", "function": {
+        "name": "learning_words",
+        "description": (
+            "Слова уровня B1-C1 для изучения из заданного источника (книги, автора или всего корпуса). "
+            "Band-pass фильтр по частоте + лемматизация + POS-фильтр. "
+            "Используй для «дай 100 слов из книги Х для изучения», «какие слова стоит выучить из Doyle». "
+            "Параметр level: basic (>=10k частота), intermediate (100-10000, дефолт), advanced (10-100), rare (<10)."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "scope": {"type": "object", "description": "{'book': 'PG1342'} или {'author': '^Doyle,'} или строка 'all_corpus'"},
+            "level": {"type": "string", "enum": ["basic","intermediate","advanced","rare"]},
+            "top": {"type": "integer", "description": "сколько слов (default 50)"},
+            "lemmatize": {"type": "boolean", "description": "объединить формы (default true)"},
+            "pos_filter": {"type": "array", "items": {"type": "string"}, "description": "напр. ['NOUN','VERB','ADJ']"},
+        }, "required": ["scope"]},
+    }},
+    {"type": "function", "function": {
+        "name": "enrich_word",
+        "description": (
+            "LLM-обогащение одного слова: перевод, POS, определение, пример, этимология, CEFR. "
+            "Кеш на диске — повторные вызовы мгновенные. "
+            "Используй после learning_words для деталей по конкретному слову, или напрямую: «что значит слово ajar в литературе»."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "word": {"type": "string"},
+            "contexts": {"type": "array", "items": {"type": "string"}, "description": "до 3 sample фрагментов из книги"},
+            "target_lang": {"type": "string", "description": "default 'ru'"},
+            "lemma_hint": {"type": "string"},
+            "pos_hint": {"type": "string"},
+        }, "required": ["word"]},
+    }},
+    {"type": "function", "function": {
+        "name": "export_word_list",
+        "description": (
+            "Экспорт списка слов в Anki CSV / Markdown / JSON. "
+            "Тянет данные из word_dictionary cache (запусти enrich_word на каждом слове предварительно). "
+            "Используй для «экспортируй слова в Anki», «сохрани список для повторения»."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "words": {"type": "array", "items": {"type": "object"}, "description": "список слов (можно результат learning_words.results напрямую)"},
+            "format": {"type": "string", "enum": ["anki_csv","markdown","json"]},
+            "out_path": {"type": "string"},
+            "target_lang": {"type": "string", "description": "default 'ru'"},
+        }, "required": ["words"]},
+    }},
+]
+
+LEARNING_TOOL_DISPATCH = {
+    "affinity_by_book":  affinity_by_book,
+    "learning_words":    learning_words,
+    "enrich_word":       enrich_word,
+    "export_word_list":  export_word_list,
+}
+
+
+if __name__ == "__main__":
+    print("Learning tools:")
+    for name in LEARNING_TOOL_DISPATCH:
+        print(f"  - {name}")
+    print()
+    print("Levels:", list(LEVELS))
