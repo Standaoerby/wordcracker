@@ -1,0 +1,28 @@
+# /etc/cloudflared/config.yml
+#
+# Single tunnel handing two hostnames to local nginx (127.0.0.1:8080),
+# nginx then routes by Host: header. Basic Auth + TLS termination are
+# handled by Cloudflare edge + nginx — cloudflared itself is dumb plumbing.
+#
+# Install steps (after `cloudflared` is on PATH):
+#   cloudflared tunnel login              # opens browser, picks the CF zone
+#   cloudflared tunnel create wordcracker
+#   # copy the UUID it prints into `tunnel:` below, and the JSON cred path
+#   # into `credentials-file:`
+#   sudo cp cloudflared_config.yml /etc/cloudflared/config.yml
+#   sudo cloudflared service install      # installs systemd unit
+#   # DNS records (one for each hostname):
+#   cloudflared tunnel route dns wordcracker slovoeb.net
+#   cloudflared tunnel route dns wordcracker status.slovoeb.net
+#   sudo systemctl restart cloudflared
+
+tunnel:           REPLACE_WITH_TUNNEL_UUID
+credentials-file: /home/claude/.cloudflared/REPLACE_WITH_TUNNEL_UUID.json
+
+ingress:
+  - hostname: slovoeb.net
+    service:  http://127.0.0.1:8080
+  - hostname: status.slovoeb.net
+    service:  http://127.0.0.1:8080
+  # catch-all (required by cloudflared)
+  - service:  http_status:404
