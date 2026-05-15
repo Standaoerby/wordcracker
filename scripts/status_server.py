@@ -27,6 +27,7 @@ DERIVED = Path("/data/spgc/derived")
 TOKENS_DIR = Path("/data/spgc/SPGC-tokens-2018-07-18")
 COUNTS_DIR = Path("/data/spgc/SPGC-counts-2018-07-18")
 METADATA_CSV = Path("/data/spgc/SPGC-metadata-2018-07-18.csv")
+RAW_TEXT = Path("/data/raw_text")
 WODEHOUSE_RAW = Path("/data/wodehouse_raw")
 GUTENBERG_RAW = Path("/data/gutenberg_raw")
 
@@ -90,11 +91,12 @@ def collect_status():
     except Exception:
         pass
 
+    # consolidated raw text directory (hard-linked from sources)
+    raw_files = count_files(RAW_TEXT, "*.txt")
+    raw_bytes = dir_size_bytes(RAW_TEXT) if RAW_TEXT.exists() else 0
+    # sources for provenance
     gb_raw_files = count_files(GUTENBERG_RAW, "**/*-0.txt") if GUTENBERG_RAW.exists() else 0
-    gb_raw_bytes = dir_size_bytes(GUTENBERG_RAW) if GUTENBERG_RAW.exists() else 0
-
     wd_raw_files = count_files(WODEHOUSE_RAW, "*.txt")
-    wd_raw_bytes = dir_size_bytes(WODEHOUSE_RAW)
 
     # author affinities present
     affinities = []
@@ -143,10 +145,10 @@ def collect_status():
         "ner_filter": ner_meta or {},
         "authors_analyzed": affinities,
         "raw_text": {
-            "wodehouse_files": wd_raw_files,
-            "wodehouse_bytes": wd_raw_bytes,
-            "gutenberg_mirror_files": gb_raw_files,
-            "gutenberg_mirror_bytes": gb_raw_bytes,
+            "books": raw_files,
+            "bytes": raw_bytes,
+            "source_per_author":  wd_raw_files,
+            "source_rsync_mirror": gb_raw_files,
             "rsync_running": rsync_alive,
         },
         "contexts_files": contexts,
@@ -203,10 +205,11 @@ def render_html(s: dict) -> str:
         ("Clean rows",          human_int(ner.get("clean_rows"))),
     ], accent="#f5a623")
 
-    raw_card = card("Raw text on disk", [
-        ("Wodehouse books (per-author DL)", f"{raw['wodehouse_files']} ({human_bytes(raw['wodehouse_bytes'])})"),
-        ("Gutenberg mirror (rsync)",        f"{raw['gutenberg_mirror_files']} ({human_bytes(raw['gutenberg_mirror_bytes'])})"),
-        ("Rsync still running",             "yes" if raw["rsync_running"] else "no"),
+    raw_card = card("Raw text on disk (unified)", [
+        ("Total unique books",             f"{human_int(raw['books'])} ({human_bytes(raw['bytes'])})"),
+        ("Source: per-author downloads",   human_int(raw["source_per_author"])),
+        ("Source: rsync mirror",           human_int(raw["source_rsync_mirror"])),
+        ("Rsync still running",            "yes" if raw["rsync_running"] else "no"),
     ], accent="#bd10e0")
 
     sys_card = card("System", [
