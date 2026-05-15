@@ -184,9 +184,9 @@ def corpus_overview() -> dict:
     except Exception:
         pass
 
-    # gap — books in raw_text that aren't yet in chromadb (since reindex is per-book)
-    # heuristic only — we'd need to query ids to be exact; here we estimate from chunks
-    if out.get("raw_books_available") and out.get("chromadb_chunks"):
+    # gap — only meaningful when we have an integer chunk count (not the
+    # "indexing in progress" placeholder)
+    if isinstance(out.get("chromadb_chunks"), int) and out.get("raw_books_available"):
         approx_indexed_books = max(1, out["chromadb_chunks"] // 125)  # ~125 chunks/book avg
         out["index_gap_approx"] = max(0, out["raw_books_available"] - approx_indexed_books)
 
