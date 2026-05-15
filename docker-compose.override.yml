@@ -15,10 +15,10 @@ services:
               capabilities: [gpu]
     restart: unless-stopped
     healthcheck:
-      # GPU lost? nvidia-smi inside the container will fail to init NVML.
-      # API down? /api/tags returns non-2xx. ollama_gpu_watcher.sh on the host
-      # acts on unhealthy → docker compose recreate.
-      test: ["CMD-SHELL", "nvidia-smi -L >/dev/null 2>&1 && wget -qO- http://localhost:11434/api/tags >/dev/null 2>&1"]
+      # `ollama list` is built into the binary, hits the local API, and fails
+      # if either GPU or API is degraded. wget/curl are NOT in the ollama
+      # minimal image, so don't reach for them here.
+      test: ["CMD-SHELL", "nvidia-smi -L >/dev/null 2>&1 && ollama list >/dev/null 2>&1"]
       interval: 60s
       timeout: 10s
       retries: 2
