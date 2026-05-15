@@ -23,7 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rag_query import ask, SYSTEM_PROMPT, ASSISTANT_NAME
+from rag_query import ask, ask_stream, SYSTEM_PROMPT, ASSISTANT_NAME
 from rag_tools import TOOLS_SPEC
 
 PAGE = r"""<!doctype html>
@@ -53,6 +53,20 @@ PAGE = r"""<!doctype html>
   details.trace summary { cursor:pointer; user-select:none; }
   details.trace pre { background:#1a1d22; padding:8px; border-radius:4px;
                       overflow-x:auto; font-size:11px; max-height:200px; }
+  .live-status { color:#888; font-size:13px; padding:6px 0; }
+  .live-status .row { display:flex; gap:8px; align-items:baseline; margin-bottom:4px;
+                      font-family:ui-monospace,monospace; font-size:12px; }
+  .live-status .row .ico { width:18px; }
+  .live-status .row.run    .ico::after { content:"⏳"; animation:spin 1.5s linear infinite; display:inline-block; }
+  .live-status .row.ok     .ico::after { content:"✅"; }
+  .live-status .row.fail   .ico::after { content:"❌"; }
+  .live-status .row .args  { color:#666; }
+  .live-status .row .ms    { margin-left:auto; color:#7ed321; font-variant-numeric:tabular-nums; }
+  .live-status .iter       { color:#50e3c2; font-size:11px; margin-top:6px; }
+  .live-status .think      { color:#50e3c2; }
+  .live-status .think::after { content:"…"; animation:dots 1.2s steps(4) infinite; }
+  @keyframes dots { 0% { content:""; } 25% { content:"."; } 50% { content:".."; } 75% { content:"..."; } }
+  @keyframes spin { to { transform: rotate(360deg); } }
   table { border-collapse:collapse; margin:8px 0; }
   th, td { border:1px solid #3a3f48; padding:4px 10px; text-align:left; }
   th { background:#2f343c; }
@@ -149,22 +163,124 @@ async function submit(text) {
 
   send.disabled = true;
   send.textContent = '…';
+
+  // create a live-status block we update as SSE events arrive
+  const live = document.createElement('div');
+  live.className = 'msg assistant';
+  const status = document.createElement('div');
+  status.className = 'live-status';
+  status.innerHTML = '<div class=think>думаю</div>';
+  live.appendChild(status);
+  log.appendChild(live);
+  log.scrollTop = log.scrollHeight;
+
+  const t0 = Date.now();
+  const timer = setInterval(() => {
+    const el = status.querySelector('.think');
+    if (el) el.textContent = 'думаю (' + ((Date.now()-t0)/1000).toFixed(1) + 's)';
+  }, 200);
+
+  const toolRows = {};   // name → row element (last-pending)
+  const tools = [];
+
   try {
-    const r = await fetch('/api/chat', {
+    const r = await fetch('/api/chat/stream', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({question: text, history: history.slice(0, -1)}),
     });
-    const data = await r.json();
-    if (data.error) {
-      renderError(data.error);
-    } else {
-      history.push({role: 'assistant', content: data.answer});
-      saveHistory(history);
-      render('assistant', data.answer, data);
+    if (!r.ok || !r.body) throw new Error('HTTP ' + r.status);
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let answerText = '';
+    let final;
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, {stream:true});
+      // SSE messages: lines of "data: <json>\n\n"
+      let idx;
+      while ((idx = buffer.indexOf('\n\n')) !== -1) {
+        const raw = buffer.slice(0, idx); buffer = buffer.slice(idx+2);
+        const line = raw.startsWith('data: ') ? raw.slice(6) : raw;
+        let ev; try { ev = JSON.parse(line); } catch { continue; }
+        switch (ev.event) {
+          case 'start':
+            status.querySelector('.think').textContent = 'думаю';
+            break;
+          case 'iter': {
+            const row = document.createElement('div');
+            row.className = 'iter';
+            row.textContent = '— iteration ' + ev.n + ' —';
+            status.appendChild(row);
+            break;
+          }
+          case 'tool_call': {
+            const row = document.createElement('div');
+            row.className = 'row run';
+            row.innerHTML = '<span class=ico></span><b></b><span class=args></span>';
+            row.querySelector('b').textContent = ev.name;
+            row.querySelector('.args').textContent =
+              ' ' + JSON.stringify(ev.args).slice(0, 80);
+            status.appendChild(row);
+            toolRows[ev.name] = row;
+            tools.push({name: ev.name, args: ev.args});
+            break;
+          }
+          case 'tool_result': {
+            const row = toolRows[ev.name];
+            if (row) {
+              row.classList.remove('run');
+              row.classList.add('ok');
+              const ms = document.createElement('span'); ms.className = 'ms';
+              ms.textContent = ev.ms + ' ms';
+              row.appendChild(ms);
+            }
+            tools[tools.length-1].result_summary = ev.summary;
+            break;
+          }
+          case 'answer':
+            answerText = ev.text;
+            break;
+          case 'done':
+            final = ev;
+            break;
+          case 'error':
+            renderError(ev.message);
+            return;
+        }
+      }
     }
+
+    // upgrade the live block to the proper assistant bubble
+    clearInterval(timer);
+    live.innerHTML = marked.parse(answerText || '');
+    if (final) {
+      const meta = document.createElement('div');
+      meta.className = 'meta-row';
+      meta.textContent = `${final.iterations} iter · ${final.elapsed_sec}s · ${final.tool_calls.length} call(s)`;
+      live.appendChild(meta);
+      if (final.tool_calls.length) {
+        const det = document.createElement('details');
+        det.className = 'trace';
+        det.innerHTML = '<summary>tool trace</summary>';
+        const pre = document.createElement('pre');
+        pre.textContent = final.tool_calls.map(tc =>
+          `· ${tc.name}(${JSON.stringify(tc.args)})\n  → ${tc.result_summary}`
+        ).join('\n\n');
+        det.appendChild(pre);
+        live.appendChild(det);
+      }
+    }
+    history.push({role: 'assistant', content: answerText});
+    saveHistory(history);
+    log.scrollTop = log.scrollHeight;
   } catch (e) {
-    renderError('Network error: ' + e.message);
+    clearInterval(timer);
+    live.remove();
+    renderError('Stream error: ' + e.message);
   } finally {
     send.disabled = false;
     send.textContent = 'send';
@@ -220,7 +336,44 @@ class Handler(BaseHTTPRequestHandler):
         page = PAGE.replace("__ASSISTANT_NAME__", ASSISTANT_NAME)
         return self._send(200, page, "text/html; charset=utf-8")
 
+    def _stream_chat(self, payload):
+        """SSE endpoint — pump ask_stream events to the client."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Accel-Buffering", "no")  # disable nginx buffering
+        self.end_headers()
+
+        question = (payload.get("question") or "").strip()
+        history = payload.get("history") or []
+        if not isinstance(history, list):
+            history = []
+        if not question:
+            self.wfile.write(b'data: {"event":"error","message":"empty question"}\n\n')
+            return
+        try:
+            for ev in ask_stream(question, history=history):
+                line = "data: " + json.dumps(ev, ensure_ascii=False, default=str) + "\n\n"
+                self.wfile.write(line.encode("utf-8"))
+                try:
+                    self.wfile.flush()
+                except Exception:
+                    return  # client gone
+        except Exception as e:
+            try:
+                self.wfile.write(
+                    f'data: {{"event":"error","message":"server: {e}"}}\n\n'.encode("utf-8"))
+            except Exception:
+                pass
+
     def do_POST(self):
+        if self.path == "/api/chat/stream":
+            length = int(self.headers.get("Content-Length", "0"))
+            try:
+                payload = json.loads(self.rfile.read(length))
+            except Exception:
+                return self._send(400, b'{"error":"bad json"}', "application/json")
+            return self._stream_chat(payload)
         if self.path != "/api/chat":
             return self._send(404, b"not found", "text/plain")
         length = int(self.headers.get("Content-Length", "0"))

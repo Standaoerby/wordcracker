@@ -249,6 +249,87 @@ def ask(
     }
 
 
+def ask_stream(
+    question: str,
+    history: list[dict] | None = None,
+    model: str = DEFAULT_MODEL,
+    ollama_host: str = DEFAULT_OLLAMA_HOST,
+    max_iterations: int = DEFAULT_MAX_ITER,
+    temperature: float = DEFAULT_TEMPERATURE,
+    keep_alive: int | str = DEFAULT_KEEP_ALIVE,
+):
+    """Generator version of ask() — yields dict events for SSE streaming.
+
+    Event shapes:
+      {"event": "start"}
+      {"event": "iter", "n": int}
+      {"event": "tool_call",   "name": str, "args": dict}
+      {"event": "tool_result", "name": str, "ms": int, "summary": str}
+      {"event": "answer",      "text": str}                  # final content
+      {"event": "done",        "tool_calls": [...], "iterations": int, "elapsed_sec": float}
+      {"event": "error",       "message": str}
+    """
+    t_start = time.perf_counter()
+    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if history:
+        for m in history[-20:]:
+            if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str):
+                messages.append({"role": m["role"], "content": m["content"]})
+    messages.append({"role": "user", "content": question})
+    tool_trace: list[dict] = []
+    yield {"event": "start"}
+
+    for iteration in range(1, max_iterations + 1):
+        yield {"event": "iter", "n": iteration}
+        try:
+            data = _call_chat(messages, model, ollama_host, temperature, keep_alive)
+        except requests.exceptions.RequestException as e:
+            yield {"event": "error", "message": f"Ollama request failed: {e}"}
+            return
+
+        msg = data.get("message", {}) or {}
+        tool_calls = msg.get("tool_calls") or []
+        content = (msg.get("content") or "").strip()
+        messages.append({
+            "role": "assistant",
+            "content": content,
+            **({"tool_calls": tool_calls} if tool_calls else {}),
+        })
+
+        if not tool_calls:
+            elapsed = round(time.perf_counter() - t_start, 2)
+            yield {"event": "answer", "text": content}
+            yield {"event": "done", "tool_calls": tool_trace,
+                   "iterations": iteration, "elapsed_sec": elapsed}
+            return
+
+        for tc in tool_calls:
+            fn_call = tc.get("function") or {}
+            name    = fn_call.get("name", "")
+            raw_args = fn_call.get("arguments", {})
+            if isinstance(raw_args, str):
+                try:
+                    args = json.loads(raw_args)
+                except json.JSONDecodeError:
+                    args = {}
+            else:
+                args = raw_args or {}
+            yield {"event": "tool_call", "name": name, "args": args}
+
+            t_tool = time.perf_counter()
+            result = _execute_tool(name, args)
+            ms = int((time.perf_counter() - t_tool) * 1000)
+            summary = _truncate_for_summary(result, 240)
+            tool_trace.append({"name": name, "args": args, "result_summary": summary})
+            yield {"event": "tool_result", "name": name, "ms": ms, "summary": summary}
+            messages.append({"role": "tool",
+                             "content": json.dumps(result, ensure_ascii=False, default=str)})
+
+    yield {"event": "answer", "text": content or "[max_iterations exhausted]"}
+    yield {"event": "done", "tool_calls": tool_trace, "iterations": max_iterations,
+           "elapsed_sec": round(time.perf_counter() - t_start, 2)}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("question")
