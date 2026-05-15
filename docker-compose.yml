@@ -6,6 +6,7 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8888:8888"
+      - "8890:8890"
     volumes:
       - ./notebooks:/workspace/notebooks
       - ./scripts:/workspace/scripts
