@@ -184,6 +184,42 @@ def collect_status():
         except Exception:
             pass
 
+    # ollama — alive? GPU? loaded models? VRAM in use by qwen3?
+    ollama: dict = {"up": False, "gpu": False, "models_loaded": [], "error": None}
+    try:
+        proc = subprocess.run(
+            ["docker", "exec", "ollama", "nvidia-smi", "-L"],
+            capture_output=True, text=True, timeout=5,
+        )
+        ollama["gpu"] = (proc.returncode == 0)
+        ollama["gpu_line"] = (proc.stdout.strip().splitlines() or [""])[0][:120]
+    except Exception as e:
+        ollama["error"] = f"nvidia-smi: {e}"
+    try:
+        import urllib.request
+        with urllib.request.urlopen("http://localhost:11434/api/ps", timeout=3) as r:
+            data = json.loads(r.read())
+            ollama["up"] = True
+            for m in data.get("models", []):
+                ollama["models_loaded"].append({
+                    "name": m.get("name"),
+                    "size_vram_mb": (m.get("size_vram") or 0) // (1024 * 1024),
+                    "expires_at": m.get("expires_at"),
+                })
+    except Exception as e:
+        ollama["error"] = (ollama["error"] or "") + f" | api/ps: {e}"
+    try:
+        gpu_q = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.used,memory.total,utilization.gpu",
+             "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+        used_mb, total_mb, util = [x.strip() for x in gpu_q.split(",")]
+        ollama["host_vram_used_mb"]  = int(used_mb)
+        ollama["host_vram_total_mb"] = int(total_mb)
+        ollama["host_gpu_util_pct"]  = int(util)
+    except Exception:
+        pass
+
     # disk
     du = shutil.disk_usage("/data")
 
@@ -217,6 +253,7 @@ def collect_status():
             "rsync_running": rsync_alive,
         },
         "contexts_files": contexts,
+        "ollama": ollama,
         "chroma": {
             "db_bytes": chroma_bytes,
             "build_running": build_running,
@@ -284,6 +321,17 @@ def render_html(s: dict) -> str:
         ("rsync arrivals not yet linked", human_int(pending)),
         ("Rsync still running",         "yes" if raw["rsync_running"] else "no"),
     ], accent="#bd10e0")
+
+    ollama = s["ollama"]
+    loaded_lines = []
+    for m in ollama.get("models_loaded", []):
+        loaded_lines.append(f"{m['name']} ({m['size_vram_mb']} MB VRAM)")
+    ollama_card = card("Ollama LLM", [
+        ("API up",         "yes" if ollama.get("up") else "<span style='color:#e05a5a'>NO</span>"),
+        ("GPU in container", "yes" if ollama.get("gpu") else "<span style='color:#e05a5a'>NO — fallback to CPU</span>"),
+        ("Loaded models",  "<br>".join(loaded_lines) if loaded_lines else "<span style='color:#888'>none</span>"),
+        ("Host VRAM",      f"{ollama.get('host_vram_used_mb', 0)} / {ollama.get('host_vram_total_mb', 0)} MB ({ollama.get('host_gpu_util_pct', 0)} % util)"),
+    ], accent=("#7ed321" if (ollama.get("gpu") and ollama.get("up")) else "#e05a5a"))
 
     chroma = s["chroma"]
     chroma_card = card("ChromaDB semantic index", [
@@ -362,6 +410,7 @@ def render_html(s: dict) -> str:
     {ner_card}
     {raw_card}
     {chroma_card}
+    {ollama_card}
     {sys_card}
   </div>
 
