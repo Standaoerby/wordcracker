@@ -27,3 +27,4 @@ services:
   gutenberg-lab:
     environment:
       - OLLAMA_HOST=http://ollama:11434
+      - ASSISTANT_NAME=Словоёб
