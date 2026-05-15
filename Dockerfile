@@ -7,7 +7,7 @@ RUN apt update && apt install -y \
 RUN pip install --upgrade pip && pip install \
     jupyterlab \
     nltk \
-    spacy \
+    'spacy[transformers]' \
     transformers \
     sentencepiece \
     sentence-transformers \
@@ -27,7 +27,8 @@ RUN pip install --upgrade pip && pip install \
     typer \
     rich
 
-RUN python -m spacy download en_core_web_sm
+RUN python -m spacy download en_core_web_sm && \
+    python -m spacy download en_core_web_trf
 
 WORKDIR /workspace
 EXPOSE 8888
