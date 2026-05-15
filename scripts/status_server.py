@@ -367,9 +367,12 @@ def _collect_health(ollama: dict, chroma_bytes: int, build_running: bool, du) ->
     components.append({"name": "Disk /data", "ok": disk_ok,
                        "detail": f"{pct}% used ({human_bytes(du.free)} free)"})
 
-    # Roll-up
+    # Roll-up. ChromaDB intentionally NOT critical — only semantic_search/contexts
+    # tools depend on it, the agentic flow keeps working on counts/affinity/etc.
+    # docker-exec count() also flaps occasionally on cold cache → would falsely
+    # downgrade overall to "down" on a transient timeout.
     critical = ["Ollama LLM + GPU", "Chat server (:8890)", "Cloudflare tunnel",
-                "nginx reverse-proxy", "ChromaDB index"]
+                "nginx reverse-proxy"]
     crit_failed = [c for c in components if c["name"] in critical and not c["ok"]]
     non_crit_failed = [c for c in components if c["name"] not in critical and not c["ok"]]
 
@@ -489,35 +492,9 @@ def render_html(s: dict) -> str:
         ("Contexts written", human_int(s["contexts_files"])),
     ], accent="#9013fe")
 
-    auth_rows = ""
-    for a in s["authors_analyzed"]:
-        auth_rows += (
-            f"<tr><td>{a['slug']}</td>"
-            f"<td class=v>{human_int(a.get('books_matched'))}</td>"
-            f"<td class=v>{human_int(a.get('books_aggregated'))}</td>"
-            f"<td class=v>{human_int(a.get('author_tokens'))}</td>"
-            f"<td class=v>{human_int(a['rows'])}</td>"
-            f"<td class=v>{human_bytes(a['size'])}</td></tr>"
-        )
-    if not auth_rows:
-        auth_rows = "<tr><td colspan=6 style='text-align:center;color:#888'>none yet</td></tr>"
-
-    analyzed_slugs = {a["slug"] for a in s["authors_analyzed"]}
-    top_rows = ""
-    for i, a in enumerate(s["top_authors"], 1):
-        slug = slug_for_author(a["author"])
-        mark = "<span style='color:#7ed321'>✓</span>" if slug in analyzed_slugs else "<span style='color:#555'>·</span>"
-        top_rows += (
-            f"<tr><td class=v style='color:#888'>{i}</td>"
-            f"<td>{a['author']}</td>"
-            f"<td class=v>{human_int(a['books'])}</td>"
-            f"<td class=v>{human_int(a['downloads'])}</td>"
-            f"<td style='text-align:center'>{mark}</td>"
-            f"<td style='font-family:monospace;color:#888'>{slug}</td></tr>"
-        )
-    if not top_rows:
-        top_rows = "<tr><td colspan=6 style='text-align:center;color:#888'>metadata not loaded</td></tr>"
-
+    # authors_analyzed and top_authors stay in /api/status JSON for tooling, but
+    # the dashboard no longer renders the two big tables that used to sit below
+    # the cards.
     return f"""<!doctype html>
 <html lang=en>
 <head>
@@ -555,22 +532,6 @@ def render_html(s: dict) -> str:
     {chroma_card}
     {ollama_card}
     {sys_card}
-  </div>
-
-  <div class=authors>
-    <h2>Authors analyzed (affinity CSVs in /data/spgc/derived/)</h2>
-    <table>
-      <tr><th>slug</th><th style='text-align:right'>books matched</th><th style='text-align:right'>aggregated</th><th style='text-align:right'>author tokens</th><th style='text-align:right'>affinity rows</th><th style='text-align:right'>file size</th></tr>
-      {auth_rows}
-    </table>
-  </div>
-
-  <div class=authors>
-    <h2>Top 20 authors in SPGC (by book count, en only)</h2>
-    <table>
-      <tr><th style='text-align:right'>#</th><th>author</th><th style='text-align:right'>books</th><th style='text-align:right'>downloads</th><th style='text-align:center'>analyzed</th><th>slug</th></tr>
-      {top_rows}
-    </table>
   </div>
 
   <footer>Source: <code>~/wordcracker/scripts/status_server.py</code> · Server-on-Wheels · stdlib only</footer>
