@@ -1,299 +1,228 @@
 #!/usr/bin/env python3
 """
-RAG over the wordcracker ChromaDB index.
+rag_query.py — agentic LLM entry point for wordcracker.
 
-Retrieves top-K chunks via multilingual MiniLM, hands them to Ollama
-(default: qwen3:14b) with an anti-hallucination prompt template,
-returns the answer plus structured source citations.
+Pipeline:
+  1. Send `messages` + TOOLS_SPEC to Ollama /api/chat
+  2. While the response carries tool_calls (max max_iterations):
+       - dispatch each tool_call via TOOL_DISPATCH (from rag_tools.py)
+       - append tool result to messages as {"role": "tool", ...}
+       - call /api/chat again
+  3. Once the model produces a regular content answer, return it
+     alongside the full tool-call trace.
 
-Usage as module:
-    from rag_query import rag_query
-    r = rag_query("найди упоминания битой посуды в книгах")
+Usage:
+    from rag_query import ask
+    r = ask("какие самые популярные биграммы у Wodehouse")
     print(r["answer"])
-    for s in r["sources"]:
-        print(s["author"], s["title"], s["pg_id"])
+    for tc in r["tool_calls"]:
+        print(tc["name"], tc["args"])
 
-Usage as CLI:
-    python rag_query.py "вопрос или question" [--k 8] [--model qwen3:14b] [--stream]
+CLI:
+    python rag_query.py "вопрос" [--model qwen3:14b] [--verbose]
 """
 import argparse
 import json
-import re
+import os
 import sys
 import time
-from typing import Iterable
+from pathlib import Path
 
 import requests
 
-DEFAULT_CHROMA_PATH    = "/workspace/chroma_db"
-DEFAULT_COLLECTION     = "gutenberg-index"
-DEFAULT_EMBEDDER       = "paraphrase-multilingual-MiniLM-L12-v2"
-DEFAULT_OLLAMA_HOST    = "http://ollama:11434"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from rag_tools import TOOLS_SPEC, TOOL_DISPATCH
+
 DEFAULT_MODEL          = "qwen3:14b"
-DEFAULT_K              = 8
-DEFAULT_TEMPERATURE    = 0.5
-DEFAULT_SNIPPET_CHARS  = 900
+DEFAULT_OLLAMA_HOST    = os.environ.get("OLLAMA_HOST", "http://ollama:11434")
+DEFAULT_MAX_ITER       = 5
+DEFAULT_TEMPERATURE    = 0.3
+DEFAULT_KEEP_ALIVE     = "5m"  # keep model warm across the tool-call loop
 
-# keep_alive=0 -> unload model immediately after the response so the ~9 GB
-# of VRAM frees up for embedding/indexing work running in parallel.
-DEFAULT_KEEP_ALIVE     = 0
+SYSTEM_PROMPT = """Ты — литературный аналитик и помощник по корпусу Project Gutenberg.
 
-PROMPT_TEMPLATE = """Ты — литературный аналитик. Отвечаешь на вопрос на основе фрагментов из книг Project Gutenberg.
+У тебя есть набор инструментов для работы с корпусом (1828 книг, ~2.84 млрд токенов, метаданные авторов/книг).
+Выбирай правильный инструмент под вопрос пользователя:
+- semantic_search — для «найди упоминания X в книгах», «где описывается Y»
+- corpus_stats_by_author — для «дай статистику по автору», «сколько у X книг»
+- top_ngrams_by_author — для «самые популярные биграммы/триграммы», «частые связки слов»
+- affinity_by_author — для «фирменные слова», «маркеры стиля», «характерная лексика»
+- word_contexts — для «в каком контексте слово X», «приведи примеры использования»
+- compare_authors — для «сравни автора A и автора B», «насколько похожи X и Y»
 
 Правила:
-1. Если в фрагментах есть ХОТЯ БЫ ЧТО-ТО релевантное вопросу — построй ответ на этом. Цитируй фрагменты прямо.
-2. Только если фрагменты СОВСЕМ не пересекаются с темой — скажи «В найденных фрагментах упоминаний не обнаружено».
-3. Не сочиняй фактов и цитат за пределами контекста. PG-id ссылки бери ТОЛЬКО из предоставленных фрагментов.
-4. Каждое утверждение подкрепляй ссылкой [Автор, "Название", PG12345].
-5. Отвечай на том же языке, на котором задан вопрос. Имена персонажей оставляй как в оригинале.
-
-Структура ответа:
-• Краткое summary (1–2 предложения)
-• Конкретные упоминания: короткая цитата + источник
-• Замеченный паттерн (если виден)
-
-КОНТЕКСТ:
-{context}
-
-ВОПРОС: {question}
-
-ОТВЕТ:"""
+1. ВСЕГДА используй инструмент если вопрос про конкретные данные. Не выдумывай статистику.
+2. Цитаты подкрепляй ссылкой [Автор, "Название", PG12345].
+3. Табличные данные форматируй как Markdown-таблицу.
+4. После результата инструмента — пиши понятное summary, не сырой JSON.
+5. Отвечай на языке вопроса пользователя.
+6. Регексы для авторов: формат `^Surname,`. Примеры:
+   - Достоевский → `^Dostoyevsky,`
+   - Толстой → `^Tolstoy,`
+   - Чехов → `^Chekhov,`
+   - Wodehouse → `^Wodehouse,`
+   - Doyle → `^Doyle,`
+   ВАЖНО: SPGC — английский корпус. Достоевский/Толстой/Чехов — в английских переводах.
+7. Если tool вернул `error` — попробуй другой regex или сообщи пользователю что данных нет.
+8. На вопросы типа «привет, что ты умеешь?» — отвечай напрямую без tools.
+"""
 
 
-CYRILLIC_RE = re.compile(r"[Ѐ-ӿ]")
+def _log(msg: str, verbose: bool) -> None:
+    if verbose:
+        print(f"[rag] {msg}", file=sys.stderr)
 
 
-def _has_cyrillic(text: str) -> bool:
-    return bool(CYRILLIC_RE.search(text))
+def _truncate_for_summary(obj, max_chars: int = 200) -> str:
+    s = json.dumps(obj, ensure_ascii=False, default=str)
+    return s if len(s) <= max_chars else s[:max_chars] + "...(truncated)"
 
 
-def _translate_to_english(question: str, model: str, ollama_host: str) -> str:
-    """Use Ollama to translate a non-English query into English for retrieval.
-
-    Multilingual MiniLM does not transliterate proper nouns (Дживс != Jeeves),
-    so when the corpus is English we get better recall by embedding an English
-    paraphrase of the query rather than the original Russian. The answer is
-    still generated in the original language because rag_query passes the
-    original question into the LLM prompt.
-    """
-    prompt = (
-        "Translate the following question to English. "
-        "Use canonical English forms for proper nouns and characters "
-        "(e.g. Дживс → Jeeves, Берти Вустер → Bertie Wooster, "
-        "Шерлок Холмс → Sherlock Holmes). "
-        "Output ONLY the translation, no commentary.\n\n"
-        f"Question: {question}\n\nEnglish:"
-    )
+def _call_chat(messages: list, model: str, ollama_host: str,
+               temperature: float, keep_alive: str) -> dict:
     payload = {
-        "model": model, "prompt": prompt, "stream": False, "keep_alive": 0,
-        "options": {"temperature": 0}, "think": False,
-    }
-    try:
-        resp = requests.post(f"{ollama_host}/api/generate", json=payload, timeout=60)
-        resp.raise_for_status()
-        return resp.json().get("response", "").strip().strip('"').strip()
-    except Exception as e:
-        print(f"[rag] translation failed, using original query: {e}", file=sys.stderr)
-        return question
-
-
-def _retrieve(question: str, k: int, chroma_path: str, collection_name: str,
-              embedder_name: str) -> dict:
-    """Run a ChromaDB query and return the raw response."""
-    import chromadb
-    from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
-    client = chromadb.PersistentClient(path=chroma_path)
-    embed_fn = SentenceTransformerEmbeddingFunction(model_name=embedder_name, device="cuda")
-    col = client.get_collection(collection_name, embedding_function=embed_fn)
-    return col.query(query_texts=[question], n_results=k)
-
-
-def _format_context(query_result: dict, snippet_chars: int) -> tuple[str, list[dict]]:
-    """Build the prompt context block and a parallel list of structured sources."""
-    docs  = query_result["documents"][0]
-    metas = query_result["metadatas"][0]
-    dists = query_result["distances"][0]
-
-    blocks, sources = [], []
-    for i, (doc, md, dist) in enumerate(zip(docs, metas, dists), 1):
-        snippet = doc[:snippet_chars].replace("\n", " ").strip()
-        author = md.get("author") or "Unknown"
-        title  = md.get("title")  or "Untitled"
-        pg_id  = md.get("pg_id")  or ""
-        blocks.append(f"[{i}] {author} — \"{title}\" [{pg_id}]\n{snippet}")
-        sources.append({
-            "author": author, "title": title, "pg_id": pg_id,
-            "chunk": md.get("chunk"), "distance": round(float(dist), 4),
-            "snippet": snippet,
-        })
-    return "\n\n".join(blocks), sources
-
-
-def _ollama_generate(prompt: str, model: str, ollama_host: str, temperature: float,
-                     keep_alive: int, stream: bool) -> Iterable[str] | str:
-    """Call Ollama generate. Stream mode yields chunks; non-stream returns whole string."""
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "stream": stream,
+        "model":      model,
+        "messages":   messages,
+        "tools":      TOOLS_SPEC,
+        "stream":     False,
         "keep_alive": keep_alive,
-        "options": {"temperature": temperature},
-        "think": False,  # qwen3 reasoning mode off — answer-only
+        "options":    {"temperature": temperature},
+        "think":      False,
     }
-    url = f"{ollama_host}/api/generate"
-
-    if not stream:
-        try:
-            resp = requests.post(url, json=payload, timeout=300)
-            resp.raise_for_status()
-        except requests.exceptions.ReadTimeout:
-            return "[ERROR] Ollama timeout (>300s) — модель не отвечает"
-        except requests.exceptions.ConnectionError as e:
-            return f"[ERROR] Ollama unreachable at {ollama_host}: {e}"
-        data = resp.json()
-        return data.get("response", ""), data.get("eval_count")
-
-    def _gen():
-        with requests.post(url, json=payload, stream=True, timeout=300) as r:
-            for line in r.iter_lines():
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if "response" in obj:
-                    yield obj["response"]
-                if obj.get("done"):
-                    break
-    return _gen()
+    resp = requests.post(f"{ollama_host}/api/chat", json=payload, timeout=300)
+    resp.raise_for_status()
+    return resp.json()
 
 
-def _validate_citations(answer: str, sources: list[dict]) -> list[str]:
-    """Find PG-ids cited in the answer that are NOT in the retrieved sources."""
-    cited = set(re.findall(r"PG\d+", answer))
-    retrieved = {s["pg_id"] for s in sources}
-    return sorted(cited - retrieved)
+def _execute_tool(name: str, args: dict) -> dict:
+    """Run a tool from TOOL_DISPATCH. Catch everything to keep the loop alive."""
+    fn = TOOL_DISPATCH.get(name)
+    if fn is None:
+        return {"error": f"unknown tool: {name}",
+                "available": list(TOOL_DISPATCH)}
+    try:
+        return fn(**(args or {}))
+    except TypeError as e:
+        return {"error": "bad arguments", "details": str(e), "got": args}
+    except Exception as e:
+        return {"error": "tool raised", "details": str(e)}
 
 
-def rag_query(
+def ask(
     question: str,
-    k: int = DEFAULT_K,
     model: str = DEFAULT_MODEL,
     ollama_host: str = DEFAULT_OLLAMA_HOST,
-    chroma_path: str = DEFAULT_CHROMA_PATH,
-    collection_name: str = DEFAULT_COLLECTION,
-    embedder_name: str = DEFAULT_EMBEDDER,
+    max_iterations: int = DEFAULT_MAX_ITER,
     temperature: float = DEFAULT_TEMPERATURE,
-    snippet_chars: int = DEFAULT_SNIPPET_CHARS,
-    keep_alive: int = DEFAULT_KEEP_ALIVE,
+    keep_alive: str = DEFAULT_KEEP_ALIVE,
+    verbose: bool = False,
 ) -> dict:
-    """One-shot RAG. Returns {"answer", "sources", "question", "model", "tokens", "warnings", "retrieval_query"}."""
-    retrieval_query = question
-    if _has_cyrillic(question):
-        t_tr = time.time()
-        retrieval_query = _translate_to_english(question, model, ollama_host)
-        print(f"[rag] translated for retrieval ({time.time()-t_tr:.2f}s): {retrieval_query!r}",
-              file=sys.stderr)
+    """Run the agentic loop until the model returns a content answer.
 
-    t0 = time.time()
-    r = _retrieve(retrieval_query, k, chroma_path, collection_name, embedder_name)
-    t_retr = time.time() - t0
-    context, sources = _format_context(r, snippet_chars)
-    print(f"[rag] retrieval: {t_retr:.2f}s, k={k}", file=sys.stderr)
+    Returns {"answer", "tool_calls", "iterations", "model", "elapsed_sec"}.
+    """
+    t_start = time.perf_counter()
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user",   "content": question},
+    ]
+    tool_trace: list[dict] = []
 
-    t1 = time.time()
-    prompt = PROMPT_TEMPLATE.format(context=context, question=question)
-    answer, tokens = _ollama_generate(prompt, model, ollama_host, temperature, keep_alive, stream=False)
-    t_gen = time.time() - t1
-    print(f"[rag] generation: {t_gen:.2f}s, tokens={tokens}", file=sys.stderr)
+    for iteration in range(1, max_iterations + 1):
+        _log(f"iteration {iteration}: calling {model}", verbose)
+        try:
+            data = _call_chat(messages, model, ollama_host, temperature, keep_alive)
+        except requests.exceptions.RequestException as e:
+            return {
+                "answer": f"[ERROR] Ollama request failed: {e}",
+                "tool_calls": tool_trace, "iterations": iteration,
+                "model": model, "elapsed_sec": round(time.perf_counter() - t_start, 2),
+            }
 
-    warnings = []
-    bad = _validate_citations(answer, sources)
-    if bad:
-        warnings.append(f"hallucinated PG ids in answer: {bad}")
-        print(f"[rag] WARNING: {warnings[-1]}", file=sys.stderr)
+        msg = data.get("message", {}) or {}
+        tool_calls = msg.get("tool_calls") or []
+        content = (msg.get("content") or "").strip()
 
+        # append the assistant message to history (Ollama expects the round-trip)
+        messages.append({
+            "role": "assistant",
+            "content": content,
+            **({"tool_calls": tool_calls} if tool_calls else {}),
+        })
+
+        if not tool_calls:
+            elapsed = round(time.perf_counter() - t_start, 2)
+            _log(f"final answer in {elapsed}s after {iteration} iter(s)", verbose)
+            return {
+                "answer":      content,
+                "tool_calls":  tool_trace,
+                "iterations":  iteration,
+                "model":       model,
+                "elapsed_sec": elapsed,
+            }
+
+        for tc in tool_calls:
+            fn_call = tc.get("function") or {}
+            name    = fn_call.get("name", "")
+            raw_args = fn_call.get("arguments", {})
+            # Ollama / Qwen3 returns args as dict; some builds give a JSON string. Handle both.
+            if isinstance(raw_args, str):
+                try:
+                    args = json.loads(raw_args)
+                except json.JSONDecodeError:
+                    args = {}
+            else:
+                args = raw_args or {}
+            _log(f"  tool_call → {name}({args})", verbose)
+
+            result = _execute_tool(name, args)
+            tool_trace.append({
+                "name":           name,
+                "args":           args,
+                "result_summary": _truncate_for_summary(result, 240),
+            })
+            messages.append({
+                "role":    "tool",
+                "content": json.dumps(result, ensure_ascii=False, default=str),
+            })
+
+    # Hit max_iterations without a final content answer
+    elapsed = round(time.perf_counter() - t_start, 2)
     return {
-        "answer":           answer,
-        "sources":          sources,
-        "question":         question,
-        "retrieval_query":  retrieval_query,
-        "model":            model,
-        "tokens":           tokens,
-        "timing":           {"retrieval_s": round(t_retr, 2), "generation_s": round(t_gen, 2)},
-        "warnings":         warnings,
+        "answer": (content or "[max_iterations exhausted]"),
+        "tool_calls":  tool_trace,
+        "iterations":  max_iterations,
+        "model":       model,
+        "elapsed_sec": elapsed,
     }
-
-
-def rag_query_stream(question: str, **kwargs):
-    """Same as rag_query but yields the answer in chunks. Sources/warnings printed at end."""
-    k             = kwargs.get("k", DEFAULT_K)
-    model         = kwargs.get("model", DEFAULT_MODEL)
-    ollama_host   = kwargs.get("ollama_host",  DEFAULT_OLLAMA_HOST)
-    chroma_path   = kwargs.get("chroma_path",  DEFAULT_CHROMA_PATH)
-    collection    = kwargs.get("collection_name", DEFAULT_COLLECTION)
-    embedder      = kwargs.get("embedder_name",   DEFAULT_EMBEDDER)
-    temperature   = kwargs.get("temperature",  DEFAULT_TEMPERATURE)
-    snippet_chars = kwargs.get("snippet_chars", DEFAULT_SNIPPET_CHARS)
-    keep_alive    = kwargs.get("keep_alive",   DEFAULT_KEEP_ALIVE)
-
-    t0 = time.time()
-    r = _retrieve(question, k, chroma_path, collection, embedder)
-    print(f"[rag] retrieval: {time.time()-t0:.2f}s, k={k}", file=sys.stderr)
-    context, sources = _format_context(r, snippet_chars)
-    prompt = PROMPT_TEMPLATE.format(context=context, question=question)
-
-    answer_parts = []
-    for piece in _ollama_generate(prompt, model, ollama_host, temperature, keep_alive, stream=True):
-        answer_parts.append(piece)
-        yield piece
-    answer = "".join(answer_parts)
-    bad = _validate_citations(answer, sources)
-    yield {"_done": True, "sources": sources, "warnings":
-           [f"hallucinated PG ids: {bad}"] if bad else []}
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("question")
-    ap.add_argument("--k",           type=int,   default=DEFAULT_K)
     ap.add_argument("--model",       default=DEFAULT_MODEL)
     ap.add_argument("--ollama-host", default=DEFAULT_OLLAMA_HOST)
+    ap.add_argument("--max-iter",    type=int,   default=DEFAULT_MAX_ITER)
     ap.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE)
-    ap.add_argument("--stream",      action="store_true", help="stream tokens as they come")
-    ap.add_argument("--json",        action="store_true", help="print full structured result as JSON")
+    ap.add_argument("--verbose",     action="store_true")
+    ap.add_argument("--json",        action="store_true")
     args = ap.parse_args()
 
-    if args.stream:
-        for piece in rag_query_stream(args.question, k=args.k, model=args.model,
-                                      ollama_host=args.ollama_host, temperature=args.temperature):
-            if isinstance(piece, dict):
-                print("\n\n--- Sources ---", file=sys.stderr)
-                for s in piece["sources"]:
-                    print(f"  [{s['pg_id']}] {s['author']} — {s['title']}  (dist {s['distance']})",
-                          file=sys.stderr)
-                if piece["warnings"]:
-                    for w in piece["warnings"]:
-                        print(f"  ⚠ {w}", file=sys.stderr)
-            else:
-                sys.stdout.write(piece)
-                sys.stdout.flush()
-        sys.stdout.write("\n")
+    res = ask(args.question, model=args.model, ollama_host=args.ollama_host,
+              max_iterations=args.max_iter, temperature=args.temperature,
+              verbose=True)
+
+    if args.json:
+        print(json.dumps(res, indent=2, ensure_ascii=False, default=str))
         return
 
-    res = rag_query(args.question, k=args.k, model=args.model,
-                    ollama_host=args.ollama_host, temperature=args.temperature)
-    if args.json:
-        print(json.dumps(res, indent=2, ensure_ascii=False))
-        return
     print(res["answer"])
-    print("\n--- Sources ---")
-    for s in res["sources"]:
-        print(f"  [{s['pg_id']}] {s['author']} — {s['title']}  (dist {s['distance']})")
-    if res["warnings"]:
-        for w in res["warnings"]:
-            print(f"  WARN {w}")
+    if res["tool_calls"]:
+        print(f"\n--- Tool trace ({len(res['tool_calls'])} call(s), {res['iterations']} iteration(s), "
+              f"{res['elapsed_sec']}s) ---", file=sys.stderr)
+        for tc in res["tool_calls"]:
+            print(f"  · {tc['name']}({json.dumps(tc['args'], ensure_ascii=False)})", file=sys.stderr)
+            print(f"      → {tc['result_summary']}", file=sys.stderr)
 
 
 if __name__ == "__main__":
