@@ -316,7 +316,9 @@ PAGE = r"""<!doctype html>
   <label><input type=checkbox name=reindex checked> запустить reindex после распаковки</label>
   <label class=meta>Принимаются: <code>.zip</code> <code>.tar.gz</code> <code>.tar.bz2</code> <code>.txt</code> <code>.epub</code>.
     Распознаются имена <code>pgN.txt</code>, <code>N-0.txt</code>, <code>N.txt</code>, <code>pgN.epub</code>, <code>N.epub</code> (N = PG id).
-    EPUB конвертируется в plain text через ebooklib + BeautifulSoup; если PG id не в имени, пытаемся достать из metadata <code>DC:identifier</code>.</label>
+    EPUB конвертируется в plain text через ebooklib + BeautifulSoup; если PG id не в имени, пытаемся достать из metadata <code>DC:identifier</code>.<br>
+    <b style="color:#e0a000">⚠ Cloudflare Free лимит — 100 MB на запрос.</b> Архивы крупнее нужно разбить или залить через <code>scp ... claude@192.168.68.54:/data/uploads_manual/</code> и дёрнуть pickup-endpoint вручную.<br>
+    Файлы без распознанного PG id попадают в <code>skipped_format</code>.</label>
   <button id=send>Загрузить</button>
   <div id=prog class=progress></div>
 </form>
