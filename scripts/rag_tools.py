@@ -303,8 +303,30 @@ def _is_clean_token(t: str) -> bool:
     return len(t) >= 2 and any(c.isalpha() for c in t)
 
 
-def top_ngrams_by_author(author_regex: str, n: int = 2, top: int = 20) -> dict:
-    """N-gram frequencies (n=1,2,3) from per-author SPGC tokens, with stopword/length filters."""
+def _spacy_pos_tags(words: list[str]) -> dict:
+    """word -> POS tag (NOUN/VERB/ADJ/ADV/...). spaCy en_core_web_sm on CPU."""
+    try:
+        import spacy
+        nlp = spacy.load("en_core_web_sm", disable=["ner", "parser", "lemmatizer"])
+    except Exception:
+        return {w: "" for w in words}
+    out = {}
+    for w in words:
+        doc = nlp(w)
+        out[w] = doc[0].pos_ if len(doc) else ""
+    return out
+
+
+def top_ngrams_by_author(author_regex: str, n: int = 2, top: int = 20,
+                         pos_filter: list[str] | None = None) -> dict:
+    """N-gram frequencies (n=1,2,3) from per-author SPGC tokens.
+
+    pos_filter (only n=1): list like ["NOUN","VERB","ADJ","ADV","PROPN"]; keeps
+    only unigrams whose spaCy POS is in the list. For n=2/3 the filter is
+    applied to the FIRST token of the n-gram (typical use: "find adjective+noun
+    bigrams" → pos_filter=["ADJ"]). On a large candidate pool the spaCy pass
+    runs only on the top ~5x final size, so it stays cheap.
+    """
     t0 = time.perf_counter()
     if n not in (1, 2, 3):
         return {"error": "n must be 1, 2 or 3"}
@@ -342,14 +364,27 @@ def top_ngrams_by_author(author_regex: str, n: int = 2, top: int = 20) -> dict:
                 counter[key] += 1
                 total_ngrams += 1
 
+        if pos_filter:
+            pos_filter = [p.upper() for p in pos_filter]
+            # tag the first token of the top-5x candidates and drop misses
+            pool = counter.most_common(top * 5)
+            heads = list({key.split(" ", 1)[0] for key, _ in pool})
+            tags = _spacy_pos_tags(heads)
+            filtered = [(k, c) for k, c in pool
+                        if tags.get(k.split(" ", 1)[0]) in pos_filter]
+            top_pairs = filtered[:top]
+        else:
+            top_pairs = counter.most_common(top)
+
         out = {
             "author_regex":  author_regex,
             "n":             n,
+            "pos_filter":    pos_filter,
             "books_used":    used,
             "total_ngrams":  total_ngrams,
-            "top":           [{"ngram": ng, "count": c} for ng, c in counter.most_common(top)],
+            "top":           [{"ngram": ng, "count": c} for ng, c in top_pairs],
         }
-        _log(f"top_ngrams_by_author(n={n}) done in {time.perf_counter()-t0:.2f}s, "
+        _log(f"top_ngrams_by_author(n={n},pos={pos_filter}) done in {time.perf_counter()-t0:.2f}s, "
              f"used {used} books, {total_ngrams:,} ngrams")
         return out
     except Exception as e:
@@ -489,6 +524,299 @@ def compare_authors(author1_regex: str, author2_regex: str, top: int = 20) -> di
         return {"error": "compare_authors failed", "details": str(e)}
 
 
+# ============================ TOOL 7: lexical_diversity ============================
+def lexical_diversity(scope: dict | str) -> dict:
+    """Type-Token Ratio over the scope. Higher = more varied vocabulary.
+
+    scope: {"book": "PG1342"}  |  {"author": "^Doyle,"}  |  "all_corpus"
+    """
+    t0 = time.perf_counter()
+    try:
+        counts: Counter = Counter()
+        per_book = []
+        if isinstance(scope, str) and scope == "all_corpus":
+            counts = Counter(_metadata_df()  # noqa: F841 placeholder
+                             ) if False else None  # too expensive to recompute; use baseline
+            corpus_counts_path = CORPUS_COUNTS
+            with open(corpus_counts_path, encoding="utf-8") as fh:
+                rd = csv.reader(fh); next(rd)
+                v = t = 0
+                for w, c in rd:
+                    c = int(c); v += 1; t += c
+            return {"scope": "all_corpus", "tokens": t, "types": v,
+                    "ttr": round(v / max(1, t), 6), "note": "from corpus_counts.csv baseline"}
+        elif isinstance(scope, dict) and scope.get("book"):
+            pg = scope["book"]
+            if not pg.startswith("PG"): pg = f"PG{pg}"
+            f = SPGC_COUNTS_DIR / f"{pg}_counts.txt"
+            if not f.exists():
+                return {"error": "counts file not found", "pg_id": pg}
+            with open(f, encoding="utf-8") as fh:
+                for line in fh:
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) == 2:
+                        counts[parts[0]] = int(parts[1])
+            tokens, types = sum(counts.values()), len(counts)
+            return {"scope": f"book:{pg}", "tokens": tokens, "types": types,
+                    "ttr": round(types / max(1, tokens), 6)}
+        elif isinstance(scope, dict) and scope.get("author"):
+            sel = _select_books(scope["author"])
+            if not len(sel):
+                return {"error": "no books matched", "author_regex": scope["author"]}
+            for pg in sel["id"]:
+                f = SPGC_COUNTS_DIR / f"{pg}_counts.txt"
+                if not f.exists(): continue
+                book = Counter()
+                with open(f, encoding="utf-8") as fh:
+                    for line in fh:
+                        parts = line.rstrip("\n").split("\t")
+                        if len(parts) == 2:
+                            book[parts[0]] = int(parts[1])
+                            counts[parts[0]] += int(parts[1])
+                btok, btyp = sum(book.values()), len(book)
+                if btok:
+                    per_book.append({"pg_id": pg, "tokens": btok, "types": btyp,
+                                     "ttr": round(btyp / btok, 6)})
+            tokens, types = sum(counts.values()), len(counts)
+            per_book.sort(key=lambda r: r["ttr"], reverse=True)
+            return {"scope": f"author:{scope['author']}",
+                    "tokens": tokens, "types": types,
+                    "ttr_aggregate": round(types / max(1, tokens), 6),
+                    "ttr_avg_per_book": round(
+                        sum(b["ttr"] for b in per_book) / max(1, len(per_book)), 6),
+                    "books_used": len(per_book),
+                    "top_5_most_varied": per_book[:5],
+                    "bottom_5_least_varied": per_book[-5:],
+                    "note": "TTR collapses to a single number across the whole author; "
+                            "per-book averages or higher-order measures (MATTR, MTLD) "
+                            "are more comparable across books of different length"}
+        else:
+            return {"error": "bad scope; use {'book':PGid} | {'author':regex} | 'all_corpus'"}
+    except Exception as e:
+        return {"error": "lexical_diversity failed", "details": str(e)}
+    finally:
+        _log(f"lexical_diversity done in {time.perf_counter()-t0:.2f}s")
+
+
+# ============================ TOOL 8: word_collocates ============================
+def word_collocates(scope: dict | str, word: str, window: int = 4,
+                    top: int = 20, exclude_stopwords: bool = True) -> dict:
+    """Words that co-occur within ±window tokens of `word` in the scope's books."""
+    t0 = time.perf_counter()
+    word_lc = word.strip().lower()
+    if not word_lc:
+        return {"error": "word required"}
+    try:
+        if isinstance(scope, dict) and scope.get("book"):
+            pg = scope["book"]
+            if not pg.startswith("PG"): pg = f"PG{pg}"
+            book_ids = [pg]
+            label = f"book:{pg}"
+        elif isinstance(scope, dict) and scope.get("author"):
+            sel = _select_books(scope["author"])
+            if not len(sel):
+                return {"error": "no books matched", "author_regex": scope["author"]}
+            book_ids = list(sel["id"])
+            label = f"author:{scope['author']}"
+        else:
+            return {"error": "bad scope; use {'book':PGid} | {'author':regex}"}
+
+        neighbors: Counter = Counter()
+        hits = 0
+        books_with_hits = 0
+        for pg in book_ids:
+            f = SPGC_TOKENS_DIR / f"{pg}_tokens.txt"
+            if not f.exists():
+                continue
+            with open(f, encoding="utf-8") as fh:
+                toks = [t.strip().lower() for t in fh if t.strip()]
+            local_hits = 0
+            for i, t in enumerate(toks):
+                if t != word_lc:
+                    continue
+                local_hits += 1
+                lo, hi = max(0, i - window), min(len(toks), i + window + 1)
+                for j in range(lo, hi):
+                    if j == i:
+                        continue
+                    nb = toks[j]
+                    if not _is_clean_token(nb):
+                        continue
+                    if nb == word_lc:
+                        continue
+                    if exclude_stopwords and nb in STOPWORDS:
+                        continue
+                    neighbors[nb] += 1
+            if local_hits:
+                books_with_hits += 1
+                hits += local_hits
+
+        return {
+            "scope":            label,
+            "word":             word_lc,
+            "window":           window,
+            "total_occurrences": hits,
+            "books_with_hits":   books_with_hits,
+            "top_collocates":   [{"word": w, "count": c} for w, c in neighbors.most_common(top)],
+        }
+    except Exception as e:
+        return {"error": "word_collocates failed", "details": str(e)}
+    finally:
+        _log(f"word_collocates done in {time.perf_counter()-t0:.2f}s")
+
+
+# ============================ TOOL 9: book_readability ============================
+_VOWEL_GROUPS_RE = re.compile(r"[aeiouy]+", re.IGNORECASE)
+
+
+def _count_syllables(word: str) -> int:
+    word = word.lower()
+    if not word:
+        return 0
+    n = len(_VOWEL_GROUPS_RE.findall(word))
+    if word.endswith("e") and n > 1:
+        n -= 1
+    return max(1, n)
+
+
+_GUTENBERG_HEADER = re.compile(r"\*\*\* START OF (?:THE|THIS) PROJECT GUTENBERG.*?\*\*\*",
+                               re.IGNORECASE | re.DOTALL)
+_GUTENBERG_FOOTER = re.compile(r"\*\*\* END OF (?:THE|THIS) PROJECT GUTENBERG.*",
+                               re.IGNORECASE | re.DOTALL)
+
+
+def book_readability(pg_id: str, sample_chars: int = 200_000) -> dict:
+    """Flesch Reading Ease + Flesch-Kincaid Grade for a single book.
+
+    Reads /data/raw_text/pg<id>.txt (after Gutenberg header/footer strip),
+    samples the first `sample_chars` chars to keep this fast, splits sentences
+    on .!? heuristics, counts words and syllables.
+    """
+    t0 = time.perf_counter()
+    pg = pg_id.upper()
+    if not pg.startswith("PG"):
+        pg = f"PG{pg}"
+    raw_path = Path(f"/workspace/raw_text/{pg.lower()}.txt")
+    if not raw_path.exists():
+        return {"error": "raw text not in /data/raw_text/ for this PG id", "pg_id": pg}
+    try:
+        text = raw_path.read_text(encoding="utf-8", errors="replace")
+        m = _GUTENBERG_HEADER.search(text)
+        if m: text = text[m.end():]
+        m = _GUTENBERG_FOOTER.search(text)
+        if m: text = text[:m.start()]
+        text = text[:sample_chars]
+
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+        sentences = [s.strip() for s in sentences if len(s.strip()) > 5]
+        words = re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?", text)
+        if not sentences or not words:
+            return {"error": "not enough sentences/words after cleanup", "pg_id": pg}
+        syll_total = sum(_count_syllables(w) for w in words)
+        n_w, n_s = len(words), len(sentences)
+        asl  = n_w / n_s              # avg sentence length
+        asw  = syll_total / n_w       # avg syllables / word
+        flesch_ease  = round(206.835 - 1.015 * asl - 84.6 * asw, 1)
+        fk_grade     = round(0.39 * asl + 11.8 * asw - 15.59, 1)
+
+        # CEFR band rough heuristic from Flesch Reading Ease
+        if   flesch_ease >= 80: cefr = "A2 (very easy)"
+        elif flesch_ease >= 70: cefr = "B1"
+        elif flesch_ease >= 60: cefr = "B1-B2"
+        elif flesch_ease >= 50: cefr = "B2"
+        elif flesch_ease >= 30: cefr = "C1"
+        else:                   cefr = "C2+ (academic / archaic)"
+
+        df = _metadata_df()
+        meta_row = df[df["id"] == pg]
+        title  = meta_row.iloc[0]["title"]  if len(meta_row) else ""
+        author = meta_row.iloc[0]["author"] if len(meta_row) else ""
+
+        return {
+            "pg_id": pg, "title": title, "author": author,
+            "sampled_chars":      len(text),
+            "sentences":          n_s,
+            "words":              n_w,
+            "avg_sentence_length_words": round(asl, 2),
+            "avg_syllables_per_word":    round(asw, 3),
+            "flesch_reading_ease": flesch_ease,
+            "flesch_kincaid_grade": fk_grade,
+            "cefr_heuristic":     cefr,
+        }
+    except Exception as e:
+        return {"error": "book_readability failed", "details": str(e)}
+    finally:
+        _log(f"book_readability({pg}) done in {time.perf_counter()-t0:.2f}s")
+
+
+# ============================ TOOL 10: word_freq_timeline ============================
+def word_freq_timeline(word: str, bucket_years: int = 25,
+                      min_books_per_bucket: int = 3,
+                      lang: str = "en") -> dict:
+    """Frequency of `word` across periods, bucketed by author birth year.
+
+    Caveat: SPGC metadata has authoryearofbirth, not publication year. We use
+    birth-year + ~30 (rough writing-prime) as a proxy. Books with missing or
+    out-of-range birth year are dropped.
+    """
+    t0 = time.perf_counter()
+    word_lc = word.strip().lower()
+    if not word_lc:
+        return {"error": "word required"}
+    try:
+        df = _metadata_df()
+        mask_lang = df["language"].fillna("").str.contains(f"'{lang}'", regex=False)
+        df = df[mask_lang].copy()
+        df["birth"] = pd.to_numeric(df["authoryearofbirth"], errors="coerce")
+        df = df[(df["birth"] >= 1500) & (df["birth"] <= 2020)]
+        df["period_start"] = (df["birth"] // bucket_years * bucket_years).astype(int)
+
+        buckets: dict = {}
+        for period, group in df.groupby("period_start"):
+            tok_total = 0
+            occurrences = 0
+            books_used = 0
+            for pg in group["id"]:
+                f = SPGC_COUNTS_DIR / f"{pg}_counts.txt"
+                if not f.exists():
+                    continue
+                book_total = 0
+                book_word = 0
+                with open(f, encoding="utf-8") as fh:
+                    for line in fh:
+                        parts = line.rstrip("\n").split("\t")
+                        if len(parts) != 2:
+                            continue
+                        w, c = parts[0], int(parts[1])
+                        book_total += c
+                        if w == word_lc:
+                            book_word += c
+                if book_total:
+                    tok_total += book_total
+                    occurrences += book_word
+                    books_used += 1
+            if books_used >= min_books_per_bucket and tok_total:
+                buckets[int(period)] = {
+                    "period":   f"{int(period)}-{int(period)+bucket_years-1}",
+                    "writing_prime_approx": f"~{int(period)+30}-{int(period)+bucket_years+30}",
+                    "books":    books_used,
+                    "total_tokens":  tok_total,
+                    "occurrences":   occurrences,
+                    "per_million":   round(1_000_000 * occurrences / tok_total, 2),
+                }
+        timeline = [buckets[k] for k in sorted(buckets)]
+        return {
+            "word": word_lc,
+            "bucket_years": bucket_years,
+            "axis_basis":   "authoryearofbirth (writing prime ≈ birth + 30)",
+            "timeline": timeline,
+        }
+    except Exception as e:
+        return {"error": "word_freq_timeline failed", "details": str(e)}
+    finally:
+        _log(f"word_freq_timeline({word_lc}) done in {time.perf_counter()-t0:.2f}s")
+
+
 # ============================ Ollama tool schemas ============================
 TOOLS_SPEC = [
     {"type": "function", "function": {
@@ -529,13 +857,16 @@ TOOLS_SPEC = [
         "name": "top_ngrams_by_author",
         "description": (
             "Топ N-грамм у автора (n=1 unigrams, n=2 bigrams, n=3 trigrams). "
-            "Используй для «топ биграмм у X», «фирменные обороты», «частые связки слов». "
+            "Используй для «топ биграмм у X», «фирменные обороты», «частые связки слов», "
+            "«какие прилагательные характерны для X» (pos_filter=['ADJ'])."
             "Стоп-слова и пунктуация уже отфильтрованы."
         ),
         "parameters": {"type": "object", "properties": {
             "author_regex": {"type": "string", "description": "Regex, например '^Dostoyevsky,'"},
             "n":   {"type": "integer", "description": "1, 2 или 3"},
             "top": {"type": "integer", "description": "Сколько вернуть (default 20)"},
+            "pos_filter": {"type": "array", "items": {"type": "string"},
+                           "description": "Фильтр POS первой токена ngram: ['NOUN','VERB','ADJ','ADV','PROPN']"},
         }, "required": ["author_regex"]},
     }},
     {"type": "function", "function": {
@@ -577,6 +908,59 @@ TOOLS_SPEC = [
     }},
 ]
 
+TOOLS_SPEC += [
+    {"type": "function", "function": {
+        "name": "lexical_diversity",
+        "description": (
+            "Лексическая разнообразность (TTR + per-book averages). "
+            "Используй для «какая лексическая плотность у X», «насколько разнообразный словарь у автора»."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "scope": {"type": "object",
+                      "description": "{'book': 'PG1342'} или {'author': '^Doyle,'} или строка 'all_corpus'"},
+        }, "required": ["scope"]},
+    }},
+    {"type": "function", "function": {
+        "name": "word_collocates",
+        "description": (
+            "Слова в окне ±N токенов вокруг target word. "
+            "Используй для «слова рядом со sea у Melville», «соседи слова X», «collocates слова X у автора»."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "scope":  {"type": "object", "description": "{'book': PGid} или {'author': regex}"},
+            "word":   {"type": "string"},
+            "window": {"type": "integer", "description": "размер окна в токенах (default 4)"},
+            "top":    {"type": "integer", "description": "сколько вернуть (default 20)"},
+            "exclude_stopwords": {"type": "boolean", "description": "пропускать the/a/of/... (default true)"},
+        }, "required": ["scope", "word"]},
+    }},
+    {"type": "function", "function": {
+        "name": "book_readability",
+        "description": (
+            "Flesch Reading Ease + Flesch-Kincaid Grade + CEFR-heuristic для одной книги. "
+            "Используй для «какой уровень сложности у книги X», «насколько сложна Pride and Prejudice», "
+            "«найди книги уровня B2-C1» (нужно вызвать для нескольких кандидатов и сравнить)."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "pg_id": {"type": "string", "description": "PG id, формат 'PG1342' или просто '1342'"},
+        }, "required": ["pg_id"]},
+    }},
+    {"type": "function", "function": {
+        "name": "word_freq_timeline",
+        "description": (
+            "Частота слова по периодам (bucket по году рождения автора + ~30 лет = period of writing). "
+            "Используй для «как менялось значение awful с XVIII по XX», "
+            "«когда radio стало массовым в литературе». "
+            "ВНИМАНИЕ: SPGC в основном pre-1950, после 1950 данных мало."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "word":         {"type": "string"},
+            "bucket_years": {"type": "integer", "description": "default 25"},
+            "min_books_per_bucket": {"type": "integer", "description": "default 3"},
+        }, "required": ["word"]},
+    }},
+]
+
 TOOL_DISPATCH = {
     "corpus_overview":        corpus_overview,
     "semantic_search":        semantic_search,
@@ -585,6 +969,10 @@ TOOL_DISPATCH = {
     "affinity_by_author":     affinity_by_author,
     "word_contexts":          word_contexts,
     "compare_authors":        compare_authors,
+    "lexical_diversity":      lexical_diversity,
+    "word_collocates":        word_collocates,
+    "book_readability":       book_readability,
+    "word_freq_timeline":     word_freq_timeline,
 }
 
 
