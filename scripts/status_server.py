@@ -171,8 +171,11 @@ def collect_status():
     build_running = False
     build_progress = None
     try:
-        out = subprocess.run(["pgrep", "-af", "build_index_raw"], capture_output=True, text=True)
-        build_running = "build_index_raw" in out.stdout
+        # Match python's running build_index_raw, not any shell watcher
+        # whose command line just mentions the script name as a string.
+        out = subprocess.run(["pgrep", "-af", "python.*build_index_raw"],
+                             capture_output=True, text=True)
+        build_running = bool(out.stdout.strip())
     except Exception:
         pass
     if BUILD_INDEX_LOG.exists():
@@ -269,7 +272,146 @@ def collect_status():
             "uptime": uptime,
         },
         "top_authors": top_authors(20),
+        "health": _collect_health(ollama, chroma_bytes, build_running, du),
     }
+
+
+def _check_http(url: str, timeout: float = 2.0) -> bool:
+    try:
+        import urllib.request
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def _check_container_port(container: str, port: int) -> bool:
+    """exec into container, hit local port — works for chat/admin on 127.0.0.1."""
+    try:
+        proc = subprocess.run(
+            ["docker", "exec", container, "python", "-c",
+             f"import socket; s=socket.socket(); s.settimeout(2); "
+             f"s.connect(('127.0.0.1', {port})); s.close()"],
+            capture_output=True, timeout=5,
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def _systemd_active(unit: str) -> bool:
+    try:
+        proc = subprocess.run(["systemctl", "is-active", unit],
+                              capture_output=True, text=True, timeout=3)
+        return proc.stdout.strip() == "active"
+    except Exception:
+        return False
+
+
+def _collect_health(ollama: dict, chroma_bytes: int, build_running: bool, du) -> dict:
+    """Aggregate health snapshot for the big overview card."""
+    components: list[dict] = []
+
+    # 1) Ollama + GPU
+    ollama_ok = bool(ollama.get("up") and ollama.get("gpu") and ollama.get("models_loaded"))
+    components.append({
+        "name": "Ollama LLM + GPU", "ok": ollama_ok,
+        "detail": ("qwen3:14b in VRAM" if ollama_ok else "API or GPU degraded"),
+    })
+
+    # 2) ChromaDB readable — chromadb lives in the container, status_server runs
+    # on the host without that python pkg, so we exec into gutenberg-lab to count.
+    chroma_ok = False
+    chroma_detail = "indexing in progress" if build_running else "unknown"
+    if not build_running:
+        try:
+            proc = subprocess.run(
+                ["docker", "exec", "wordcracker-gutenberg-lab-1", "python", "-c",
+                 "import chromadb; c=chromadb.PersistentClient(path='/workspace/chroma_db');"
+                 "print(c.get_collection('gutenberg-index').count())"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if proc.returncode == 0 and proc.stdout.strip().isdigit():
+                n = int(proc.stdout.strip())
+                chroma_ok = True
+                chroma_detail = f"{n:,} chunks"
+            else:
+                chroma_detail = f"read failed: {(proc.stderr or proc.stdout)[:80]}"
+        except Exception as e:
+            chroma_detail = f"exec failed: {str(e)[:80]}"
+    components.append({"name": "ChromaDB index", "ok": chroma_ok, "detail": chroma_detail})
+
+    # 3) chat_server
+    chat_ok = _check_container_port("wordcracker-gutenberg-lab-1", 8890)
+    components.append({"name": "Chat server (:8890)", "ok": chat_ok,
+                       "detail": "port reachable in container" if chat_ok else "not listening"})
+
+    # 4) admin_server
+    admin_ok = _check_container_port("wordcracker-gutenberg-lab-1", 8891)
+    components.append({"name": "Admin server (:8891)", "ok": admin_ok,
+                       "detail": "port reachable in container" if admin_ok else "not listening"})
+
+    # 5) cloudflared
+    cf_ok = _systemd_active("cloudflared")
+    components.append({"name": "Cloudflare tunnel", "ok": cf_ok,
+                       "detail": "systemd active" if cf_ok else "service down"})
+
+    # 6) nginx
+    ng_ok = _systemd_active("nginx")
+    components.append({"name": "nginx reverse-proxy", "ok": ng_ok,
+                       "detail": "systemd active" if ng_ok else "service down"})
+
+    # 7) disk
+    pct = round(du.used / du.total * 100, 1)
+    disk_ok = pct < 90
+    components.append({"name": "Disk /data", "ok": disk_ok,
+                       "detail": f"{pct}% used ({human_bytes(du.free)} free)"})
+
+    # Roll-up
+    critical = ["Ollama LLM + GPU", "Chat server (:8890)", "Cloudflare tunnel",
+                "nginx reverse-proxy", "ChromaDB index"]
+    crit_failed = [c for c in components if c["name"] in critical and not c["ok"]]
+    non_crit_failed = [c for c in components if c["name"] not in critical and not c["ok"]]
+
+    if crit_failed:
+        overall = "down"
+    elif non_crit_failed or build_running:
+        overall = "degraded"
+    else:
+        overall = "healthy"
+
+    return {
+        "overall":     overall,
+        "components":  components,
+        "failed":      [c["name"] for c in components if not c["ok"]],
+    }
+
+
+def _health_card_html(h: dict) -> str:
+    overall = h.get("overall", "unknown")
+    color = {"healthy": "#7ed321", "degraded": "#f5a623", "down": "#e05a5a"}.get(overall, "#888")
+    label = {"healthy": "HEALTHY ✅", "degraded": "DEGRADED ⚠", "down": "DOWN ❌"}.get(overall, overall.upper())
+    rows = ""
+    for c in h.get("components", []):
+        ico = "🟢" if c["ok"] else "🔴"
+        rows += (f"<tr><td style='width:22px'>{ico}</td>"
+                 f"<td><b>{c['name']}</b></td>"
+                 f"<td style='color:#888'>{c['detail']}</td></tr>")
+    failed = h.get("failed") or []
+    failed_line = (f"<div style='margin-top:8px;color:#e05a5a'>⚠ failing: {', '.join(failed)}</div>"
+                   if failed else "")
+    return f"""
+    <div style="background:#262a31; border-radius:8px; padding:14px 18px;
+                border-left:6px solid {color}; margin-bottom:18px;">
+      <div style="display:flex; align-items:baseline; gap:14px;">
+        <h2 style="margin:0; font-size:18px;">Service health</h2>
+        <span style="color:{color}; font-weight:700; letter-spacing:.5px;">{label}</span>
+      </div>
+      <table style="margin-top:10px; width:100%; border-collapse:collapse; font-size:13px;">
+        {rows}
+      </table>
+      {failed_line}
+    </div>"""
 
 
 def render_html(s: dict) -> str:
@@ -404,6 +546,7 @@ def render_html(s: dict) -> str:
 <body>
   <h1>wordcracker · status</h1>
   <div class=subtitle>updated {s['now']} · auto-refresh 30 s · <a href="/api/status">JSON</a></div>
+  {_health_card_html(s.get('health', {}))}
   <div class=grid>
     {baseline_card}
     {wd_card}
