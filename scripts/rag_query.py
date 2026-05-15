@@ -41,7 +41,7 @@ DEFAULT_MODEL          = "qwen3:14b"
 DEFAULT_OLLAMA_HOST    = os.environ.get("OLLAMA_HOST", "http://ollama:11434")
 DEFAULT_MAX_ITER       = 5
 DEFAULT_TEMPERATURE    = 0.3
-DEFAULT_KEEP_ALIVE     = "5m"  # keep model warm across the tool-call loop
+DEFAULT_KEEP_ALIVE     = "-1"  # pin model in VRAM permanently — CF Free has 100s edge timeout
 
 SYSTEM_PROMPT = """Ты — литературный аналитик и помощник по корпусу Project Gutenberg.
 
