@@ -30,6 +30,8 @@ METADATA_CSV = Path("/data/spgc/SPGC-metadata-2018-07-18.csv")
 RAW_TEXT = Path("/data/raw_text")
 WODEHOUSE_RAW = Path("/data/wodehouse_raw")
 GUTENBERG_RAW = Path("/data/gutenberg_raw")
+CHROMA_DB = Path("/data/chroma_db")
+BUILD_INDEX_LOG = DERIVED / "build_index.log"
 
 
 def safe_json(path: Path):
@@ -119,6 +121,24 @@ def collect_status():
     ctx_dir = DERIVED / "contexts"
     contexts = count_files(ctx_dir, "*.txt")
 
+    # chroma db
+    chroma_bytes = dir_size_bytes(CHROMA_DB) if CHROMA_DB.exists() else 0
+    build_running = False
+    build_progress = None
+    try:
+        out = subprocess.run(["pgrep", "-af", "build_index_raw"], capture_output=True, text=True)
+        build_running = "build_index_raw" in out.stdout
+    except Exception:
+        pass
+    if BUILD_INDEX_LOG.exists():
+        try:
+            # last tqdm line in the log carries "N/Total" book progress
+            tail = BUILD_INDEX_LOG.read_text(errors="ignore").splitlines()[-1] if BUILD_INDEX_LOG.stat().st_size else ""
+            tail = tail.replace("\r", "\n").splitlines()[-1] if "\r" in tail else tail
+            build_progress = tail[:160]
+        except Exception:
+            pass
+
     # disk
     du = shutil.disk_usage("/data")
 
@@ -152,6 +172,11 @@ def collect_status():
             "rsync_running": rsync_alive,
         },
         "contexts_files": contexts,
+        "chroma": {
+            "db_bytes": chroma_bytes,
+            "build_running": build_running,
+            "build_last_line": build_progress or "",
+        },
         "disk_data": {
             "total": du.total,
             "used":  du.used,
@@ -212,6 +237,13 @@ def render_html(s: dict) -> str:
         ("Rsync still running",            "yes" if raw["rsync_running"] else "no"),
     ], accent="#bd10e0")
 
+    chroma = s["chroma"]
+    chroma_card = card("ChromaDB semantic index", [
+        ("DB size on disk", human_bytes(chroma["db_bytes"])),
+        ("Build process",   "running" if chroma["build_running"] else "idle"),
+        ("Last log line",   f"<code style='font-size:11px'>{chroma['build_last_line'] or '—'}</code>"),
+    ], accent="#50e3c2")
+
     sys_card = card("System", [
         ("Disk /data",  f"{human_bytes(disk['used'])} / {human_bytes(disk['total'])} ({disk['pct_used']} %)"),
         ("Disk free",   human_bytes(disk["free"])),
@@ -265,6 +297,7 @@ def render_html(s: dict) -> str:
     {wd_card}
     {ner_card}
     {raw_card}
+    {chroma_card}
     {sys_card}
   </div>
 

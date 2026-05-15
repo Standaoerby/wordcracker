@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""
+Build ChromaDB semantic index over /data/raw_text/ (pg<id>.txt files).
+
+Metadata is looked up in SPGC-metadata-2018-07-18.csv by PG id. Chunks
+are added in batches; embeddings run on GPU via SentenceTransformer
+'all-MiniLM-L6-v2'.
+
+Optional --author regex narrows the books indexed (e.g. '^Wodehouse,'
+for a quick test pass before indexing the whole corpus).
+
+Usage:
+  python build_index_raw.py \
+    --raw-dir   /workspace/raw_text \
+    --metadata  /workspace/spgc/SPGC-metadata-2018-07-18.csv \
+    --db-path   /workspace/chroma_db \
+    --collection gutenberg-index \
+    --batch     256
+"""
+import argparse
+import re
+from pathlib import Path
+
+import chromadb
+import pandas as pd
+from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+from tqdm import tqdm
+
+GUTENBERG_HEADER = re.compile(r"\*\*\* START OF (?:THE|THIS) PROJECT GUTENBERG.*?\*\*\*", re.IGNORECASE | re.DOTALL)
+GUTENBERG_FOOTER = re.compile(r"\*\*\* END OF (?:THE|THIS) PROJECT GUTENBERG.*", re.IGNORECASE | re.DOTALL)
+
+
+def strip_gutenberg(text: str) -> str:
+    m = GUTENBERG_HEADER.search(text)
+    if m:
+        text = text[m.end():]
+    m = GUTENBERG_FOOTER.search(text)
+    if m:
+        text = text[:m.start()]
+    return text
+
+
+def chunk_words(text: str, max_words: int = 200):
+    words = text.split()
+    for i in range(0, len(words), max_words):
+        yield i, " ".join(words[i:i + max_words])
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--raw-dir",   required=True, type=Path)
+    ap.add_argument("--metadata",  required=True, type=Path)
+    ap.add_argument("--db-path",   required=True, type=str)
+    ap.add_argument("--collection", default="gutenberg-index")
+    ap.add_argument("--author", default=None, help="regex against metadata.author column to filter books")
+    ap.add_argument("--lang",   default="en")
+    ap.add_argument("--max-words", type=int, default=200)
+    ap.add_argument("--batch",     type=int, default=256)
+    ap.add_argument("--limit-books", type=int, default=None, help="cap on book count (for dry-run)")
+    ap.add_argument("--reset", action="store_true", help="drop and recreate the collection first")
+    args = ap.parse_args()
+
+    print(f"[meta] loading {args.metadata}")
+    df = pd.read_csv(args.metadata).set_index("id")
+    print(f"  {len(df)} rows total")
+
+    sel = df[df["language"].fillna("").str.contains(f"'{args.lang}'", regex=False)]
+    if args.author:
+        sel = sel[sel["author"].fillna("").str.contains(args.author, case=False, regex=True)]
+    print(f"  {len(sel)} rows after lang='{args.lang}' author~='{args.author}'")
+
+    # which raw files do we actually have on disk?
+    have = {p.stem: p for p in args.raw_dir.glob("pg*.txt")}  # 'pg2005' -> Path
+    sel_ids = [pid for pid in sel.index if pid.lower() in have]  # pid like 'PG2005'
+    if args.limit_books:
+        sel_ids = sel_ids[:args.limit_books]
+    print(f"  {len(sel_ids)} books present on disk")
+
+    print(f"[chroma] {args.db_path}  collection={args.collection!r}")
+    client = chromadb.PersistentClient(path=args.db_path)
+    if args.reset:
+        try:
+            client.delete_collection(args.collection)
+            print("  deleted existing collection")
+        except Exception:
+            pass
+    embed_fn = SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+    coll = client.get_or_create_collection(
+        name=args.collection, embedding_function=embed_fn,
+        metadata={"creator": "wordcracker", "source": "raw_text"})
+    print(f"  starting count: {coll.count()}")
+
+    buf_docs, buf_ids, buf_meta = [], [], []
+
+    def flush():
+        if not buf_docs:
+            return
+        coll.add(documents=buf_docs, ids=buf_ids, metadatas=buf_meta)
+        buf_docs.clear(); buf_ids.clear(); buf_meta.clear()
+
+    total_chunks = 0
+    for pid in tqdm(sel_ids, desc="books", unit="book"):
+        meta = sel.loc[pid]
+        path = have[pid.lower()]
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        text = strip_gutenberg(text)
+        author = str(meta.get("author") or "")
+        title  = str(meta.get("title")  or "")
+        year   = meta.get("authoryearofbirth")
+        for chunk_idx, chunk in chunk_words(text, args.max_words):
+            buf_docs.append(chunk)
+            buf_ids.append(f"{pid}_{chunk_idx}")
+            buf_meta.append({
+                "pg_id":  pid,
+                "author": author,
+                "title":  title,
+                "year":   int(year) if pd.notna(year) else 0,
+                "chunk":  chunk_idx,
+            })
+            total_chunks += 1
+            if len(buf_docs) >= args.batch:
+                flush()
+    flush()
+
+    print(f"[done] added {total_chunks:,} chunks across {len(sel_ids)} books")
+    print(f"  collection now has: {coll.count():,} documents")
+
+
+if __name__ == "__main__":
+    main()
