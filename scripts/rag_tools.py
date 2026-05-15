@@ -124,25 +124,63 @@ def corpus_overview() -> dict:
     except Exception:
         out["rsync_running"] = None
 
-    # ChromaDB state — count() doesn't need an embedder, so don't pay the
-    # CUDA context just to read a number (avoids conflict with an in-flight
-    # reindex that already holds GPU exclusively).
+    # ChromaDB state — only attempt count() if no reindex is racing the
+    # hnsw segments. count() doesn't need an embedder.
+    reindex_active = False
     try:
-        import chromadb
-        client = chromadb.PersistentClient(path=CHROMA_PATH)
-        col = client.get_collection(COLLECTION_NAME)
-        out["chromadb_chunks"] = col.count()
-    except Exception as e:
-        out["chromadb_error"] = str(e)
+        proc = subprocess.run(["pgrep", "-f", "build_index_raw"], capture_output=True, text=True)
+        reindex_active = bool(proc.stdout.strip())
+    except Exception:
+        pass
+    if reindex_active:
+        out["chromadb_chunks"] = "indexing in progress, count unavailable"
+    else:
+        try:
+            import chromadb
+            client = chromadb.PersistentClient(path=CHROMA_PATH)
+            col = client.get_collection(COLLECTION_NAME)
+            out["chromadb_chunks"] = col.count()
+        except Exception as e:
+            out["chromadb_error"] = str(e)
 
-    # index build process
+    # index build process — parse tqdm progress line from the most recent log
     try:
         proc = subprocess.run(["pgrep", "-f", "build_index_raw"], capture_output=True, text=True)
         out["reindex_running"] = bool(proc.stdout.strip())
-        log = Path("/workspace/spgc/derived/build_index_dvd.log")
-        if log.exists():
+        # pick the most recently modified build_index*.log
+        logs = sorted(
+            Path("/workspace/spgc/derived").glob("build_index*.log"),
+            key=lambda p: p.stat().st_mtime, reverse=True,
+        )
+        if logs:
+            log = logs[0]
+            out["last_index_log"] = log.name
             out["last_index_log_mtime"] = time.strftime("%Y-%m-%d %H:%M:%S",
                                                        time.localtime(log.stat().st_mtime))
+            # read last few KB and grab the most recent tqdm line
+            with open(log, "rb") as fh:
+                fh.seek(0, 2)
+                size = fh.tell()
+                fh.seek(max(0, size - 4096))
+                tail = fh.read().decode("utf-8", errors="ignore").replace("\r", "\n")
+            tqdm_re = re.compile(
+                r"books:\s*(\d+)%\|[^|]*\|\s*(\d+)/(\d+)\s*"
+                r"\[([\d:]+)<([\d:?]+),\s*([\d.]+)\s*book/s\]"
+            )
+            last = None
+            for line in tail.splitlines():
+                m = tqdm_re.search(line)
+                if m:
+                    last = m
+            if last:
+                out["reindex_progress"] = {
+                    "percent":         int(last.group(1)),
+                    "books_done":      int(last.group(2)),
+                    "books_total":     int(last.group(3)),
+                    "elapsed":         last.group(4),
+                    "eta_remaining":   last.group(5),
+                    "rate_book_per_s": float(last.group(6)),
+                }
     except Exception:
         pass
 
