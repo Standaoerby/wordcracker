@@ -15,11 +15,14 @@ URLs:
   /health        "ok"
 """
 import argparse
+import csv
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
+from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -78,6 +81,48 @@ def human_int(n) -> str:
     if n is None:
         return "—"
     return f"{n:,}".replace(",", " ")
+
+
+_top_authors_cache = {"ts": 0, "data": []}
+
+def top_authors(limit: int = 20, lang_marker: str = "'en'", ttl: int = 300):
+    """Top N authors in SPGC metadata.csv by book count, en only. Cached."""
+    now = time.time()
+    if _top_authors_cache["data"] and now - _top_authors_cache["ts"] < ttl:
+        return _top_authors_cache["data"]
+    if not METADATA_CSV.exists():
+        return []
+    books = Counter()
+    downloads = Counter()
+    try:
+        with open(METADATA_CSV, encoding="utf-8") as fh:
+            rd = csv.DictReader(fh)
+            for row in rd:
+                author = (row.get("author") or "").strip()
+                if not author:
+                    continue
+                if lang_marker not in (row.get("language") or ""):
+                    continue
+                books[author] += 1
+                try:
+                    downloads[author] += int(row.get("downloads") or 0)
+                except ValueError:
+                    pass
+    except Exception:
+        return []
+    out = [
+        {"author": a, "books": n, "downloads": downloads[a]}
+        for a, n in books.most_common(limit)
+    ]
+    _top_authors_cache["ts"] = now
+    _top_authors_cache["data"] = out
+    return out
+
+
+def slug_for_author(author: str) -> str:
+    """Mirrors the slug derivation in spgc_author_affinity.py: surname lowercased, non-alnum -> _."""
+    surname = author.split(",", 1)[0].lower()
+    return re.sub(r"[^a-z0-9]+", "_", surname).strip("_") or "author"
 
 
 def collect_status():
@@ -186,6 +231,7 @@ def collect_status():
         "host": {
             "uptime": uptime,
         },
+        "top_authors": top_authors(20),
     }
 
 
@@ -230,11 +276,13 @@ def render_html(s: dict) -> str:
         ("Clean rows",          human_int(ner.get("clean_rows"))),
     ], accent="#f5a623")
 
+    pending = max(0, raw["source_rsync_mirror"] - raw["books"])
     raw_card = card("Raw text on disk (unified)", [
-        ("Total unique books",             f"{human_int(raw['books'])} ({human_bytes(raw['bytes'])})"),
-        ("Source: per-author downloads",   human_int(raw["source_per_author"])),
-        ("Source: rsync mirror",           human_int(raw["source_rsync_mirror"])),
-        ("Rsync still running",            "yes" if raw["rsync_running"] else "no"),
+        ("Unique books (hard-linked)",  f"{human_int(raw['books'])} ({human_bytes(raw['bytes'])})"),
+        ("From per-author downloads",   human_int(raw["source_per_author"])),
+        ("rsync mirror files (raw, incl. dupes)", human_int(raw["source_rsync_mirror"])),
+        ("rsync arrivals not yet linked", human_int(pending)),
+        ("Rsync still running",         "yes" if raw["rsync_running"] else "no"),
     ], accent="#bd10e0")
 
     chroma = s["chroma"]
@@ -263,6 +311,22 @@ def render_html(s: dict) -> str:
         )
     if not auth_rows:
         auth_rows = "<tr><td colspan=6 style='text-align:center;color:#888'>none yet</td></tr>"
+
+    analyzed_slugs = {a["slug"] for a in s["authors_analyzed"]}
+    top_rows = ""
+    for i, a in enumerate(s["top_authors"], 1):
+        slug = slug_for_author(a["author"])
+        mark = "<span style='color:#7ed321'>✓</span>" if slug in analyzed_slugs else "<span style='color:#555'>·</span>"
+        top_rows += (
+            f"<tr><td class=v style='color:#888'>{i}</td>"
+            f"<td>{a['author']}</td>"
+            f"<td class=v>{human_int(a['books'])}</td>"
+            f"<td class=v>{human_int(a['downloads'])}</td>"
+            f"<td style='text-align:center'>{mark}</td>"
+            f"<td style='font-family:monospace;color:#888'>{slug}</td></tr>"
+        )
+    if not top_rows:
+        top_rows = "<tr><td colspan=6 style='text-align:center;color:#888'>metadata not loaded</td></tr>"
 
     return f"""<!doctype html>
 <html lang=en>
@@ -306,6 +370,14 @@ def render_html(s: dict) -> str:
     <table>
       <tr><th>slug</th><th style='text-align:right'>books matched</th><th style='text-align:right'>aggregated</th><th style='text-align:right'>author tokens</th><th style='text-align:right'>affinity rows</th><th style='text-align:right'>file size</th></tr>
       {auth_rows}
+    </table>
+  </div>
+
+  <div class=authors>
+    <h2>Top 20 authors in SPGC (by book count, en only)</h2>
+    <table>
+      <tr><th style='text-align:right'>#</th><th>author</th><th style='text-align:right'>books</th><th style='text-align:right'>downloads</th><th style='text-align:center'>analyzed</th><th>slug</th></tr>
+      {top_rows}
     </table>
   </div>
 
