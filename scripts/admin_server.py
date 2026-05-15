@@ -1,0 +1,397 @@
+#!/usr/bin/env python3
+"""
+admin_server.py — minimal upload UI for adding books into the corpus.
+
+Web endpoint that accepts a .zip / .tar.gz / .tar.bz2 / single .txt, extracts
+it, hard-links recognized Project Gutenberg book files into /data/raw_text/,
+and optionally triggers an incremental ChromaDB reindex.
+
+Routes:
+  GET  /              — HTML upload form + recent jobs
+  POST /upload        — multipart, parses + links + (optional) triggers reindex
+  GET  /status        — JSON: recent jobs, reindex running?, raw_text count
+  GET  /health        — "ok"
+  GET  /api/status    — alias for /status
+
+Runs inside gutenberg-lab container on :8891. No deps beyond Python 3 stdlib.
+
+Filename → PG id mapping:
+  pg(\\d+)\\.txt           → PG{id}.txt   (gutenberg.org/cache/epub style)
+  (\\d+)-0\\.txt           → PG{id}.txt   (rsync mirror UTF-8)
+  (\\d+)\\.txt             → PG{id}.txt   (rare bare numeric)
+  anything else            → skipped, listed in job report
+"""
+import argparse
+import cgi
+import io
+import json
+import os
+import re
+import shutil
+import subprocess
+import tarfile
+import threading
+import time
+import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+RAW_DIR     = Path("/workspace/raw_text")
+UPLOAD_ROOT = Path("/workspace/uploads")
+INDEX_LOCK  = Path("/workspace/spgc/derived/.reindex.lock")
+INDEX_LOG   = Path("/workspace/spgc/derived/admin_reindex.log")
+JOBS_LOG    = Path("/workspace/spgc/derived/admin_jobs.json")
+SCRIPTS_DIR = Path("/workspace/scripts")
+SPGC_META   = Path("/workspace/spgc/SPGC-metadata-2018-07-18.csv")
+
+PG_PATTERNS = [
+    re.compile(r"^pg(\d+)\.txt$",      re.IGNORECASE),
+    re.compile(r"^(\d+)-0\.txt$"),
+    re.compile(r"^(\d+)\.txt$"),
+]
+
+MAX_UPLOAD_MB = 4096   # 4 GB
+ALLOWED_EXTS  = {".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".txt"}
+
+
+def _filename_to_pgid(name: str) -> str | None:
+    base = os.path.basename(name)
+    for p in PG_PATTERNS:
+        m = p.match(base)
+        if m:
+            return f"PG{int(m.group(1))}"
+    return None
+
+
+def _extract_archive(archive: Path, dest: Path) -> list[Path]:
+    """Extract archive into dest, return list of files extracted."""
+    out_files: list[Path] = []
+    name_lower = archive.name.lower()
+
+    if name_lower.endswith(".zip"):
+        with zipfile.ZipFile(archive) as zf:
+            zf.extractall(dest)
+    elif name_lower.endswith((".tar.gz", ".tgz")):
+        with tarfile.open(archive, "r:gz") as tf:
+            tf.extractall(dest)
+    elif name_lower.endswith((".tar.bz2", ".tbz2")):
+        with tarfile.open(archive, "r:bz2") as tf:
+            tf.extractall(dest)
+    elif name_lower.endswith(".tar"):
+        with tarfile.open(archive, "r:") as tf:
+            tf.extractall(dest)
+    elif name_lower.endswith(".txt"):
+        dest.mkdir(parents=True, exist_ok=True)
+        target = dest / archive.name
+        shutil.copy(archive, target)
+        out_files.append(target)
+        return out_files
+    else:
+        raise ValueError(f"unsupported archive type: {archive.name}")
+
+    for root, _dirs, files in os.walk(dest):
+        for f in files:
+            out_files.append(Path(root) / f)
+    return out_files
+
+
+def _link_into_raw(files: list[Path]) -> dict:
+    """Hard-link recognized files into /workspace/raw_text. Returns counts."""
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
+    added = skipped_existing = skipped_format = 0
+    sample_skipped: list[str] = []
+    for f in files:
+        pgid = _filename_to_pgid(f.name)
+        if not pgid:
+            skipped_format += 1
+            if len(sample_skipped) < 8:
+                sample_skipped.append(f.name)
+            continue
+        target = RAW_DIR / f"{pgid.lower()}.txt"
+        if target.exists():
+            skipped_existing += 1
+            continue
+        try:
+            os.link(f, target)
+        except OSError:
+            shutil.copy(f, target)
+        added += 1
+    return {
+        "added":           added,
+        "skipped_existing": skipped_existing,
+        "skipped_format":   skipped_format,
+        "sample_skipped":   sample_skipped,
+    }
+
+
+def _read_jobs() -> list[dict]:
+    if JOBS_LOG.exists():
+        try:
+            return json.loads(JOBS_LOG.read_text())
+        except Exception:
+            return []
+    return []
+
+
+def _append_job(job: dict) -> None:
+    jobs = _read_jobs()
+    jobs.insert(0, job)
+    jobs = jobs[:50]
+    JOBS_LOG.parent.mkdir(parents=True, exist_ok=True)
+    JOBS_LOG.write_text(json.dumps(jobs, ensure_ascii=False, indent=2))
+
+
+def _reindex_running() -> bool:
+    """Either lock file present, or any build_index_raw process active."""
+    if INDEX_LOCK.exists():
+        # stale lock detection: empty file older than 30 min → ignore
+        try:
+            if time.time() - INDEX_LOCK.stat().st_mtime > 1800 and INDEX_LOCK.stat().st_size == 0:
+                INDEX_LOCK.unlink()
+            else:
+                return True
+        except OSError:
+            pass
+    try:
+        proc = subprocess.run(["pgrep", "-f", "build_index_raw"], capture_output=True, text=True)
+        return bool(proc.stdout.strip())
+    except Exception:
+        return False
+
+
+def _trigger_reindex_async() -> dict:
+    """Start build_index_raw in background. Returns info dict."""
+    if _reindex_running():
+        return {"started": False, "reason": "reindex already running"}
+    INDEX_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    INDEX_LOCK.write_text(f"{time.time()}")
+
+    cmd = [
+        "python", "-u", str(SCRIPTS_DIR / "build_index_raw.py"),
+        "--raw-dir",   str(RAW_DIR),
+        "--metadata",  str(SPGC_META),
+        "--db-path",   "/workspace/chroma_db",
+        "--collection", "gutenberg-index",
+        "--batch", "512",
+    ]
+    log_fh = open(INDEX_LOG, "w")
+
+    def _runner():
+        try:
+            subprocess.run(cmd, stdout=log_fh, stderr=subprocess.STDOUT)
+        finally:
+            log_fh.close()
+            try:
+                INDEX_LOCK.unlink()
+            except OSError:
+                pass
+
+    threading.Thread(target=_runner, daemon=True).start()
+    return {"started": True, "cmd": " ".join(cmd), "log": str(INDEX_LOG)}
+
+
+PAGE = r"""<!doctype html>
+<html lang=ru>
+<head>
+<meta charset=utf-8>
+<title>wordcracker · admin</title>
+<style>
+  body { font-family: ui-sans-serif, system-ui, sans-serif; background:#1c1f24; color:#eaeaea;
+         max-width:880px; margin:32px auto; padding:0 20px; }
+  h1 { margin:0 0 6px 0; }
+  .meta { color:#888; font-size:13px; margin-bottom:24px; }
+  form { background:#262a31; border-radius:8px; padding:18px 22px; border-left:3px solid #50e3c2; }
+  input[type=file] { background:#1a1d22; color:#eaeaea; padding:8px; border-radius:4px;
+                     border:1px solid #2f343c; width:100%; }
+  label { display:block; margin-top:12px; font-size:13px; color:#aaa; }
+  label.inline { display:inline; margin-left:8px; }
+  button { background:#50e3c2; border:0; color:#0a0c10; font-weight:600; padding:10px 24px;
+           border-radius:4px; cursor:pointer; margin-top:16px; font-size:14px; }
+  button:disabled { opacity:.5; cursor:wait; }
+  .grid { display:grid; grid-template-columns:repeat(2,1fr); gap:8px 16px; margin-top:18px; }
+  .pill { background:#1a1d22; padding:8px 12px; border-radius:6px; font-variant-numeric:tabular-nums; }
+  .pill b { color:#7ed321; }
+  .jobs { margin-top:28px; }
+  .job { background:#262a31; border-radius:6px; padding:10px 14px; margin-bottom:8px;
+         border-left:3px solid #888; font-size:13px; font-family:ui-monospace,monospace; }
+  .job.ok    { border-color:#7ed321; }
+  .job.fail  { border-color:#e05a5a; }
+  .progress { display:none; margin-top:14px; color:#888; }
+  .err { color:#e05a5a; }
+  code { background:#1a1d22; padding:1px 5px; border-radius:3px; }
+  a { color:#7ed321; }
+</style>
+</head>
+<body>
+<h1>wordcracker · admin</h1>
+<div class=meta>Загрузка архива книг → extract → hard-link в /data/raw_text → reindex.</div>
+
+<form id=f enctype=multipart/form-data>
+  <input type=file name=archive id=archive required
+         accept=".zip,.tar,.tar.gz,.tgz,.tar.bz2,.tbz2,.txt">
+  <label><input type=checkbox name=reindex checked> запустить reindex после распаковки</label>
+  <label class=meta>Принимаются: <code>.zip</code> <code>.tar.gz</code> <code>.tar.bz2</code> <code>.txt</code>.
+    Распознаются имена <code>pgN.txt</code>, <code>N-0.txt</code>, <code>N.txt</code> (N = PG id).</label>
+  <button id=send>Загрузить</button>
+  <div id=prog class=progress></div>
+</form>
+
+<div class=jobs id=jobs></div>
+
+<script>
+const f = document.getElementById('f');
+const prog = document.getElementById('prog');
+const send = document.getElementById('send');
+const jobs = document.getElementById('jobs');
+
+async function refreshJobs() {
+  try {
+    const r = await fetch('/status');
+    const d = await r.json();
+    jobs.innerHTML = '<div class=meta>Текущее: <code>/data/raw_text</code> = <b>'+d.raw_text_count+'</b> книг · reindex: '+(d.reindex_running?'<b style="color:#7ed321">running</b>':'idle')+'</div>';
+    for (const j of d.jobs) {
+      const cls = j.error ? 'fail' : 'ok';
+      const status = j.error ? '❌ '+j.error : '✅ added='+j.added+' skipped='+(j.skipped_existing+j.skipped_format);
+      jobs.innerHTML += `<div class="job ${cls}">${j.ts} · ${j.filename} (${(j.bytes/1024/1024).toFixed(1)} MB) · ${status}${j.reindex_triggered?' · reindex triggered':''}</div>`;
+    }
+  } catch(e) { jobs.innerHTML = '<div class="err">jobs load failed: '+e.message+'</div>'; }
+}
+
+f.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const file = document.getElementById('archive').files[0];
+  if (!file) return;
+  send.disabled = true;
+  prog.style.display = 'block';
+  prog.textContent = 'uploading ' + (file.size/1024/1024).toFixed(1) + ' MB…';
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/upload');
+  xhr.upload.onprogress = e => {
+    if (e.lengthComputable) {
+      const p = (e.loaded * 100 / e.total).toFixed(0);
+      prog.textContent = 'uploading ' + p + '%';
+    }
+  };
+  xhr.onload = () => {
+    send.disabled = false;
+    try {
+      const r = JSON.parse(xhr.responseText);
+      prog.textContent = r.error
+        ? 'ERROR: ' + r.error
+        : `done: +${r.added} added, ${r.skipped_existing+r.skipped_format} skipped`;
+      refreshJobs();
+    } catch(err) {
+      prog.textContent = 'bad response: ' + xhr.responseText.slice(0,200);
+    }
+  };
+  xhr.onerror = () => { send.disabled = false; prog.textContent = 'network error'; };
+  const fd = new FormData(f);
+  xhr.send(fd);
+});
+
+refreshJobs();
+setInterval(refreshJobs, 8000);
+</script>
+</body>
+</html>
+"""
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *a, **k): return
+
+    def _json(self, code: int, obj):
+        body = json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _html(self, body: str):
+        b = body.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def do_GET(self):
+        if self.path == "/health":
+            self.send_response(200); self.end_headers(); self.wfile.write(b"ok"); return
+        if self.path in ("/status", "/api/status"):
+            raw_count = sum(1 for _ in RAW_DIR.glob("pg*.txt")) if RAW_DIR.exists() else 0
+            return self._json(200, {
+                "raw_text_count": raw_count,
+                "reindex_running": _reindex_running(),
+                "jobs": _read_jobs(),
+            })
+        return self._html(PAGE)
+
+    def do_POST(self):
+        if self.path != "/upload":
+            return self._json(404, {"error": "not found"})
+        ctype = self.headers.get("Content-Type", "")
+        if not ctype.startswith("multipart/form-data"):
+            return self._json(400, {"error": "multipart/form-data required"})
+        clen = int(self.headers.get("Content-Length", "0"))
+        if clen > MAX_UPLOAD_MB * 1024 * 1024:
+            return self._json(413, {"error": f"upload >{MAX_UPLOAD_MB} MB"})
+
+        env = {"REQUEST_METHOD": "POST", "CONTENT_TYPE": ctype, "CONTENT_LENGTH": str(clen)}
+        form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ=env)
+        fileitem = form["archive"] if "archive" in form else None
+        if not fileitem or not getattr(fileitem, "filename", None):
+            return self._json(400, {"error": "missing field 'archive'"})
+
+        # save upload
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        upload_dir = UPLOAD_ROOT / ts
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = upload_dir / os.path.basename(fileitem.filename)
+        with open(archive_path, "wb") as fh:
+            shutil.copyfileobj(fileitem.file, fh)
+
+        job: dict = {"ts": ts, "filename": archive_path.name,
+                     "bytes": archive_path.stat().st_size}
+        try:
+            extracted_dir = upload_dir / "extracted"
+            extracted_dir.mkdir(exist_ok=True)
+            files = _extract_archive(archive_path, extracted_dir)
+            stats = _link_into_raw(files)
+            job.update(stats)
+            job["extracted_count"] = len(files)
+        except Exception as e:
+            job["error"] = f"extract/link failed: {e}"
+            _append_job(job)
+            return self._json(500, job)
+
+        # cleanup extracted dir (hard-links keep the data alive in /data/raw_text)
+        shutil.rmtree(extracted_dir, ignore_errors=True)
+
+        # optional reindex
+        do_reindex = "reindex" in form and form.getvalue("reindex")
+        if do_reindex and job.get("added", 0) > 0:
+            r = _trigger_reindex_async()
+            job["reindex_triggered"] = r.get("started", False)
+            job["reindex_info"]      = r
+        else:
+            job["reindex_triggered"] = False
+
+        _append_job(job)
+        return self._json(200, job)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--port", type=int, default=8891)
+    args = ap.parse_args()
+    srv = ThreadingHTTPServer((args.host, args.port), Handler)
+    print(f"wordcracker admin on http://{args.host}:{args.port}/")
+    srv.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

@@ -7,6 +7,7 @@ services:
     ports:
       - "8888:8888"
       - "8890:8890"
+      - "8891:8891"
     volumes:
       - ./notebooks:/workspace/notebooks
       - ./scripts:/workspace/scripts

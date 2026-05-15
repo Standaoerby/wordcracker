@@ -17,12 +17,14 @@
 #   sudo systemctl restart cloudflared
 
 tunnel:           REPLACE_WITH_TUNNEL_UUID
-credentials-file: /home/claude/.cloudflared/REPLACE_WITH_TUNNEL_UUID.json
+credentials-file: /etc/cloudflared/REPLACE_WITH_TUNNEL_UUID.json
 
 ingress:
   - hostname: slovoeb.net
     service:  http://127.0.0.1:8080
   - hostname: status.slovoeb.net
+    service:  http://127.0.0.1:8080
+  - hostname: admin.slovoeb.net
     service:  http://127.0.0.1:8080
   # catch-all (required by cloudflared)
   - service:  http_status:404
