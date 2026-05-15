@@ -23,14 +23,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rag_query import ask, SYSTEM_PROMPT
+from rag_query import ask, SYSTEM_PROMPT, ASSISTANT_NAME
 from rag_tools import TOOLS_SPEC
 
 PAGE = r"""<!doctype html>
 <html lang=ru>
 <head>
 <meta charset=utf-8>
-<title>wordcracker · chat</title>
+<title>__ASSISTANT_NAME__ · wordcracker</title>
 <style>
   :root { color-scheme: dark; }
   body { font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
@@ -74,8 +74,8 @@ PAGE = r"""<!doctype html>
 </head>
 <body>
 <header>
-  <h1>wordcracker · chat</h1>
-  <span class=meta>qwen3:14b · 6 tools · agentic loop</span>
+  <h1>__ASSISTANT_NAME__ · wordcracker</h1>
+  <span class=meta>qwen3:14b · 11 tools · agentic loop · multi-turn</span>
   <span style="flex:1"></span>
   <button class=secondary type=button onclick="clearHistory()">clear</button>
 </header>
@@ -217,7 +217,8 @@ class Handler(BaseHTTPRequestHandler):
                       "description": t["function"]["description"]} for t in TOOLS_SPEC]
             return self._send(200, json.dumps(tools, ensure_ascii=False, indent=2),
                               "application/json; charset=utf-8")
-        return self._send(200, PAGE, "text/html; charset=utf-8")
+        page = PAGE.replace("__ASSISTANT_NAME__", ASSISTANT_NAME)
+        return self._send(200, page, "text/html; charset=utf-8")
 
     def do_POST(self):
         if self.path != "/api/chat":
@@ -231,11 +232,12 @@ class Handler(BaseHTTPRequestHandler):
         if not question:
             return self._send(400, json.dumps({"error": "empty question"}), "application/json")
 
+        history = payload.get("history") or []
+        if not isinstance(history, list):
+            history = []
         t0 = time.time()
         try:
-            # History is currently NOT fed into ask() because the agentic loop builds
-            # its own message stack per call. Multi-turn memory is on the roadmap.
-            res = ask(question)
+            res = ask(question, history=history)
         except Exception as e:
             return self._send(500, json.dumps({"error": f"ask() raised: {e}"}),
                               "application/json")
