@@ -817,6 +817,75 @@ def word_freq_timeline(word: str, bucket_years: int = 25,
         _log(f"word_freq_timeline({word_lc}) done in {time.perf_counter()-t0:.2f}s")
 
 
+# ============================ TOOL 11: word_contexts_global ============================
+def word_contexts_global(word: str, k: int = 12, snippet_chars: int = 280) -> dict:
+    """Contexts of a target word from many authors at once.
+
+    Uses the ChromaDB semantic index to fetch chunks that are likely to
+    contain the word (we pad the query with surrounding text to bias the
+    retriever), then filters to chunks that actually mention the word.
+    Returns up to k samples, each with author/title/PG id + snippet around
+    the first occurrence.
+    """
+    t0 = time.perf_counter()
+    word_lc = word.strip().lower()
+    if not word_lc or " " in word_lc:
+        return {"error": "word must be a single token"}
+    try:
+        import chromadb
+        from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+        client = chromadb.PersistentClient(path=CHROMA_PATH)
+        embed_fn = SentenceTransformerEmbeddingFunction(model_name=EMBEDDER_NAME, device="cuda")
+        col = client.get_collection(COLLECTION_NAME, embedding_function=embed_fn)
+
+        # ChromaDB has a where_document substring filter — use it so we only
+        # retrieve chunks that literally contain the word. Then we rank what
+        # comes back by semantic distance to a paraphrastic query.
+        q = f"usage of the word {word_lc} in literature"
+        fetch = max(k * 4, 40)
+        try:
+            res = col.query(query_texts=[q], n_results=fetch,
+                            where_document={"$contains": word_lc})
+        except Exception:
+            # fallback if backend doesn't support where_document
+            res = col.query(query_texts=[q], n_results=fetch * 4)
+
+        seen_authors = set()
+        out_samples = []
+        for doc, md, dist in zip(res["documents"][0], res["metadatas"][0], res["distances"][0]):
+            doc_lc = doc.lower()
+            idx = doc_lc.find(word_lc)
+            if idx < 0:
+                continue
+            # token-boundary check — avoid matching "blackbird" when asked "bird"
+            before = doc_lc[idx-1] if idx > 0 else " "
+            after  = doc_lc[idx+len(word_lc)] if idx+len(word_lc) < len(doc_lc) else " "
+            if before.isalnum() or after.isalnum():
+                continue
+            author = md.get("author") or ""
+            if author in seen_authors:
+                continue
+            seen_authors.add(author)
+            lo = max(0, idx - snippet_chars // 2)
+            hi = min(len(doc), idx + len(word_lc) + snippet_chars // 2)
+            snippet = doc[lo:hi].replace("\n", " ").strip()
+            out_samples.append({
+                "author":   author,
+                "title":    md.get("title") or "",
+                "pg_id":    md.get("pg_id") or "",
+                "distance": round(float(dist), 4),
+                "snippet":  snippet,
+            })
+            if len(out_samples) >= k:
+                break
+        return {"word": word_lc, "k": k, "samples": out_samples,
+                "unique_authors": len(seen_authors)}
+    except Exception as e:
+        return {"error": "word_contexts_global failed", "details": str(e)}
+    finally:
+        _log(f"word_contexts_global({word_lc}) done in {time.perf_counter()-t0:.2f}s")
+
+
 # ============================ Ollama tool schemas ============================
 TOOLS_SPEC = [
     {"type": "function", "function": {
@@ -946,6 +1015,17 @@ TOOLS_SPEC += [
         }, "required": ["pg_id"]},
     }},
     {"type": "function", "function": {
+        "name": "word_contexts_global",
+        "description": (
+            "Контексты слова из разных авторов сразу (semantic search по всему корпусу). "
+            "Используй для «приведи примеры слова X у разных авторов», «как слово X используется в литературе»."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "word": {"type": "string", "description": "одно слово (single token)"},
+            "k":    {"type": "integer", "description": "сколько разных авторов (default 12)"},
+        }, "required": ["word"]},
+    }},
+    {"type": "function", "function": {
         "name": "word_freq_timeline",
         "description": (
             "Частота слова по периодам (bucket по году рождения автора + ~30 лет = period of writing). "
@@ -973,6 +1053,7 @@ TOOL_DISPATCH = {
     "word_collocates":        word_collocates,
     "book_readability":       book_readability,
     "word_freq_timeline":     word_freq_timeline,
+    "word_contexts_global":   word_contexts_global,
 }
 
 

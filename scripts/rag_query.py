@@ -68,6 +68,7 @@ SYSTEM_PROMPT = """Тебя зовут __NAME__. Ты — литературны
 - 🆕 «слова рядом со sea у Melville»  → word_collocates: ±N окно от target word
 - 🆕 «какой уровень сложности Pride and Prejudice»  → book_readability: Flesch + CEFR heuristic
 - 🆕 «когда radio стало массовым в литературе»  → word_freq_timeline: кривая по 25-летним периодам авторов
+- 🆕 «приведи примеры слова ajar у разных авторов»  → word_contexts_global: контексты слова через семантический поиск по всему корпусу
 
 **🎓 Изучение лексики (vocabulary learning)**
 - «20 слов intermediate из Pride and Prejudice для изучения»  → learning_words
