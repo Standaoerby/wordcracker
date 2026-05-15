@@ -99,6 +99,47 @@ def _maybe_translate(query: str) -> str:
         return query
 
 
+# ============================ TOOL 0: corpus_overview ============================
+def corpus_overview() -> dict:
+    """Total numbers about the corpus: raw books, indexed books, chunks, SPGC baseline."""
+    t0 = time.perf_counter()
+    out: dict = {}
+    try:
+        out["raw_books_files"] = len(list(RAW_DIR.glob("pg*.txt")))
+    except Exception:
+        out["raw_books_files"] = None
+    try:
+        import chromadb
+        from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+        client = chromadb.PersistentClient(path=CHROMA_PATH)
+        embed_fn = SentenceTransformerEmbeddingFunction(model_name=EMBEDDER_NAME, device="cuda")
+        col = client.get_collection(COLLECTION_NAME, embedding_function=embed_fn)
+        out["chromadb_chunks"] = col.count()
+        # unique pg_ids = approx unique books in the index
+        try:
+            sample = col.get(include=[], limit=20000)
+            books_seen = {i.rsplit("_", 1)[0] for i in sample.get("ids", [])}
+            out["chromadb_books_unique_sample"] = len(books_seen)
+            out["chromadb_sample_size"] = len(sample.get("ids", []))
+        except Exception:
+            pass
+    except Exception as e:
+        out["chromadb_error"] = str(e)
+    try:
+        meta_path = DERIVED_DIR / "corpus_meta.json"
+        if meta_path.exists():
+            out["spgc_baseline"] = json.loads(meta_path.read_text())
+    except Exception:
+        pass
+    out["sources"] = [
+        "rsync mirror aleph.gutenberg.org",
+        "per-author direct download from gutenberg.org/cache/epub",
+        "PG DVD July 2006 local copy",
+    ]
+    _log(f"corpus_overview done in {time.perf_counter()-t0:.2f}s")
+    return out
+
+
 # ============================ TOOL 1: semantic_search ============================
 def semantic_search(query: str, k: int = 8, author_filter: str | None = None) -> dict:
     """ChromaDB semantic search. Optional author_filter is a regex applied to metadata.author."""
@@ -384,6 +425,15 @@ def compare_authors(author1_regex: str, author2_regex: str, top: int = 20) -> di
 # ============================ Ollama tool schemas ============================
 TOOLS_SPEC = [
     {"type": "function", "function": {
+        "name": "corpus_overview",
+        "description": (
+            "Сколько всего книг в базе, сколько чанков в ChromaDB, какие источники, "
+            "сводка SPGC baseline. Используй для вопросов «сколько книг в базе», "
+            "«что у тебя за корпус», «какой объём данных»."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
         "name": "semantic_search",
         "description": (
             "Семантический поиск по корпусу 1828 книг Project Gutenberg. "
@@ -461,6 +511,7 @@ TOOLS_SPEC = [
 ]
 
 TOOL_DISPATCH = {
+    "corpus_overview":        corpus_overview,
     "semantic_search":        semantic_search,
     "corpus_stats_by_author": corpus_stats_by_author,
     "top_ngrams_by_author":   top_ngrams_by_author,
