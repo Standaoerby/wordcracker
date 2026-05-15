@@ -101,13 +101,30 @@ def _maybe_translate(query: str) -> str:
 
 # ============================ TOOL 0: corpus_overview ============================
 def corpus_overview() -> dict:
-    """Total numbers about the corpus: raw books, indexed books, chunks, SPGC baseline."""
+    """Total numbers about the corpus: raw books, indexed books, chunks, freshness gap."""
     t0 = time.perf_counter()
     out: dict = {}
+
+    # raw_text — what's available for indexing right now
     try:
-        out["raw_books_files"] = len(list(RAW_DIR.glob("pg*.txt")))
+        out["raw_books_available"] = len(list(RAW_DIR.glob("pg*.txt")))
     except Exception:
-        out["raw_books_files"] = None
+        out["raw_books_available"] = None
+
+    # rsync source dump — what's been downloaded (may include dupes)
+    try:
+        out["rsync_mirror_files"] = sum(1 for _ in Path("/workspace/gutenberg_raw").rglob("*-0.txt"))
+    except Exception:
+        out["rsync_mirror_files"] = None
+
+    # is rsync still running?
+    try:
+        proc = subprocess.run(["pgrep", "-f", "rsync.*gutenberg"], capture_output=True, text=True)
+        out["rsync_running"] = bool(proc.stdout.strip())
+    except Exception:
+        out["rsync_running"] = None
+
+    # ChromaDB state
     try:
         import chromadb
         from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
@@ -115,24 +132,36 @@ def corpus_overview() -> dict:
         embed_fn = SentenceTransformerEmbeddingFunction(model_name=EMBEDDER_NAME, device="cuda")
         col = client.get_collection(COLLECTION_NAME, embedding_function=embed_fn)
         out["chromadb_chunks"] = col.count()
-        # unique pg_ids = approx unique books in the index
-        try:
-            sample = col.get(include=[], limit=20000)
-            books_seen = {i.rsplit("_", 1)[0] for i in sample.get("ids", [])}
-            out["chromadb_books_unique_sample"] = len(books_seen)
-            out["chromadb_sample_size"] = len(sample.get("ids", []))
-        except Exception:
-            pass
     except Exception as e:
         out["chromadb_error"] = str(e)
+
+    # index build process
+    try:
+        proc = subprocess.run(["pgrep", "-f", "build_index_raw"], capture_output=True, text=True)
+        out["reindex_running"] = bool(proc.stdout.strip())
+        log = Path("/workspace/spgc/derived/build_index_dvd.log")
+        if log.exists():
+            out["last_index_log_mtime"] = time.strftime("%Y-%m-%d %H:%M:%S",
+                                                       time.localtime(log.stat().st_mtime))
+    except Exception:
+        pass
+
+    # gap — books in raw_text that aren't yet in chromadb (since reindex is per-book)
+    # heuristic only — we'd need to query ids to be exact; here we estimate from chunks
+    if out.get("raw_books_available") and out.get("chromadb_chunks"):
+        approx_indexed_books = max(1, out["chromadb_chunks"] // 125)  # ~125 chunks/book avg
+        out["index_gap_approx"] = max(0, out["raw_books_available"] - approx_indexed_books)
+
+    # SPGC baseline counts (for the affinity pipeline, separate from chromadb)
     try:
         meta_path = DERIVED_DIR / "corpus_meta.json"
         if meta_path.exists():
             out["spgc_baseline"] = json.loads(meta_path.read_text())
     except Exception:
         pass
+
     out["sources"] = [
-        "rsync mirror aleph.gutenberg.org",
+        "rsync mirror ftp.ibiblio.org (current)",
         "per-author direct download from gutenberg.org/cache/epub",
         "PG DVD July 2006 local copy",
     ]
