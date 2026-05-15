@@ -4,7 +4,7 @@ Build ChromaDB semantic index over /data/raw_text/ (pg<id>.txt files).
 
 Metadata is looked up in SPGC-metadata-2018-07-18.csv by PG id. Chunks
 are added in batches; embeddings run on GPU via SentenceTransformer
-'all-MiniLM-L6-v2'.
+'paraphrase-multilingual-MiniLM-L12-v2' (384-d, 50+ languages incl. Russian).
 
 Optional --author regex narrows the books indexed (e.g. '^Wodehouse,'
 for a quick test pass before indexing the whole corpus).
@@ -54,7 +54,9 @@ def main():
     ap.add_argument("--collection", default="gutenberg-index")
     ap.add_argument("--author", default=None, help="regex against metadata.author column to filter books")
     ap.add_argument("--lang",   default="en")
-    ap.add_argument("--max-words", type=int, default=200)
+    ap.add_argument("--max-words", type=int, default=500)
+    ap.add_argument("--embedder", default="paraphrase-multilingual-MiniLM-L12-v2",
+                    help="sentence-transformers model name (384-d default works as drop-in)")
     ap.add_argument("--batch",     type=int, default=256)
     ap.add_argument("--limit-books", type=int, default=None, help="cap on book count (for dry-run)")
     ap.add_argument("--reset", action="store_true", help="drop and recreate the collection first")
@@ -86,7 +88,7 @@ def main():
             pass
     # device='cuda' is critical -- without it sentence-transformers defaults
     # to CPU even when torch.cuda is available, ~10x slower for MiniLM.
-    embed_fn = SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2", device="cuda")
+    embed_fn = SentenceTransformerEmbeddingFunction(model_name=args.embedder, device="cuda")
     coll = client.get_or_create_collection(
         name=args.collection, embedding_function=embed_fn,
         metadata={"creator": "wordcracker", "source": "raw_text"})
