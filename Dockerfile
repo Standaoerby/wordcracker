@@ -1,17 +1,16 @@
-FROM pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
 
-# Установка зависимостей
 RUN apt update && apt install -y \
-    git wget curl unzip build-essential \
+    git wget curl unzip build-essential tmux \
     && apt clean
 
-# Python библиотеки
 RUN pip install --upgrade pip && pip install \
     jupyterlab \
     nltk \
     spacy \
     transformers \
     sentencepiece \
+    sentence-transformers \
     pandas \
     numpy \
     matplotlib \
@@ -28,14 +27,8 @@ RUN pip install --upgrade pip && pip install \
     typer \
     rich
 
-# Загрузка языковой модели spaCy
 RUN python -m spacy download en_core_web_sm
 
-# Рабочая директория
 WORKDIR /workspace
-
 EXPOSE 8888
-
 CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root", "--ServerApp.token=''", "--ServerApp.password=''"]
-
-

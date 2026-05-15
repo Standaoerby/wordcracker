@@ -7,7 +7,7 @@ import random
 from pathlib import Path
 
 # Куда сохраняем книги
-SAVE_PATH = "/media/standa/books"
+SAVE_PATH = os.environ.get("BOOKS_DIR", "/workspace/books")
 LOG_PATH = os.path.join(SAVE_PATH, "download_log.txt")
 os.makedirs(SAVE_PATH, exist_ok=True)
 
@@ -99,8 +99,9 @@ def main():
             if not next_url:
                 print("\n🏁 Достигнут конец каталога.")
         except Exception as e:
-            print(f"❌ Ошибка при загрузке страницы: {e}")
-            break
+            print(f"❌ Ошибка при загрузке страницы: {e} — retry через 30 сек...")
+            time.sleep(30)
+            continue
 
     print(f"\n✅ Готово. Загружено книг: {total}")
 

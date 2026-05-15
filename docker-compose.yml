@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   gutenberg-lab:
     image: wordcracker-textlab
@@ -13,9 +11,18 @@ services:
       - ./scripts:/workspace/scripts
       - ./data:/workspace/data
       - ./raw_books:/workspace/raw_books
-      - /media/standa/books:/workspace/books:ro
-      - /media/standa/clean_books:/workspace/clean_books
-    command: [
-      "sh", "-c",
-      "jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --ServerApp.token='' --ServerApp.password='' && echo '🟢 Открывай http://192.168.1.115:8888/lab'"
-    ]
+      - /data/books:/workspace/books
+      - /data/clean_books:/workspace/clean_books
+      - /data/chroma_db:/workspace/chroma_db
+      - /data/spgc:/workspace/spgc
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: >
+      sh -c "jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root
+      --ServerApp.token='' --ServerApp.password=''
+      --notebook-dir=/workspace"
