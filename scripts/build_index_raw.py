@@ -84,11 +84,21 @@ def main():
             print("  deleted existing collection")
         except Exception:
             pass
-    embed_fn = SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+    # device='cuda' is critical -- without it sentence-transformers defaults
+    # to CPU even when torch.cuda is available, ~10x slower for MiniLM.
+    embed_fn = SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2", device="cuda")
     coll = client.get_or_create_collection(
         name=args.collection, embedding_function=embed_fn,
         metadata={"creator": "wordcracker", "source": "raw_text"})
-    print(f"  starting count: {coll.count()}")
+    print(f"  starting count: {coll.count()}", flush=True)
+
+    # Resume: skip books whose chunks are already indexed
+    already_books = set()
+    if not args.reset:
+        existing = coll.get(include=[])
+        for eid in existing["ids"]:
+            already_books.add(eid.rsplit("_", 1)[0])
+        print(f"  already indexed books: {len(already_books)}", flush=True)
 
     buf_docs, buf_ids, buf_meta = [], [], []
 
@@ -99,7 +109,11 @@ def main():
         buf_docs.clear(); buf_ids.clear(); buf_meta.clear()
 
     total_chunks = 0
-    for pid in tqdm(sel_ids, desc="books", unit="book"):
+    skipped = 0
+    for pid in tqdm(sel_ids, desc="books", unit="book", file=__import__("sys").stdout, mininterval=2.0):
+        if pid in already_books:
+            skipped += 1
+            continue
         meta = sel.loc[pid]
         path = have[pid.lower()]
         try:
@@ -125,8 +139,9 @@ def main():
                 flush()
     flush()
 
-    print(f"[done] added {total_chunks:,} chunks across {len(sel_ids)} books")
-    print(f"  collection now has: {coll.count():,} documents")
+    print(f"[done] added {total_chunks:,} chunks across {len(sel_ids) - skipped} new books "
+          f"(skipped {skipped} already indexed)", flush=True)
+    print(f"  collection now has: {coll.count():,} documents", flush=True)
 
 
 if __name__ == "__main__":
