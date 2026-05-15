@@ -19,7 +19,6 @@ import subprocess
 import sys
 import time
 from collections import Counter
-from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
@@ -35,6 +34,7 @@ DERIVED_DIR     = Path("/workspace/spgc/derived")
 SCRIPTS_DIR     = Path("/workspace/scripts")
 CORPUS_COUNTS   = DERIVED_DIR / "corpus_counts.csv"
 RAW_DIR         = Path("/workspace/raw_text")
+USER_UPLOADS_META = DERIVED_DIR / "user_uploads_metadata.csv"
 OLLAMA_HOST     = os.environ.get("OLLAMA_HOST", "http://ollama:11434")
 
 STOPWORDS = {
@@ -59,9 +59,34 @@ def _slug(author_regex: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", base).strip("_") or "author"
 
 
-@lru_cache(maxsize=1)
+# mtime-aware cache so user uploads added by admin_server become visible to a
+# long-running chat_server without needing a restart. SPGC dump never changes
+# so its mtime is stable in practice; user_uploads_metadata.csv grows on upload.
+_metadata_cache: dict = {"df": None, "spgc_mtime": 0.0, "user_mtime": 0.0}
+
+
 def _metadata_df() -> pd.DataFrame:
-    return pd.read_csv(SPGC_METADATA)
+    spgc_m = SPGC_METADATA.stat().st_mtime if SPGC_METADATA.exists() else 0.0
+    user_m = USER_UPLOADS_META.stat().st_mtime if USER_UPLOADS_META.exists() else 0.0
+    if (_metadata_cache["df"] is not None
+            and _metadata_cache["spgc_mtime"] == spgc_m
+            and _metadata_cache["user_mtime"] == user_m):
+        return _metadata_cache["df"]
+    df = pd.read_csv(SPGC_METADATA)
+    if USER_UPLOADS_META.exists():
+        try:
+            ud = pd.read_csv(USER_UPLOADS_META)
+            # align columns to SPGC schema; missing → NaN, extra → dropped
+            for col in df.columns:
+                if col not in ud.columns:
+                    ud[col] = pd.NA
+            ud = ud[df.columns]
+            df = pd.concat([df, ud], ignore_index=True)
+            _log(f"merged {len(ud)} user uploads into metadata ({len(df)} total)")
+        except Exception as e:
+            _log(f"failed to load user uploads metadata: {e}")
+    _metadata_cache.update({"df": df, "spgc_mtime": spgc_m, "user_mtime": user_m})
+    return df
 
 
 def _select_books(author_regex: str, lang: str = "en") -> pd.DataFrame:
@@ -107,7 +132,11 @@ def corpus_overview() -> dict:
 
     # raw_text — what's available for indexing right now
     try:
-        out["raw_books_available"] = len(list(RAW_DIR.glob("pg*.txt")))
+        pg_count = len(list(RAW_DIR.glob("pg*.txt")))
+        user_count = len(list(RAW_DIR.glob("u*.txt")))
+        out["raw_books_available"] = pg_count + user_count
+        out["raw_books_pg"] = pg_count
+        out["raw_books_user_uploads"] = user_count
     except Exception:
         out["raw_books_available"] = None
 
@@ -546,8 +575,12 @@ def lexical_diversity(scope: dict | str) -> dict:
             return {"scope": "all_corpus", "tokens": t, "types": v,
                     "ttr": round(v / max(1, t), 6), "note": "from corpus_counts.csv baseline"}
         elif isinstance(scope, dict) and scope.get("book"):
-            pg = scope["book"]
-            if not pg.startswith("PG"): pg = f"PG{pg}"
+            pg = scope["book"].upper()
+            if not (pg.startswith("PG") or pg.startswith("U")): pg = f"PG{pg}"
+            if pg.startswith("U"):
+                return {"error": "lexical_diversity requires SPGC counts; user-uploaded books "
+                                 "(U-prefix) are not yet tokenized into SPGC counts format",
+                        "id": pg}
             f = SPGC_COUNTS_DIR / f"{pg}_counts.txt"
             if not f.exists():
                 return {"error": "counts file not found", "pg_id": pg}
@@ -608,8 +641,12 @@ def word_collocates(scope: dict | str, word: str, window: int = 4,
         return {"error": "word required"}
     try:
         if isinstance(scope, dict) and scope.get("book"):
-            pg = scope["book"]
-            if not pg.startswith("PG"): pg = f"PG{pg}"
+            pg = scope["book"].upper()
+            if not (pg.startswith("PG") or pg.startswith("U")): pg = f"PG{pg}"
+            if pg.startswith("U"):
+                return {"error": "word_collocates requires SPGC tokens; user-uploaded books "
+                                 "(U-prefix) are not yet tokenized into SPGC tokens format",
+                        "id": pg}
             book_ids = [pg]
             label = f"book:{pg}"
         elif isinstance(scope, dict) and scope.get("author"):
@@ -688,17 +725,18 @@ _GUTENBERG_FOOTER = re.compile(r"\*\*\* END OF (?:THE|THIS) PROJECT GUTENBERG.*"
 def book_readability(pg_id: str, sample_chars: int = 200_000) -> dict:
     """Flesch Reading Ease + Flesch-Kincaid Grade for a single book.
 
-    Reads /data/raw_text/pg<id>.txt (after Gutenberg header/footer strip),
+    Reads /data/raw_text/<pg|u><id>.txt (after Gutenberg header/footer strip),
     samples the first `sample_chars` chars to keep this fast, splits sentences
-    on .!? heuristics, counts words and syllables.
+    on .!? heuristics, counts words and syllables. Accepts PG<n> (Gutenberg)
+    or U<n> (user-uploaded) ids.
     """
     t0 = time.perf_counter()
     pg = pg_id.upper()
-    if not pg.startswith("PG"):
+    if not (pg.startswith("PG") or pg.startswith("U")):
         pg = f"PG{pg}"
     raw_path = Path(f"/workspace/raw_text/{pg.lower()}.txt")
     if not raw_path.exists():
-        return {"error": "raw text not in /data/raw_text/ for this PG id", "pg_id": pg}
+        return {"error": "raw text not in /data/raw_text/ for this id", "id": pg}
     try:
         text = raw_path.read_text(encoding="utf-8", errors="replace")
         m = _GUTENBERG_HEADER.search(text)
@@ -733,7 +771,8 @@ def book_readability(pg_id: str, sample_chars: int = 200_000) -> dict:
         author = meta_row.iloc[0]["author"] if len(meta_row) else ""
 
         return {
-            "pg_id": pg, "title": title, "author": author,
+            "id": pg, "pg_id": pg, "title": title, "author": author,
+            "user_uploaded": pg.startswith("U"),
             "sampled_chars":      len(text),
             "sentences":          n_s,
             "words":              n_w,
@@ -1008,10 +1047,12 @@ TOOLS_SPEC += [
         "description": (
             "Flesch Reading Ease + Flesch-Kincaid Grade + CEFR-heuristic для одной книги. "
             "Используй для «какой уровень сложности у книги X», «насколько сложна Pride and Prejudice», "
-            "«найди книги уровня B2-C1» (нужно вызвать для нескольких кандидатов и сравнить)."
+            "«найди книги уровня B2-C1» (нужно вызвать для нескольких кандидатов и сравнить). "
+            "Работает и для пользовательских книг (id вида U<n>)."
         ),
         "parameters": {"type": "object", "properties": {
-            "pg_id": {"type": "string", "description": "PG id, формат 'PG1342' или просто '1342'"},
+            "pg_id": {"type": "string",
+                      "description": "id книги: 'PG1342' (Gutenberg) | 'U5' (user upload) | просто '1342'"},
         }, "required": ["pg_id"]},
     }},
     {"type": "function", "function": {

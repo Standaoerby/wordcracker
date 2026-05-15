@@ -41,8 +41,17 @@ UPLOAD_ROOT = Path("/workspace/uploads")
 INDEX_LOCK  = Path("/workspace/spgc/derived/.reindex.lock")
 INDEX_LOG   = Path("/workspace/spgc/derived/admin_reindex.log")
 JOBS_LOG    = Path("/workspace/spgc/derived/admin_jobs.json")
+USER_META   = Path("/workspace/spgc/derived/user_uploads_metadata.csv")
 SCRIPTS_DIR = Path("/workspace/scripts")
 SPGC_META   = Path("/workspace/spgc/SPGC-metadata-2018-07-18.csv")
+
+# SPGC metadata column order — we mirror it exactly in user_uploads CSV so a
+# simple pd.concat in rag_tools._metadata_df works without schema gymnastics.
+USER_META_COLS = [
+    "id", "title", "author", "authoryearofbirth", "authoryearofdeath",
+    "language", "downloads", "subjects", "type",
+    "source_filename", "uploaded_ts",
+]
 
 PG_PATTERNS = [
     re.compile(r"^pg(\d+)\.txt$",      re.IGNORECASE),
@@ -78,19 +87,112 @@ def _epub_filename_to_pgid(name: str) -> str | None:
 
 
 def _epub_metadata_pgid(epub_path: Path) -> str | None:
-    """Try to extract PG id from DC:identifier metadata of an EPUB."""
+    """Try to extract PG id from DC:identifier metadata of an EPUB.
+
+    Only matches when the identifier explicitly references Gutenberg (URL,
+    urn:gutenberg, or 'gutenberg' in the scheme). Bare integers in DC:identifier
+    are commonly ISBN/Goodreads ids for non-PG epubs — we must NOT mistake those
+    for PG ids, or PG1234 would collide with random uploads.
+    """
     try:
         from ebooklib import epub as _epub
         book = _epub.read_epub(str(epub_path), options={"ignore_ncx": True})
-        for tag, val, _attrs in book.get_metadata("DC", "identifier") or []:
-            for piece in re.findall(r"\d+", str(val)):
-                # Gutenberg DC:identifier looks like "http://www.gutenberg.org/ebooks/1342"
-                # or "urn:gutenberg:1342" or just "1342"
+        for _tag, val, _attrs in book.get_metadata("DC", "identifier") or []:
+            s = str(val).lower()
+            if "gutenberg" not in s:
+                continue
+            for piece in re.findall(r"\d+", s):
                 if 1 <= int(piece) < 1_000_000:
                     return f"PG{int(piece)}"
         return None
     except Exception:
         return None
+
+
+def _normalize_author(raw: str) -> str:
+    """Best-effort 'First Last' → 'Last, First' to align with SPGC schema.
+
+    Already-commaed input is returned as-is. Single token kept as-is. Multi-word
+    surnames (van der X) are not handled — fine for a best-effort default; user
+    can edit the CSV by hand if it matters.
+    """
+    raw = raw.strip()
+    if not raw or "," in raw:
+        return raw
+    parts = raw.split()
+    if len(parts) < 2:
+        return raw
+    return f"{parts[-1]}, {' '.join(parts[:-1])}"
+
+
+def _extract_epub_metadata(epub_path: Path) -> dict:
+    """Read DC metadata (title/creator/language/date/subjects) from an EPUB.
+
+    Returns a dict with keys aligned to SPGC schema columns. Missing fields
+    are returned as empty strings / None (callers must tolerate)."""
+    out = {
+        "title": "", "author": "", "language": "['en']",
+        "authoryearofbirth": "", "authoryearofdeath": "",
+        "subjects": "", "downloads": 0, "type": "Text",
+    }
+    try:
+        from ebooklib import epub as _epub
+        book = _epub.read_epub(str(epub_path), options={"ignore_ncx": True})
+        if (t := book.get_metadata("DC", "title")):
+            out["title"] = str(t[0][0]).strip()
+        creators = book.get_metadata("DC", "creator") or []
+        if creators:
+            out["author"] = _normalize_author(str(creators[0][0]))
+        langs = book.get_metadata("DC", "language") or []
+        if langs:
+            # SPGC stores Python-list-literal-like strings: "['en']"
+            primary = str(langs[0][0]).strip().lower().split("-")[0]  # 'en-US' → 'en'
+            if primary:
+                out["language"] = f"['{primary}']"
+        subjects = book.get_metadata("DC", "subject") or []
+        if subjects:
+            out["subjects"] = "; ".join(str(s[0]).strip() for s in subjects if s and s[0])
+        # date is YYYY or YYYY-MM-DD: pull the year as a weak signal
+        dates = book.get_metadata("DC", "date") or []
+        if dates:
+            m = re.search(r"(\d{4})", str(dates[0][0]))
+            if m:
+                out["pub_year"] = int(m.group(1))
+    except Exception:
+        pass
+    return out
+
+
+def _read_user_meta() -> "list[dict]":
+    if not USER_META.exists():
+        return []
+    import csv as _csv
+    with open(USER_META, encoding="utf-8", newline="") as fh:
+        return list(_csv.DictReader(fh))
+
+
+def _next_user_id() -> str:
+    """Return the next U<N> id. Counts from max existing U id + 1."""
+    rows = _read_user_meta()
+    max_n = 0
+    for r in rows:
+        m = re.match(r"^U(\d+)$", r.get("id", ""))
+        if m:
+            max_n = max(max_n, int(m.group(1)))
+    return f"U{max_n + 1}"
+
+
+def _append_user_meta(row: dict) -> None:
+    """Append a row to user_uploads_metadata.csv, creating header if missing."""
+    import csv as _csv
+    USER_META.parent.mkdir(parents=True, exist_ok=True)
+    new = not USER_META.exists()
+    full = {k: row.get(k, "") for k in USER_META_COLS}
+    with open(USER_META, "a", encoding="utf-8", newline="") as fh:
+        w = _csv.DictWriter(fh, fieldnames=USER_META_COLS)
+        if new:
+            w.writeheader()
+        w.writerow(full)
 
 
 def _epub_to_text(epub_path: Path) -> str:
@@ -148,20 +250,22 @@ def _extract_archive(archive: Path, dest: Path) -> list[Path]:
 
 
 def _link_into_raw(files: list[Path]) -> dict:
-    """Hard-link recognized files into /workspace/raw_text. EPUBs converted to text first."""
+    """Hard-link recognized files into /workspace/raw_text. EPUBs are converted
+    to text first. EPUBs without a Gutenberg id get a synthetic U<N> id and
+    have their DC metadata recorded in user_uploads_metadata.csv."""
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     added = skipped_existing = skipped_format = epub_converted = epub_failed = 0
+    user_uploaded = 0
+    new_user_ids: list[str] = []
     sample_skipped: list[str] = []
     for f in files:
         name_lower = f.name.lower()
         # ----- EPUB handling -----
         if name_lower.endswith(".epub"):
             pgid = _epub_filename_to_pgid(f.name) or _epub_metadata_pgid(f)
-            if not pgid:
-                skipped_format += 1
-                if len(sample_skipped) < 8:
-                    sample_skipped.append(f.name + " (no PG id in filename or metadata)")
-                continue
+            is_user_upload = pgid is None
+            if is_user_upload:
+                pgid = _next_user_id()
             target = RAW_DIR / f"{pgid.lower()}.txt"
             if target.exists():
                 skipped_existing += 1
@@ -179,6 +283,20 @@ def _link_into_raw(files: list[Path]) -> dict:
                     sample_skipped.append(f.name + " (empty after extraction)")
                 continue
             target.write_text(text, encoding="utf-8")
+            if is_user_upload:
+                meta = _extract_epub_metadata(f)
+                meta.update({
+                    "id": pgid,
+                    "source_filename": f.name,
+                    "uploaded_ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                })
+                if not meta.get("title"):
+                    meta["title"] = Path(f.name).stem.replace("_", " ").replace("-", " ").strip()
+                if not meta.get("author"):
+                    meta["author"] = "Unknown, "
+                _append_user_meta(meta)
+                user_uploaded += 1
+                new_user_ids.append(pgid)
             epub_converted += 1
             added += 1
             continue
@@ -204,6 +322,8 @@ def _link_into_raw(files: list[Path]) -> dict:
         "skipped_format":   skipped_format,
         "epub_converted":   epub_converted,
         "epub_failed":      epub_failed,
+        "user_uploaded":    user_uploaded,
+        "new_user_ids":     new_user_ids,
         "sample_skipped":   sample_skipped,
     }
 
@@ -315,10 +435,10 @@ PAGE = r"""<!doctype html>
          accept=".zip,.tar,.tar.gz,.tgz,.tar.bz2,.tbz2,.txt,.epub">
   <label><input type=checkbox name=reindex checked> запустить reindex после распаковки</label>
   <label class=meta>Принимаются: <code>.zip</code> <code>.tar.gz</code> <code>.tar.bz2</code> <code>.txt</code> <code>.epub</code>.
-    Распознаются имена <code>pgN.txt</code>, <code>N-0.txt</code>, <code>N.txt</code>, <code>pgN.epub</code>, <code>N.epub</code> (N = PG id).
-    EPUB конвертируется в plain text через ebooklib + BeautifulSoup; если PG id не в имени, пытаемся достать из metadata <code>DC:identifier</code>.<br>
-    <b style="color:#7ed321">Cloudflare Pro лимит — 200 MB на запрос.</b> Крупнее — через <code>scp ... claude@192.168.68.54:/data/uploads_manual/</code> + ручной pickup.<br>
-    Файлы без распознанного PG id попадают в <code>skipped_format</code>.</label>
+    Распознаются имена <code>pgN.txt</code>, <code>N-0.txt</code>, <code>N.txt</code>, <code>pgN.epub</code>, <code>N.epub</code> (N = PG id) — Gutenberg-формат.
+    Любой <b>другой EPUB</b> получает <code>U&lt;N&gt;</code> id и метадата (title/author/language/subjects) тянется из DC-tags EPUB.<br>
+    Конвертация через ebooklib + BeautifulSoup. <code>.txt</code> без распознанного PG id попадает в <code>skipped_format</code> — для своих текстов оборачивайте в EPUB.<br>
+    <b style="color:#7ed321">Cloudflare Pro лимит — 200 MB на запрос.</b> Крупнее — <code>scp ... claude@192.168.68.54:/data/uploads_manual/</code> + ручной pickup.</label>
   <button id=send>Загрузить</button>
   <div id=prog class=progress></div>
 </form>
@@ -335,10 +455,11 @@ async function refreshJobs() {
   try {
     const r = await fetch('/status');
     const d = await r.json();
-    jobs.innerHTML = '<div class=meta>Текущее: <code>/data/raw_text</code> = <b>'+d.raw_text_count+'</b> книг · reindex: '+(d.reindex_running?'<b style="color:#7ed321">running</b>':'idle')+'</div>';
+    jobs.innerHTML = '<div class=meta>Текущее: <code>/data/raw_text</code> = <b>'+d.raw_text_count+'</b> книг ('+d.raw_text_pg+' PG + <b style="color:#50e3c2">'+d.raw_text_user+'</b> user) · reindex: '+(d.reindex_running?'<b style="color:#7ed321">running</b>':'idle')+'</div>';
     for (const j of d.jobs) {
       const cls = j.error ? 'fail' : 'ok';
-      const status = j.error ? '❌ '+j.error : '✅ added='+j.added+' skipped='+(j.skipped_existing+j.skipped_format);
+      const userTag = j.user_uploaded ? ' · <span style="color:#50e3c2">U+'+j.user_uploaded+'</span>' : '';
+      const status = j.error ? '❌ '+j.error : '✅ added='+j.added+' skipped='+(j.skipped_existing+j.skipped_format)+userTag;
       jobs.innerHTML += `<div class="job ${cls}">${j.ts} · ${j.filename} (${(j.bytes/1024/1024).toFixed(1)} MB) · ${status}${j.reindex_triggered?' · reindex triggered':''}</div>`;
     }
   } catch(e) { jobs.innerHTML = '<div class="err">jobs load failed: '+e.message+'</div>'; }
@@ -408,9 +529,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/health":
             self.send_response(200); self.end_headers(); self.wfile.write(b"ok"); return
         if self.path in ("/status", "/api/status"):
-            raw_count = sum(1 for _ in RAW_DIR.glob("pg*.txt")) if RAW_DIR.exists() else 0
+            pg_count = sum(1 for _ in RAW_DIR.glob("pg*.txt")) if RAW_DIR.exists() else 0
+            user_count = sum(1 for _ in RAW_DIR.glob("u*.txt")) if RAW_DIR.exists() else 0
             return self._json(200, {
-                "raw_text_count": raw_count,
+                "raw_text_count": pg_count + user_count,
+                "raw_text_pg":    pg_count,
+                "raw_text_user":  user_count,
                 "reindex_running": _reindex_running(),
                 "jobs": _read_jobs(),
             })

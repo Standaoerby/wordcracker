@@ -64,7 +64,23 @@ def main():
 
     print(f"[meta] loading {args.metadata}")
     df = pd.read_csv(args.metadata).set_index("id")
-    print(f"  {len(df)} rows total")
+    print(f"  {len(df)} SPGC rows")
+
+    # Merge user_uploads_metadata.csv (admin-uploaded books with U<N> ids).
+    # The CSV mirrors SPGC's schema so concat works cleanly.
+    user_meta_path = args.metadata.parent / "derived" / "user_uploads_metadata.csv"
+    if user_meta_path.exists():
+        try:
+            udf = pd.read_csv(user_meta_path).set_index("id")
+            # keep only columns present in SPGC; pad missing with NA
+            for col in df.columns:
+                if col not in udf.columns:
+                    udf[col] = pd.NA
+            udf = udf[df.columns]
+            df = pd.concat([df, udf])
+            print(f"  + {len(udf)} user upload rows → {len(df)} total")
+        except Exception as e:
+            print(f"  WARN: failed to load user uploads metadata: {e}")
 
     sel = df[df["language"].fillna("").str.contains(f"'{args.lang}'", regex=False)]
     if args.author:
@@ -72,8 +88,10 @@ def main():
     print(f"  {len(sel)} rows after lang='{args.lang}' author~='{args.author}'")
 
     # which raw files do we actually have on disk?
-    have = {p.stem: p for p in args.raw_dir.glob("pg*.txt")}  # 'pg2005' -> Path
-    sel_ids = [pid for pid in sel.index if pid.lower() in have]  # pid like 'PG2005'
+    have = {}
+    for p in list(args.raw_dir.glob("pg*.txt")) + list(args.raw_dir.glob("u*.txt")):
+        have[p.stem] = p  # 'pg2005' / 'u3' -> Path
+    sel_ids = [pid for pid in sel.index if pid.lower() in have]  # pid like 'PG2005' or 'U3'
     if args.limit_books:
         sel_ids = sel_ids[:args.limit_books]
     print(f"  {len(sel_ids)} books present on disk")
