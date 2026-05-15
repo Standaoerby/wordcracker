@@ -49,9 +49,14 @@ PG_PATTERNS = [
     re.compile(r"^(\d+)-0\.txt$"),
     re.compile(r"^(\d+)\.txt$"),
 ]
+PG_EPUB_PATTERNS = [
+    re.compile(r"^pg(\d+)(?:-images)?\.epub$", re.IGNORECASE),
+    re.compile(r"^(\d+)\.epub$"),
+    re.compile(r"^(\d+)-0\.epub$"),
+]
 
 MAX_UPLOAD_MB = 4096   # 4 GB
-ALLOWED_EXTS  = {".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".txt"}
+ALLOWED_EXTS  = {".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".txt", ".epub"}
 
 
 def _filename_to_pgid(name: str) -> str | None:
@@ -61,6 +66,47 @@ def _filename_to_pgid(name: str) -> str | None:
         if m:
             return f"PG{int(m.group(1))}"
     return None
+
+
+def _epub_filename_to_pgid(name: str) -> str | None:
+    base = os.path.basename(name)
+    for p in PG_EPUB_PATTERNS:
+        m = p.match(base)
+        if m:
+            return f"PG{int(m.group(1))}"
+    return None
+
+
+def _epub_metadata_pgid(epub_path: Path) -> str | None:
+    """Try to extract PG id from DC:identifier metadata of an EPUB."""
+    try:
+        from ebooklib import epub as _epub
+        book = _epub.read_epub(str(epub_path), options={"ignore_ncx": True})
+        for tag, val, _attrs in book.get_metadata("DC", "identifier") or []:
+            for piece in re.findall(r"\d+", str(val)):
+                # Gutenberg DC:identifier looks like "http://www.gutenberg.org/ebooks/1342"
+                # or "urn:gutenberg:1342" or just "1342"
+                if 1 <= int(piece) < 1_000_000:
+                    return f"PG{int(piece)}"
+        return None
+    except Exception:
+        return None
+
+
+def _epub_to_text(epub_path: Path) -> str:
+    """EPUB → plain text via ebooklib + BeautifulSoup. Strips html, joins documents."""
+    from ebooklib import epub as _epub, ITEM_DOCUMENT
+    from bs4 import BeautifulSoup
+    book = _epub.read_epub(str(epub_path), options={"ignore_ncx": True})
+    pieces = []
+    for item in book.get_items():
+        if item.get_type() == ITEM_DOCUMENT:
+            soup = BeautifulSoup(item.get_content(), "html.parser")
+            pieces.append(soup.get_text("\n"))
+    raw = "\n".join(pieces)
+    # collapse blank-line runs, strip lines
+    lines = [ln.strip() for ln in raw.splitlines()]
+    return "\n".join(ln for ln in lines if ln)
 
 
 def _extract_archive(archive: Path, dest: Path) -> list[Path]:
@@ -86,6 +132,12 @@ def _extract_archive(archive: Path, dest: Path) -> list[Path]:
         shutil.copy(archive, target)
         out_files.append(target)
         return out_files
+    elif name_lower.endswith(".epub"):
+        dest.mkdir(parents=True, exist_ok=True)
+        target = dest / archive.name
+        shutil.copy(archive, target)
+        out_files.append(target)
+        return out_files
     else:
         raise ValueError(f"unsupported archive type: {archive.name}")
 
@@ -96,11 +148,41 @@ def _extract_archive(archive: Path, dest: Path) -> list[Path]:
 
 
 def _link_into_raw(files: list[Path]) -> dict:
-    """Hard-link recognized files into /workspace/raw_text. Returns counts."""
+    """Hard-link recognized files into /workspace/raw_text. EPUBs converted to text first."""
     RAW_DIR.mkdir(parents=True, exist_ok=True)
-    added = skipped_existing = skipped_format = 0
+    added = skipped_existing = skipped_format = epub_converted = epub_failed = 0
     sample_skipped: list[str] = []
     for f in files:
+        name_lower = f.name.lower()
+        # ----- EPUB handling -----
+        if name_lower.endswith(".epub"):
+            pgid = _epub_filename_to_pgid(f.name) or _epub_metadata_pgid(f)
+            if not pgid:
+                skipped_format += 1
+                if len(sample_skipped) < 8:
+                    sample_skipped.append(f.name + " (no PG id in filename or metadata)")
+                continue
+            target = RAW_DIR / f"{pgid.lower()}.txt"
+            if target.exists():
+                skipped_existing += 1
+                continue
+            try:
+                text = _epub_to_text(f)
+            except Exception as e:
+                epub_failed += 1
+                if len(sample_skipped) < 8:
+                    sample_skipped.append(f"{f.name} (epub read failed: {str(e)[:60]})")
+                continue
+            if not text.strip():
+                epub_failed += 1
+                if len(sample_skipped) < 8:
+                    sample_skipped.append(f.name + " (empty after extraction)")
+                continue
+            target.write_text(text, encoding="utf-8")
+            epub_converted += 1
+            added += 1
+            continue
+        # ----- plain text handling -----
         pgid = _filename_to_pgid(f.name)
         if not pgid:
             skipped_format += 1
@@ -120,6 +202,8 @@ def _link_into_raw(files: list[Path]) -> dict:
         "added":           added,
         "skipped_existing": skipped_existing,
         "skipped_format":   skipped_format,
+        "epub_converted":   epub_converted,
+        "epub_failed":      epub_failed,
         "sample_skipped":   sample_skipped,
     }
 
@@ -228,10 +312,11 @@ PAGE = r"""<!doctype html>
 
 <form id=f enctype=multipart/form-data>
   <input type=file name=archive id=archive required
-         accept=".zip,.tar,.tar.gz,.tgz,.tar.bz2,.tbz2,.txt">
+         accept=".zip,.tar,.tar.gz,.tgz,.tar.bz2,.tbz2,.txt,.epub">
   <label><input type=checkbox name=reindex checked> запустить reindex после распаковки</label>
-  <label class=meta>Принимаются: <code>.zip</code> <code>.tar.gz</code> <code>.tar.bz2</code> <code>.txt</code>.
-    Распознаются имена <code>pgN.txt</code>, <code>N-0.txt</code>, <code>N.txt</code> (N = PG id).</label>
+  <label class=meta>Принимаются: <code>.zip</code> <code>.tar.gz</code> <code>.tar.bz2</code> <code>.txt</code> <code>.epub</code>.
+    Распознаются имена <code>pgN.txt</code>, <code>N-0.txt</code>, <code>N.txt</code>, <code>pgN.epub</code>, <code>N.epub</code> (N = PG id).
+    EPUB конвертируется в plain text через ebooklib + BeautifulSoup; если PG id не в имени, пытаемся достать из metadata <code>DC:identifier</code>.</label>
   <button id=send>Загрузить</button>
   <div id=prog class=progress></div>
 </form>
@@ -342,7 +427,9 @@ class Handler(BaseHTTPRequestHandler):
         env = {"REQUEST_METHOD": "POST", "CONTENT_TYPE": ctype, "CONTENT_LENGTH": str(clen)}
         form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ=env)
         fileitem = form["archive"] if "archive" in form else None
-        if not fileitem or not getattr(fileitem, "filename", None):
+        # cgi.FieldStorage.__bool__ raises TypeError on Python 3.11 (deprecated module
+        # bug), so test against None and use getattr — never `not fileitem`.
+        if fileitem is None or not getattr(fileitem, "filename", None):
             return self._json(400, {"error": "missing field 'archive'"})
 
         # save upload
