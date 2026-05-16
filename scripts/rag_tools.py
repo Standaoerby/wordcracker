@@ -59,6 +59,35 @@ def _slug(author_regex: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", base).strip("_") or "author"
 
 
+# ChromaDB collection singleton — loads ChromaDB persistent client +
+# SentenceTransformer model on GPU exactly once per process. First call is
+# slow (~30s: SentenceTransformer cold-load to cuda + chromadb hnsw open).
+# Subsequent calls return the cached collection instantly. chat_server.py
+# calls this at startup so the first user query doesn't pay the cold cost.
+import threading as _threading
+_CHROMA_COLLECTION_CACHE: dict = {"col": None}
+_CHROMA_LOCK = _threading.Lock()
+
+
+def _get_chroma_collection_with_embedder():
+    """Return a cached ChromaDB collection with the multilingual MiniLM
+    embedder bound to cuda. Thread-safe via double-checked locking."""
+    if _CHROMA_COLLECTION_CACHE["col"] is not None:
+        return _CHROMA_COLLECTION_CACHE["col"]
+    with _CHROMA_LOCK:
+        if _CHROMA_COLLECTION_CACHE["col"] is not None:
+            return _CHROMA_COLLECTION_CACHE["col"]
+        import chromadb
+        from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+        client = chromadb.PersistentClient(path=CHROMA_PATH)
+        embed_fn = SentenceTransformerEmbeddingFunction(
+            model_name=EMBEDDER_NAME, device="cuda"
+        )
+        col = client.get_collection(COLLECTION_NAME, embedding_function=embed_fn)
+        _CHROMA_COLLECTION_CACHE["col"] = col
+        return col
+
+
 # mtime-aware cache so user uploads added by admin_server become visible to a
 # long-running chat_server without needing a restart. SPGC dump never changes
 # so its mtime is stable in practice; user_uploads_metadata.csv grows on upload.
@@ -241,11 +270,7 @@ def semantic_search(query: str, k: int = 8, author_filter: str | None = None) ->
     """ChromaDB semantic search. Optional author_filter is a regex applied to metadata.author."""
     t0 = time.perf_counter()
     try:
-        import chromadb
-        from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
-        client = chromadb.PersistentClient(path=CHROMA_PATH)
-        embed_fn = SentenceTransformerEmbeddingFunction(model_name=EMBEDDER_NAME, device="cuda")
-        col = client.get_collection(COLLECTION_NAME, embedding_function=embed_fn)
+        col = _get_chroma_collection_with_embedder()
 
         retrieval_q = _maybe_translate(query)
         # Pull more than k if filtering; we'll post-filter on author.
@@ -942,11 +967,7 @@ def word_contexts_global(word: str, k: int = 12, snippet_chars: int = 280) -> di
     if not word_lc or " " in word_lc:
         return {"error": "word must be a single token"}
     try:
-        import chromadb
-        from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
-        client = chromadb.PersistentClient(path=CHROMA_PATH)
-        embed_fn = SentenceTransformerEmbeddingFunction(model_name=EMBEDDER_NAME, device="cuda")
-        col = client.get_collection(COLLECTION_NAME, embedding_function=embed_fn)
+        col = _get_chroma_collection_with_embedder()
 
         # ChromaDB has a where_document substring filter — use it so we only
         # retrieve chunks that literally contain the word. Then we rank what

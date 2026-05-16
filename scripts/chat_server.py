@@ -401,11 +401,38 @@ class Handler(BaseHTTPRequestHandler):
                           "application/json; charset=utf-8")
 
 
+def _warmup():
+    """Pre-load ChromaDB + SentenceTransformer on cuda so the first user
+    query that hits semantic_search or word_contexts_global doesn't pay the
+    30+ second cold-load cost. Logs timing but never crashes the server —
+    if warmup fails (e.g. chromadb file is being rebuilt), the tools will
+    just take their first call slow path as they did before."""
+    import sys as _sys, time as _time
+    try:
+        from rag_tools import _get_chroma_collection_with_embedder
+        t = _time.perf_counter()
+        col = _get_chroma_collection_with_embedder()
+        # Touch the index with a one-result query so HNSW segments load.
+        try:
+            col.query(query_texts=["warmup"], n_results=1)
+        except Exception:
+            pass
+        print(f"[chat] chromadb+embedder warmed in {_time.perf_counter()-t:.1f}s",
+              file=_sys.stderr, flush=True)
+    except Exception as e:
+        print(f"[chat] warmup failed (non-fatal): {type(e).__name__}: {e}",
+              file=_sys.stderr, flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8890)
+    ap.add_argument("--no-warmup", action="store_true",
+                    help="skip ChromaDB/SentenceTransformer warmup at startup")
     args = ap.parse_args()
+    if not args.no_warmup:
+        _warmup()
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"wordcracker chat on http://{args.host}:{args.port}/")
     srv.serve_forever()
