@@ -1241,6 +1241,97 @@ def word_contexts_global(word: str, k: int = 12, snippet_chars: int = 280,
         _log(f"word_contexts_global({word_lc}) done in {time.perf_counter()-t0:.2f}s")
 
 
+# ============================ TOOL: find_book ============================
+def find_book(title: str, author: str = "", top: int = 5,
+              lang: str = "en") -> dict:
+    """Look up a book in the metadata table by title (substring/regex, case-
+    insensitive) with optional author hint. Returns matches with PG/U id,
+    title, author, downloads, year.
+
+    Use this BEFORE calling any tool that takes a `pg_id` (book_readability,
+    affinity_by_book, lexical_diversity({"book": ...}), word_collocates(
+    {"book": ...}), learning_words({"book": ...})) when the user names a
+    book by title rather than ID. Never guess PG IDs from memory — the
+    corpus has 75k books and ID assignment doesn't match popularity. For
+    example "Crime and Punishment" is PG2554, not PG1327 (which is
+    "Elizabeth and Her German Garden").
+
+    title: substring or regex. Tries an unanchored case-insensitive regex
+        first; falls back to a simple substring match if regex fails.
+    author: optional regex on author column to disambiguate ("Hamlet" by
+        Shakespeare vs by Updike).
+    """
+    if not title or not title.strip():
+        return {"error": "title required"}
+    t0 = time.perf_counter()
+    try:
+        df = _metadata_df()
+        if df is None or not len(df):
+            return {"error": "metadata frame empty"}
+
+        # Language pre-filter (the metadata column stores "['en']" str-repr;
+        # tolerate both forms via contains-substring).
+        mask = pd.Series(True, index=df.index)
+        if lang:
+            mask &= df["language"].fillna("").str.contains(
+                f"'{lang}'", regex=False
+            ) | df["language"].fillna("").str.lower().eq(lang.lower())
+
+        # Same Cyrillic-detect trick as semantic_search — PG titles are stored
+        # in English (or transliterated for Russian classics like "Voina i mir"),
+        # so a query like "Преступление и наказание" needs to become "Crime and
+        # Punishment" before we hit the title column.
+        title_q = _maybe_translate(title.strip())
+        try:
+            mask &= df["title"].fillna("").str.contains(
+                title_q, case=False, regex=True, na=False
+            )
+        except Exception:
+            mask &= df["title"].fillna("").str.lower().str.contains(
+                title_q.lower(), regex=False, na=False
+            )
+
+        if author and author.strip():
+            try:
+                mask &= df["author"].fillna("").str.contains(
+                    author.strip(), case=False, regex=True, na=False
+                )
+            except Exception:
+                pass
+
+        out = df[mask].copy()
+        # Rank by downloads desc when available; ties by id asc.
+        if "downloads" in out.columns:
+            out["_dl"] = pd.to_numeric(out["downloads"], errors="coerce").fillna(0)
+            out = out.sort_values(["_dl", "id"], ascending=[False, True])
+        else:
+            out = out.sort_values("id")
+
+        keep_cols = [c for c in ("id", "title", "author", "downloads",
+                                 "authoryearofbirth", "language")
+                     if c in out.columns]
+        matches = []
+        for _, row in out.head(top).iterrows():
+            m = {c: row[c] for c in keep_cols}
+            if "downloads" in m:
+                try:
+                    m["downloads"] = int(float(m["downloads"]))
+                except (TypeError, ValueError):
+                    m["downloads"] = None
+            matches.append(m)
+
+        _log(f"find_book(title={title_q!r}, author={author!r}) "
+             f"matched {len(out)} in {time.perf_counter()-t0:.2f}s")
+        return {
+            "title_query":   title_q,
+            "author_filter": author or None,
+            "total_matches": int(len(out)),
+            "matches":       matches,
+        }
+    except Exception as e:
+        return {"error": "find_book failed", "details": str(e)}
+
+
 # ============================ TOOL: word_etymology ============================
 # Wiktionary language codes → broad family bucket. The Wiktionary {{inh}} /
 # {{der}} / {{bor}} templates use these short codes; we extract them with regex
@@ -1979,6 +2070,27 @@ TOOLS_SPEC += [
         }, "required": ["author_regex"]},
     }},
     {"type": "function", "function": {
+        "name": "find_book",
+        "description": (
+            "🆕 Найти книгу по названию (substring/regex), optional author hint. "
+            "Возвращает топ-N matches с PG/U id + title + author + downloads. "
+            "**ОБЯЗАТЕЛЬНО вызывай** ПЕРЕД book_readability / affinity_by_book / "
+            "lexical_diversity({'book':...}) / word_collocates({'book':...}) / "
+            "learning_words({'book':...}) когда пользователь называет книгу по "
+            "title (не по PG id). НЕ выдумывай PG id из памяти — в корпусе 75k книг."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "title":  {"type": "string", "description":
+                "название или часть названия, например 'Crime and Punishment', "
+                "'Pride and Prejudice', 'Hound of the Baskervilles'"},
+            "author": {"type": "string", "description":
+                "опциональный фильтр автора (regex) — например 'Dostoyevsky' для "
+                "disambiguation 'Hamlet' (Shakespeare vs Updike)"},
+            "top":    {"type": "integer", "description": "default 5"},
+            "lang":   {"type": "string",  "description": "default 'en'"},
+        }, "required": ["title"]},
+    }},
+    {"type": "function", "function": {
         "name": "word_etymology",
         "description": (
             "🆕 Этимология одного слова через Wiktionary: цепочка языков "
@@ -2026,6 +2138,7 @@ TOOL_DISPATCH = {
     "book_readability":         book_readability,
     "word_freq_timeline":       word_freq_timeline,
     "word_contexts_global":     word_contexts_global,
+    "find_book":                find_book,
     "word_etymology":           word_etymology,
     "find_words_by_etymology":  find_words_by_etymology,
     "top_authors_by":           top_authors_by,
