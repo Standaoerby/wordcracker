@@ -125,21 +125,44 @@ def slug_for_author(author: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", surname).strip("_") or "author"
 
 
-# Module-level TTL cache. Without it, every HTTP hit (dashboard auto-refreshes
-# every 30s, plus /api/status pollers) re-spawns `docker exec ... python -c
-# "import chromadb..."` — a ~10s import that piles up under concurrency and
-# eventually wedges the docker daemon → SSH dies, host becomes unreachable.
-# 30s TTL keeps the dashboard responsive without DDoSing the container.
+import threading
+
+# Module-level TTL cache + double-checked locking. Without the cache, every HTTP
+# hit (dashboard auto-refreshes every 30s, plus /api/status pollers) re-runs
+# the full collect_status() — historically spawning a `docker exec` chromadb
+# subprocess that piled up under concurrency and wedged the docker daemon.
+#
+# The lock prevents the cache-miss thundering-herd: when N concurrent requests
+# all see an expired cache, only one of them runs the slow path; the rest wait
+# on the lock and then return the freshly-cached value. Without DCL we'd burn
+# N×CPU and N×SQLite reads on every cache miss under load.
 _STATUS_CACHE: dict = {"data": None, "ts": 0.0}
 _STATUS_TTL_SEC = 30.0
+_STATUS_LOCK = threading.Lock()
 
 
 def collect_status(force_fresh: bool = False):
+    # Fast path: cache hit without acquiring the lock.
     now_ts = time.time()
     if (not force_fresh
             and _STATUS_CACHE["data"] is not None
             and (now_ts - _STATUS_CACHE["ts"]) < _STATUS_TTL_SEC):
         return _STATUS_CACHE["data"]
+
+    # Slow path: only one thread enters at a time.
+    with _STATUS_LOCK:
+        # Double-check after acquiring the lock — another thread may have
+        # populated the cache while we were waiting.
+        now_ts = time.time()
+        if (not force_fresh
+                and _STATUS_CACHE["data"] is not None
+                and (now_ts - _STATUS_CACHE["ts"]) < _STATUS_TTL_SEC):
+            return _STATUS_CACHE["data"]
+        return _build_status(now_ts)
+
+
+def _build_status(now_ts: float):
+    """Actual status assembly — runs under _STATUS_LOCK."""
 
     corpus_meta = safe_json(DERIVED / "corpus_meta.json")
     wode_meta   = safe_json(DERIVED / "wodehouse_affinity_meta.json")
