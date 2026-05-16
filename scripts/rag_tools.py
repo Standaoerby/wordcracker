@@ -35,17 +35,30 @@ def _counts_path(book_id: str) -> Path:
     """Return counts file path: SPGC dump for PG<N>, user_counts/ for U<N>.
     Centralizes the U-vs-PG dispatch so tools work for both without if/else
     sprayed everywhere. U-counts files are produced by tokenize_user_books.py
-    on upload (called from admin_server)."""
+    on upload (called from admin_server).
+
+    Orphan PG fallback (Sprint 9.5): post-2018 PG raws are absent from the
+    frozen 2018 SPGC dump. tokenize_user_books.py --orphan-pg writes their
+    counts into user_counts/PG<N>_counts.txt; we fall back to that path when
+    the SPGC file doesn't exist. Callers still need to .exists()-check, but
+    they get a single path that points at whichever one is present."""
     if book_id.startswith("U"):
         return USER_COUNTS_DIR / f"{book_id}_counts.txt"
-    return SPGC_COUNTS_DIR / f"{book_id}_counts.txt"
+    spgc = SPGC_COUNTS_DIR / f"{book_id}_counts.txt"
+    if spgc.exists():
+        return spgc
+    return USER_COUNTS_DIR / f"{book_id}_counts.txt"
 
 
 def _tokens_path(book_id: str) -> Path:
-    """Same dispatch for tokens — SPGC for PG-prefix, user_tokens/ for U-prefix."""
+    """Same dispatch for tokens — SPGC for PG-prefix, user_tokens/ for U-prefix,
+    with fallback to user_tokens/PG<N>_tokens.txt for orphan PG (Sprint 9.5)."""
     if book_id.startswith("U"):
         return USER_TOKENS_DIR / f"{book_id}_tokens.txt"
-    return SPGC_TOKENS_DIR / f"{book_id}_tokens.txt"
+    spgc = SPGC_TOKENS_DIR / f"{book_id}_tokens.txt"
+    if spgc.exists():
+        return spgc
+    return USER_TOKENS_DIR / f"{book_id}_tokens.txt"
 CHROMA_PATH     = "/workspace/chroma_db"
 COLLECTION_NAME = "gutenberg-index"
 EMBEDDER_NAME   = "paraphrase-multilingual-MiniLM-L12-v2"
