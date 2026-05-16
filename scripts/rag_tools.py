@@ -1228,6 +1228,319 @@ def word_contexts_global(word: str, k: int = 12, snippet_chars: int = 280,
         _log(f"word_contexts_global({word_lc}) done in {time.perf_counter()-t0:.2f}s")
 
 
+# ============================ TOOL: word_etymology ============================
+# Wiktionary language codes → broad family bucket. The Wiktionary {{inh}} /
+# {{der}} / {{bor}} templates use these short codes; we extract them with regex
+# and bucket into language families for queries like "germanic words in Tolkien".
+ETYMOLOGY_FAMILY_MAP = {
+    # Germanic chain (inherited)
+    "ang":     "old_english",          # Old English
+    "enm":     "middle_english",       # Middle English
+    "gmw-pro": "proto_germanic",       # Proto-West-Germanic
+    "gem-pro": "proto_germanic",       # Proto-Germanic
+    "got":     "germanic",             # Gothic
+    # Norse
+    "non":     "old_norse",
+    "non-oks": "old_norse",
+    "is":      "old_norse",            # Icelandic (often cited as a Norse cognate)
+    # Other Germanic cognates that count as "germanic origin" when source
+    "ofs":     "germanic",             # Old Frisian
+    "osx":     "germanic",             # Old Saxon
+    "goh":     "germanic",             # Old High German
+    "odt":     "germanic",             # Old Dutch
+    "nl":      "germanic",             # Dutch
+    "de":      "germanic",             # German
+    "da":      "germanic",             # Danish
+    "no":      "germanic",             # Norwegian
+    "sv":      "germanic",             # Swedish
+    "fo":      "germanic",             # Faroese
+    "nrn":     "germanic",             # Norn
+    # Latin / Romance
+    "la":      "latin",                # Latin
+    "ML.":     "latin",                # Medieval Latin (template uses code la sometimes)
+    "VL.":     "latin",                # Vulgar Latin
+    "fro":     "old_french",           # Old French
+    "frm":     "middle_french",        # Middle French
+    "fr":      "french",               # French
+    "es":      "spanish",
+    "it":      "italian",
+    "pt":      "portuguese",
+    "roa-opt": "old_portuguese",
+    # Greek
+    "grc":     "ancient_greek",
+    "el":      "greek",
+    # Celtic
+    "ga":      "celtic",               # Irish
+    "gd":      "celtic",               # Scottish Gaelic
+    "cy":      "celtic",               # Welsh
+    "cel-pro": "proto_celtic",
+    "owl":     "celtic",
+    "sga":     "old_irish",
+    "xbm":     "middle_breton",
+    # Slavic
+    "ru":      "slavic",
+    "pl":      "slavic",
+    "sla-pro": "proto_slavic",
+    "cu":      "slavic",               # Old Church Slavonic
+    # Proto-Indo-European at the root
+    "ine-pro": "proto_indo_european",
+    # Semitic / Arabic loans
+    "ar":      "arabic",
+    "he":      "hebrew",
+    # Other notable loan sources
+    "hi":      "hindi",
+    "sa":      "sanskrit",
+    "ja":      "japanese",
+    "zh":      "chinese",
+    "tr":      "turkish",
+    "fi":      "uralic",
+    "hu":      "uralic",
+}
+
+# Native English/Germanic chain — when a word descends only through these
+# the etymology is "native Germanic" (sword, hand, mother). Any external
+# family appearing in the chain means the word was loaned in (amber via
+# Arabic, chivalry via French/Latin).
+ETYMOLOGY_NATIVE_GERMANIC = {
+    "old_english", "middle_english", "proto_germanic",
+    "germanic", "old_norse", "proto_indo_european",
+}
+
+# Compact "Tolkien wanted these" buckets: which families count as
+# "Germanic / Norse" for the high-level query.
+ETYMOLOGY_FAMILY_GROUPS = {
+    "germanic":        {"old_english", "middle_english", "proto_germanic",
+                        "germanic", "old_norse"},
+    "norse":           {"old_norse"},
+    "romance":         {"latin", "old_french", "middle_french", "french",
+                        "spanish", "italian", "portuguese", "old_portuguese"},
+    "greek":           {"ancient_greek", "greek"},
+    "celtic":          {"celtic", "proto_celtic", "old_irish", "middle_breton"},
+    "slavic":          {"slavic", "proto_slavic"},
+    "arabic":          {"arabic"},
+    "hebrew":          {"hebrew"},
+    "pie":             {"proto_indo_european"},
+}
+
+_ETYMOLOGY_TEMPLATE_RE = re.compile(
+    r"\{\{(?:inh\+?|der|bor|lbor|cog|m)\|en\|([^|}\s]+)",
+    re.IGNORECASE,
+)
+_ETYMOLOGY_SECTION_RE = re.compile(
+    r"==+\s*Etymology\s*\d*\s*==+\s*\n(.*?)(?=\n==|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_ETYMOLOGY_CACHE_PATH = DERIVED_DIR / "word_etymology_cache.json"
+_ETYMOLOGY_CACHE: dict | None = None
+
+
+def _load_etymology_cache() -> dict:
+    global _ETYMOLOGY_CACHE
+    if _ETYMOLOGY_CACHE is not None:
+        return _ETYMOLOGY_CACHE
+    if _ETYMOLOGY_CACHE_PATH.exists():
+        try:
+            with open(_ETYMOLOGY_CACHE_PATH, encoding="utf-8") as fh:
+                _ETYMOLOGY_CACHE = json.load(fh)
+        except Exception:
+            _ETYMOLOGY_CACHE = {}
+    else:
+        _ETYMOLOGY_CACHE = {}
+    return _ETYMOLOGY_CACHE
+
+
+def _save_etymology_cache():
+    if _ETYMOLOGY_CACHE is None:
+        return
+    try:
+        DERIVED_DIR.mkdir(parents=True, exist_ok=True)
+        with open(_ETYMOLOGY_CACHE_PATH, "w", encoding="utf-8") as fh:
+            json.dump(_ETYMOLOGY_CACHE, fh, ensure_ascii=False, indent=2)
+    except Exception as e:
+        _log(f"failed to save etymology cache: {e}")
+
+
+def word_etymology(word: str) -> dict:
+    """Etymology breakdown for a single English word via Wiktionary wikitext.
+
+    Returns:
+        {"word": str, "family_chain": ["middle_english", "old_english", ...],
+         "primary_family": "germanic"/"latin"/..., "raw_codes": [...],
+         "wiktionary_url": str}
+
+    Disk-cached at /data/spgc/derived/word_etymology_cache.json. Cold lookup
+    via Wiktionary public API (~1.5s polite); cache makes subsequent calls
+    instant. Bucketing follows the standard linguistic family taxonomy used
+    by queries like "Germanic words in Tolkien".
+    """
+    word_lc = word.strip().lower()
+    if not word_lc or " " in word_lc:
+        return {"error": "word must be a single token"}
+
+    cache = _load_etymology_cache()
+    if word_lc in cache:
+        out = dict(cache[word_lc])
+        out["from_cache"] = True
+        return out
+
+    try:
+        import urllib.request, urllib.parse
+        url = ("https://en.wiktionary.org/w/api.php?action=parse&prop=wikitext"
+               f"&format=json&page={urllib.parse.quote(word_lc)}")
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "wordcracker-etymology/1.0 (https://slovoeb.net)"
+        })
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        wikitext = data.get("parse", {}).get("wikitext", {}).get("*", "")
+    except Exception as e:
+        return {"error": "wiktionary fetch failed", "word": word_lc,
+                "details": str(e)}
+
+    if not wikitext:
+        return {"error": "no wiktionary page", "word": word_lc}
+
+    # Extract the English-section etymology block (first ==Etymology== inside
+    # the ==English== heading). We rely on the language template prefix
+    # `|en|...` inside `{{inh}}/{{der}}/{{bor}}` to anchor on English etymology.
+    raw_codes: list[str] = []
+    for m in _ETYMOLOGY_TEMPLATE_RE.finditer(wikitext):
+        code = m.group(1).strip()
+        if code and code not in raw_codes:
+            raw_codes.append(code)
+        if len(raw_codes) >= 40:
+            break
+
+    family_chain: list[str] = []
+    seen_families = set()
+    for code in raw_codes:
+        fam = ETYMOLOGY_FAMILY_MAP.get(code, "")
+        if fam and fam not in seen_families:
+            family_chain.append(fam)
+            seen_families.add(fam)
+
+    # Primary family logic:
+    # 1. If the chain has ANY family outside the English/Germanic native set,
+    #    that's a loan word — pick the DEEPEST (latest in the chain, i.e. the
+    #    most original source language) non-Germanic family. amber: ME →
+    #    old_french → arabic ⇒ arabic. chivalry: ME → old_french → latin ⇒
+    #    latin (romance).
+    # 2. Otherwise the chain is pure Germanic descent (sword, hand) → germanic.
+    non_native = [f for f in family_chain if f not in ETYMOLOGY_NATIVE_GERMANIC]
+    primary_family = ""
+    if non_native:
+        # Deepest non-Germanic ancestor — last one in chain.
+        deepest = non_native[-1]
+        for group, members in ETYMOLOGY_FAMILY_GROUPS.items():
+            if group in {"germanic", "norse", "pie"}:
+                continue  # skip native groups when picking borrowing source
+            if deepest in members:
+                primary_family = group
+                break
+    elif family_chain:
+        primary_family = "germanic"
+
+    result = {
+        "word": word_lc,
+        "raw_codes": raw_codes[:20],
+        "family_chain": family_chain,
+        "primary_family": primary_family,
+        "wiktionary_url": f"https://en.wiktionary.org/wiki/{word_lc}",
+        "from_cache": False,
+    }
+    cache[word_lc] = {k: v for k, v in result.items() if k != "from_cache"}
+    _save_etymology_cache()
+    return result
+
+
+def find_words_by_etymology(scope: dict, family: str, top: int = 30,
+                            min_corpus_count: int = 200,
+                            candidate_pool: int = 200) -> dict:
+    """Words used by the author/book whose etymology matches a family
+    (germanic / norse / romance / greek / celtic / slavic / arabic / pie).
+
+    Workflow:
+    1. affinity_by_author / affinity_by_book → high-affinity candidates
+       (already PROPN- and OOV-filtered through min_corpus_count + spaCy POS).
+    2. word_etymology(w) for each — pulls from cache or Wiktionary.
+    3. Keep those whose primary_family equals `family`.
+    4. Return top, sorted by author affinity.
+
+    Beware: Wiktionary lookup is ~1.5s per cold word. First call on a fresh
+    author scope may take 30-60 seconds (then cached). Subsequent calls
+    instant.
+
+    Note: affinity-based selection biases toward author-specific vocabulary,
+    not general writing. For a baseline pool ("all germanic words this
+    author uses") combine with word_collocates / top_ngrams_by_author and
+    feed individual words through word_etymology.
+    """
+    family_lc = family.strip().lower()
+    if family_lc not in ETYMOLOGY_FAMILY_GROUPS:
+        return {"error": "unknown family",
+                "supported": sorted(ETYMOLOGY_FAMILY_GROUPS.keys()),
+                "got": family_lc}
+    try:
+        if isinstance(scope, dict) and scope.get("book"):
+            from learning_tools import affinity_by_book
+            aff_res = affinity_by_book(
+                scope["book"], top=candidate_pool,
+                min_corpus_count=max(min_corpus_count, 200),
+            )
+            key_count = "book_count"
+        elif isinstance(scope, dict) and scope.get("author"):
+            aff_res = affinity_by_author(
+                scope["author"], top=candidate_pool,
+                min_corpus_count=max(min_corpus_count, 200),
+            )
+            key_count = "author_count"
+        else:
+            return {"error": "bad scope; use {'book':PGid} | {'author':regex}"}
+
+        if "error" in aff_res:
+            return {"error": "affinity lookup failed", "details": aff_res["error"]}
+
+        candidates = aff_res.get("top", [])
+        if not candidates:
+            return {"error": "no candidates", "scope": scope}
+
+        matched = []
+        looked_up = 0
+        cold_lookups = 0
+        for c in candidates:
+            w = c["word"]
+            cc = c.get("corpus_count", 0)
+            if cc < min_corpus_count:
+                continue
+            ety = word_etymology(w)
+            looked_up += 1
+            if not ety.get("from_cache"):
+                cold_lookups += 1
+            if "error" in ety:
+                continue
+            if ety["primary_family"] == family_lc:
+                matched.append({
+                    "word": w,
+                    "affinity": c.get("affinity"),
+                    "occurrences": c.get(key_count),
+                    "corpus_count": cc,
+                    "family_chain": ety["family_chain"],
+                    "raw_codes": ety["raw_codes"][:8],
+                })
+            if len(matched) >= top:
+                break
+        return {
+            "scope": scope,
+            "family": family_lc,
+            "candidates_examined": looked_up,
+            "cold_wiktionary_lookups": cold_lookups,
+            "matched": matched,
+        }
+    except Exception as e:
+        return {"error": "find_words_by_etymology failed", "details": str(e)}
+
+
 # ============================ TOOL 12: top_authors_by ============================
 # Placeholders/collective authors that pollute "most popular" lists.
 # Check by first-comma-segment (the "Surname" slot in SPGC format), case-insensitive.
@@ -1652,25 +1965,60 @@ TOOLS_SPEC += [
             "author_regex": {"type": "string", "description": "Regex по author, например '^Wodehouse,'"},
         }, "required": ["author_regex"]},
     }},
+    {"type": "function", "function": {
+        "name": "word_etymology",
+        "description": (
+            "🆕 Этимология одного слова через Wiktionary: цепочка языков "
+            "(middle_english → old_english → proto_germanic → ine_pro) и primary_family "
+            "(germanic / latin / romance / norse / greek / celtic / slavic / arabic / pie). "
+            "Используй для «откуда слово X», «какого происхождения слово Y». "
+            "Кэшируется на диске; первый запрос ~1.5s, повторный мгновенно."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "word": {"type": "string", "description": "одно английское слово (single token)"},
+        }, "required": ["word"]},
+    }},
+    {"type": "function", "function": {
+        "name": "find_words_by_etymology",
+        "description": (
+            "🆕 Найти слова автора/книги по этимологическому происхождению. "
+            "Использует learning_words(scope, level='advanced') как кандидатов, потом для каждого "
+            "тянет этимологию через word_etymology() и оставляет только нужного family. "
+            "Используй для «германские/скандинавские слова Толкина», «латинские заимствования у X», "
+            "«какие слова древнегерманского происхождения часто использует Y». "
+            "Первый запрос на свежего автора ~30-60 сек (Wiktionary lookups), затем кэш."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "scope":  {"type": "object", "description":
+                "{'book': PGid} или {'author': regex}"},
+            "family": {"type": "string", "description":
+                "germanic | norse | romance | greek | celtic | slavic | arabic | pie"},
+            "top":    {"type": "integer", "description": "default 30"},
+            "min_corpus_count": {"type": "integer", "description":
+                "минимум встреч в корпусе (default 500) — отсеивает редкие слова"},
+        }, "required": ["scope", "family"]},
+    }},
 ]
 
 TOOL_DISPATCH = {
-    "corpus_overview":        corpus_overview,
-    "semantic_search":        semantic_search,
-    "corpus_stats_by_author": corpus_stats_by_author,
-    "top_ngrams_by_author":   top_ngrams_by_author,
-    "affinity_by_author":     affinity_by_author,
-    "word_contexts":          word_contexts,
-    "compare_authors":        compare_authors,
-    "lexical_diversity":      lexical_diversity,
-    "word_collocates":        word_collocates,
-    "book_readability":       book_readability,
-    "word_freq_timeline":     word_freq_timeline,
-    "word_contexts_global":   word_contexts_global,
-    "top_authors_by":         top_authors_by,
-    "top_books_by_downloads": top_books_by_downloads,
-    "top_books_by_recency":   top_books_by_recency,
-    "author_metadata":        author_metadata,
+    "corpus_overview":          corpus_overview,
+    "semantic_search":          semantic_search,
+    "corpus_stats_by_author":   corpus_stats_by_author,
+    "top_ngrams_by_author":     top_ngrams_by_author,
+    "affinity_by_author":       affinity_by_author,
+    "word_contexts":            word_contexts,
+    "compare_authors":          compare_authors,
+    "lexical_diversity":        lexical_diversity,
+    "word_collocates":          word_collocates,
+    "book_readability":         book_readability,
+    "word_freq_timeline":       word_freq_timeline,
+    "word_contexts_global":     word_contexts_global,
+    "word_etymology":           word_etymology,
+    "find_words_by_etymology":  find_words_by_etymology,
+    "top_authors_by":           top_authors_by,
+    "top_books_by_downloads":   top_books_by_downloads,
+    "top_books_by_recency":     top_books_by_recency,
+    "author_metadata":          author_metadata,
 }
 
 
