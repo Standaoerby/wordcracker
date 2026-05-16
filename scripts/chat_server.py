@@ -24,7 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from rag_query import ask, ask_stream, SYSTEM_PROMPT, ASSISTANT_NAME
-from rag_tools import TOOLS_SPEC
+from rag_query import TOOLS_SPEC  # combined rag_tools + learning_tools
 
 PAGE = r"""<!doctype html>
 <html lang=ru>
