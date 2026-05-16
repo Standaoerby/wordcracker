@@ -32,19 +32,20 @@ USER_TOKENS_DIR = Path("/workspace/spgc/user_tokens")
 
 
 def _counts_path(book_id: str) -> Path:
-    """Return tokens file path: SPGC dump for PG<N>, user_counts/ for U<N>.
+    """Return counts file path: SPGC dump for PG<N>, user_counts/ for U<N>.
     Centralizes the U-vs-PG dispatch so tools work for both without if/else
     sprayed everywhere. U-counts files are produced by tokenize_user_books.py
     on upload (called from admin_server)."""
     if book_id.startswith("U"):
         return USER_COUNTS_DIR / f"{book_id}_counts.txt"
-    return _counts_path(book_id)
+    return SPGC_COUNTS_DIR / f"{book_id}_counts.txt"
 
 
 def _tokens_path(book_id: str) -> Path:
+    """Same dispatch for tokens — SPGC for PG-prefix, user_tokens/ for U-prefix."""
     if book_id.startswith("U"):
         return USER_TOKENS_DIR / f"{book_id}_tokens.txt"
-    return _tokens_path(book_id)
+    return SPGC_TOKENS_DIR / f"{book_id}_tokens.txt"
 CHROMA_PATH     = "/workspace/chroma_db"
 COLLECTION_NAME = "gutenberg-index"
 EMBEDDER_NAME   = "paraphrase-multilingual-MiniLM-L12-v2"
@@ -1161,6 +1162,49 @@ def top_books_by_downloads(top: int = 20, lang: str = "en",
         return {"error": "top_books_by_downloads failed", "details": str(e)}
 
 
+# ============================ TOOL 13b: top_books_by_recency ============================
+def top_books_by_recency(top: int = 20, lang: str = "en",
+                         author_regex: str | None = None) -> dict:
+    """Top N most recently ADDED to Project Gutenberg's collection.
+
+    Sorted by PG id descending — PG ids are sequential, so a higher id means
+    Gutenberg added that book more recently. THIS IS NOT THE BOOK'S ORIGINAL
+    PUBLICATION YEAR — PG doesn't track that; their API only exposes the id
+    and the author's birth/death years.
+
+    For e.g. "топ-10 свежих книг" or "what's been added to PG recently". The
+    author may have lived in 1850 but PG may have added the book in 2026 —
+    the returned entries are recent ADDITIONS, not recent PUBLICATIONS.
+    """
+    t0 = time.perf_counter()
+    try:
+        df = _metadata_df()
+        df = df[df["language"].fillna("").str.contains(f"'{lang}'", regex=False)]
+        if author_regex:
+            df = df[df["author"].fillna("").str.contains(author_regex, case=False, regex=True)]
+        df = df.copy()
+        # Parse "PG12345" → 12345 for numeric sort
+        df["_pg_num"] = df["id"].str.extract(r"PG(\d+)").astype(float)
+        df = df.dropna(subset=["_pg_num"])
+        df = df.sort_values("_pg_num", ascending=False).head(top)
+        df["downloads"] = pd.to_numeric(df["downloads"], errors="coerce").fillna(0)
+        rows = [{"id": r["id"],
+                 "title": (r["title"] or "")[:120],
+                 "author": r["author"] or "",
+                 "author_birth": (int(r["authoryearofbirth"])
+                                  if pd.notna(r["authoryearofbirth"]) else None),
+                 "downloads": int(r["downloads"])}
+                for _, r in df.iterrows()]
+        out = {"top_n": top, "lang": lang, "author_regex": author_regex,
+               "sort": "PG id descending (recently added to Project Gutenberg)",
+               "note": "PG id != publication year. Author birth year shown for date context.",
+               "top": rows}
+        _log(f"top_books_by_recency done in {time.perf_counter()-t0:.2f}s")
+        return out
+    except Exception as e:
+        return {"error": "top_books_by_recency failed", "details": str(e)}
+
+
 # ============================ TOOL 14: author_metadata ============================
 def author_metadata(author_regex: str) -> dict:
     """Quick metadata for an author: birth/death year, language, book count,
@@ -1376,6 +1420,21 @@ TOOLS_SPEC += [
         }, "required": []},
     }},
     {"type": "function", "function": {
+        "name": "top_books_by_recency",
+        "description": (
+            "🆕 Топ-N книг, недавно добавленных в Project Gutenberg (сортировка по PG id desc). "
+            "Используй для «топ свежих книг», «что недавно появилось в корпусе», «новые книги». "
+            "ВАЖНО: это **дата добавления в коллекцию**, не год публикации. "
+            "Project Gutenberg не хранит pub_year в метадате — для каждой книги показываем "
+            "вместо этого год рождения автора как ориентир эпохи."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "top":          {"type": "integer", "description": "default 20"},
+            "lang":         {"type": "string",  "description": "default 'en'"},
+            "author_regex": {"type": "string",  "description": "опционально: regex по author"},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
         "name": "author_metadata",
         "description": (
             "🆕 Биографическая метадата автора: годы жизни (рождение/смерть), количество книг, "
@@ -1403,6 +1462,7 @@ TOOL_DISPATCH = {
     "word_contexts_global":   word_contexts_global,
     "top_authors_by":         top_authors_by,
     "top_books_by_downloads": top_books_by_downloads,
+    "top_books_by_recency":   top_books_by_recency,
     "author_metadata":        author_metadata,
 }
 
