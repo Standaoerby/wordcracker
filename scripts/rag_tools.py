@@ -27,6 +27,24 @@ import pandas as pd
 SPGC_METADATA   = Path("/workspace/spgc/SPGC-metadata-2018-07-18.csv")
 SPGC_COUNTS_DIR = Path("/workspace/spgc/SPGC-counts-2018-07-18")
 SPGC_TOKENS_DIR = Path("/workspace/spgc/SPGC-tokens-2018-07-18")
+USER_COUNTS_DIR = Path("/workspace/spgc/user_counts")
+USER_TOKENS_DIR = Path("/workspace/spgc/user_tokens")
+
+
+def _counts_path(book_id: str) -> Path:
+    """Return tokens file path: SPGC dump for PG<N>, user_counts/ for U<N>.
+    Centralizes the U-vs-PG dispatch so tools work for both without if/else
+    sprayed everywhere. U-counts files are produced by tokenize_user_books.py
+    on upload (called from admin_server)."""
+    if book_id.startswith("U"):
+        return USER_COUNTS_DIR / f"{book_id}_counts.txt"
+    return _counts_path(book_id)
+
+
+def _tokens_path(book_id: str) -> Path:
+    if book_id.startswith("U"):
+        return USER_TOKENS_DIR / f"{book_id}_tokens.txt"
+    return _tokens_path(book_id)
 CHROMA_PATH     = "/workspace/chroma_db"
 COLLECTION_NAME = "gutenberg-index"
 EMBEDDER_NAME   = "paraphrase-multilingual-MiniLM-L12-v2"
@@ -329,7 +347,7 @@ def corpus_stats_by_author(author_regex: str) -> dict:
         vocab = Counter()
         for pid, row in sel.iterrows():
             pg = row["id"]
-            f = SPGC_COUNTS_DIR / f"{pg}_counts.txt"
+            f = _counts_path(pg)
             if not f.exists():
                 continue
             book_tokens = 0
@@ -409,7 +427,7 @@ def top_ngrams_by_author(author_regex: str, n: int = 2, top: int = 20,
         total_ngrams = 0
         for pid, row in sel.iterrows():
             pg = row["id"]
-            f = SPGC_TOKENS_DIR / f"{pg}_tokens.txt"
+            f = _tokens_path(pg)
             if not f.exists():
                 continue
             used += 1
@@ -580,7 +598,7 @@ def word_contexts(author_regex: str, word: str, window: int = 10, max_samples: i
         titles = dict(zip(sel["id"], sel["title"].fillna("")))
 
         for pg in sel["id"]:
-            f = SPGC_TOKENS_DIR / f"{pg}_tokens.txt"
+            f = _tokens_path(pg)
             if not f.exists():
                 continue
             with open(f, encoding="utf-8") as fh:
@@ -673,13 +691,11 @@ def lexical_diversity(scope: dict | str) -> dict:
         elif isinstance(scope, dict) and scope.get("book"):
             pg = scope["book"].upper()
             if not (pg.startswith("PG") or pg.startswith("U")): pg = f"PG{pg}"
-            if pg.startswith("U"):
-                return {"error": "lexical_diversity requires SPGC counts; user-uploaded books "
-                                 "(U-prefix) are not yet tokenized into SPGC counts format",
-                        "id": pg}
-            f = SPGC_COUNTS_DIR / f"{pg}_counts.txt"
+            f = _counts_path(pg)
             if not f.exists():
-                return {"error": "counts file not found", "pg_id": pg}
+                hint = ("run scripts/tokenize_user_books.py --book " + pg
+                        if pg.startswith("U") else "")
+                return {"error": "counts file not found", "id": pg, "hint": hint}
             with open(f, encoding="utf-8") as fh:
                 for line in fh:
                     parts = line.rstrip("\n").split("\t")
@@ -693,7 +709,7 @@ def lexical_diversity(scope: dict | str) -> dict:
             if not len(sel):
                 return {"error": "no books matched", "author_regex": scope["author"]}
             for pg in sel["id"]:
-                f = SPGC_COUNTS_DIR / f"{pg}_counts.txt"
+                f = _counts_path(pg)
                 if not f.exists(): continue
                 book = Counter()
                 with open(f, encoding="utf-8") as fh:
@@ -739,10 +755,6 @@ def word_collocates(scope: dict | str, word: str, window: int = 4,
         if isinstance(scope, dict) and scope.get("book"):
             pg = scope["book"].upper()
             if not (pg.startswith("PG") or pg.startswith("U")): pg = f"PG{pg}"
-            if pg.startswith("U"):
-                return {"error": "word_collocates requires SPGC tokens; user-uploaded books "
-                                 "(U-prefix) are not yet tokenized into SPGC tokens format",
-                        "id": pg}
             book_ids = [pg]
             label = f"book:{pg}"
         elif isinstance(scope, dict) and scope.get("author"):
@@ -758,7 +770,7 @@ def word_collocates(scope: dict | str, word: str, window: int = 4,
         hits = 0
         books_with_hits = 0
         for pg in book_ids:
-            f = SPGC_TOKENS_DIR / f"{pg}_tokens.txt"
+            f = _tokens_path(pg)
             if not f.exists():
                 continue
             with open(f, encoding="utf-8") as fh:
@@ -912,7 +924,7 @@ def word_freq_timeline(word: str, bucket_years: int = 25,
             occurrences = 0
             books_used = 0
             for pg in group["id"]:
-                f = SPGC_COUNTS_DIR / f"{pg}_counts.txt"
+                f = _counts_path(pg)
                 if not f.exists():
                     continue
                 book_total = 0
@@ -1085,7 +1097,7 @@ def top_authors_by(metric: str = "books", top: int = 10, lang: str = "en",
             book_count: Counter = Counter()
             for _, row in df.iterrows():
                 pg = row["id"]; author = row["author"]
-                f = SPGC_COUNTS_DIR / f"{pg}_counts.txt"
+                f = _counts_path(pg)
                 if not f.exists():
                     continue
                 with open(f, encoding="utf-8") as fh:

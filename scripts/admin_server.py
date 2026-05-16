@@ -316,6 +316,16 @@ def _link_into_raw(files: list[Path]) -> dict:
         except OSError:
             shutil.copy(f, target)
         added += 1
+
+    # Tokenize newly-added user books into SPGC-compatible format so
+    # top_ngrams_by_author / affinity_by_author / word_contexts /
+    # word_collocates / lexical_diversity start working for them
+    # immediately (without a full reindex round trip).
+    tokenize_summary = []
+    for u_id in new_user_ids:
+        r = _tokenize_user_book(u_id)
+        tokenize_summary.append(r)
+
     return {
         "added":           added,
         "skipped_existing": skipped_existing,
@@ -324,8 +334,26 @@ def _link_into_raw(files: list[Path]) -> dict:
         "epub_failed":      epub_failed,
         "user_uploaded":    user_uploaded,
         "new_user_ids":     new_user_ids,
+        "tokenize":        tokenize_summary,
         "sample_skipped":   sample_skipped,
     }
+
+
+def _tokenize_user_book(book_id: str) -> dict:
+    """Run scripts/tokenize_user_books.py for a single freshly-uploaded U<N>.
+    Synchronous — these are ~1s on CPU for typical novel-sized EPUBs."""
+    try:
+        proc = subprocess.run(
+            ["python", "-u", str(SCRIPTS_DIR / "tokenize_user_books.py"),
+             "--book", book_id],
+            capture_output=True, text=True, timeout=60,
+        )
+        ok = proc.returncode == 0
+        return {"id": book_id, "ok": ok,
+                "stdout": proc.stdout.strip()[-200:],
+                "stderr": proc.stderr.strip()[-200:] if not ok else ""}
+    except Exception as e:
+        return {"id": book_id, "ok": False, "error": str(e)[:120]}
 
 
 def _read_jobs() -> list[dict]:
