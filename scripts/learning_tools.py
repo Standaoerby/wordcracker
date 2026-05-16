@@ -87,8 +87,22 @@ def _save_word_dict(d: dict) -> None:
 
 # ============================ TOOL: affinity_by_book ============================
 def affinity_by_book(pg_id: str, top: int = 50,
-                     min_author_count: int = 3) -> dict:
-    """Affinity for a single book vs the global corpus."""
+                     min_author_count: int = 3,
+                     min_corpus_count: int = 200,
+                     pos_filter: list[str] | None = None,
+                     exclude_proper_nouns: bool = True) -> dict:
+    """Affinity for a single book vs the global corpus.
+
+    min_corpus_count: drop words with global corpus_count below this. Default 200
+    filters out the proper-noun bleed-through that dominates raw per-book
+    affinity (Longbourn/Hunsford/Pemberley in Pride and Prejudice would otherwise
+    crowd out real stylistic markers). Set to 0 to include rare words.
+
+    pos_filter: keep only words spaCy POS-tags as one of these (e.g. ['ADJ'] for
+    "characteristic adjectives of this book"). When set, min_corpus_count auto-
+    raises to >=1000 because spaCy mis-tags lowercased OOV proper nouns as
+    NOUN/ADJ on single-word input.
+    """
     t0 = time.perf_counter()
     pg_id = pg_id.upper() if not pg_id.startswith("PG") else pg_id
     if not pg_id.startswith("PG"):
@@ -117,11 +131,33 @@ def affinity_by_book(pg_id: str, top: int = 50,
         corpus = _corpus_counts()
         corpus_total = _corpus_total_tokens()
 
+        effective_min_corpus = min_corpus_count
+        if pos_filter:
+            effective_min_corpus = max(effective_min_corpus, 1000)
+
+        # Re-use the LLM self-learning proper-noun cache: any word flagged as a
+        # proper noun by previous enrich_word calls is poison for stylistic
+        # markers too. This catches book-specific names spaCy POS doesn't catch
+        # on lowercased single-token input (longbourn/darcy/bennet etc.).
+        known_proper: set[str] = set()
+        if exclude_proper_nouns or pos_filter:
+            try:
+                cache = _load_word_dict()
+                for key, info in cache.items():
+                    if info.get("proper_noun"):
+                        known_proper.add(key.split("|", 1)[0])
+            except Exception as e:
+                _log(f"failed to load proper-noun cache: {e}")
+
         rows = []
         for w, bc in book.items():
             if bc < min_author_count:
                 continue
             cc = corpus.get(w, 0)
+            if cc < effective_min_corpus:
+                continue
+            if w in known_proper:
+                continue
             if cc == 0:
                 affinity = None
             else:
@@ -129,8 +165,29 @@ def affinity_by_book(pg_id: str, top: int = 50,
             rows.append({"word": w, "book_count": bc, "corpus_count": cc,
                          "affinity": round(affinity, 2) if affinity else None})
         rows.sort(key=lambda r: (r["affinity"] is None, -(r["affinity"] or 0)))
+
+        # Optional POS narrowing via spaCy. Run on top 8x pool so we have
+        # candidates left after filtering. When pos_filter is set we narrow
+        # to those tags; otherwise we still drop PROPN to suppress the
+        # character/place-name flood typical of high-coverage cached books
+        # (Pride and Prejudice → longbourn/pemberley/netherfield).
+        if rows and (pos_filter or exclude_proper_nouns):
+            try:
+                from rag_tools import _spacy_pos_tags
+                pool = rows[: top * 8]
+                tags = _spacy_pos_tags([r["word"] for r in pool])
+                if pos_filter:
+                    allowed = {p.upper() for p in pos_filter}
+                    rows = [r for r in pool if tags.get(r["word"], "") in allowed]
+                else:
+                    rows = [r for r in pool if tags.get(r["word"], "") != "PROPN"]
+            except Exception as e:
+                _log(f"spaCy POS filter failed in affinity_by_book: {e}")
+
         out = {"pg_id": pg_id, "title": title, "author": author,
                "book_tokens": book_tokens, "book_vocab": len(book),
+               "pos_filter": pos_filter,
+               "effective_min_corpus_count": effective_min_corpus,
                "top": rows[:top]}
         _log(f"affinity_by_book({pg_id}) done in {time.perf_counter()-t0:.2f}s")
         return out
@@ -500,13 +557,20 @@ LEARNING_TOOLS_SPEC = [
         "name": "affinity_by_book",
         "description": (
             "Фирменные слова конкретной книги (vs корпус). "
-            "Используй для «топ слов из книги X», «характерные слова конкретного произведения». "
+            "Используй для «топ слов из книги X», «характерные слова конкретного произведения», "
+            "«слова используемые в этой книге намного чаще, чем в среднем по библиотеке». "
+            "По умолчанию отфильтровывает имена персонажей/мест через min_corpus_count=200. "
             "Принимает PG id (например PG1342 — Pride and Prejudice)."
         ),
         "parameters": {"type": "object", "properties": {
             "pg_id": {"type": "string", "description": "PG id (с префиксом PG или без)"},
             "top": {"type": "integer", "description": "сколько вернуть (default 50)"},
             "min_author_count": {"type": "integer", "description": "минимум встреч в книге (default 3)"},
+            "min_corpus_count": {"type": "integer", "description":
+                "минимум встреч в корпусе (default 200). Поднимай чтобы сильнее отсечь имена/места (500/1000+)."},
+            "pos_filter": {"type": "array", "items": {"type": "string"},
+                "description":
+                "POS: ['ADJ']/['NOUN']/['VERB']. Например 'характерные прилагательные книги'. При pos_filter автоматически min_corpus_count>=1000."},
         }, "required": ["pg_id"]},
     }},
     {"type": "function", "function": {

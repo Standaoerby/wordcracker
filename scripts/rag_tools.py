@@ -157,11 +157,32 @@ def _metadata_df() -> pd.DataFrame:
     return df
 
 
-def _select_books(author_regex: str, lang: str = "en") -> pd.DataFrame:
+def _select_books(author_regex: str, lang: str = "en",
+                  year_from: int | None = None,
+                  year_to: int | None = None) -> pd.DataFrame:
+    """Books matching author regex and language.
+
+    year_from / year_to filter on `authoryearofbirth + 30` (writing prime
+    proxy). Useful for period queries like 'fog у викторианцев'
+    (year_from=1837, year_to=1901). When metadata lacks birth year the book
+    is included (no filter); we never drop on missing data."""
     df = _metadata_df()
     mask_lang = df["language"].fillna("").str.contains(f"'{lang}'", regex=False)
     mask_auth = df["author"].fillna("").str.contains(author_regex, case=False, regex=True)
-    return df[mask_lang & mask_auth]
+    out = df[mask_lang & mask_auth]
+    if (year_from is not None or year_to is not None) and "authoryearofbirth" in out.columns:
+        yob = pd.to_numeric(out["authoryearofbirth"], errors="coerce")
+        writing_prime = yob + 30
+        # Strict filter — when a year range is set, drop books with unknown
+        # birth year too. Mixing "Victorians" with "unknown era" would muddy
+        # period analysis. Tradeoff: lose ~10-30% of books with NaN yob.
+        mask_year = writing_prime.notna()
+        if year_from is not None:
+            mask_year &= (writing_prime >= year_from)
+        if year_to is not None:
+            mask_year &= (writing_prime <= year_to)
+        out = out[mask_year]
+    return out
 
 
 def _maybe_translate(query: str) -> str:
@@ -426,7 +447,9 @@ def _spacy_pos_tags(words: list[str]) -> dict:
 
 
 def top_ngrams_by_author(author_regex: str, n: int = 2, top: int = 20,
-                         pos_filter: list[str] | None = None) -> dict:
+                         pos_filter: list[str] | None = None,
+                         year_from: int | None = None,
+                         year_to: int | None = None) -> dict:
     """N-gram frequencies (n=1,2,3) from per-author SPGC tokens.
 
     pos_filter (only n=1): list like ["NOUN","VERB","ADJ","ADV","PROPN"]; keeps
@@ -434,14 +457,18 @@ def top_ngrams_by_author(author_regex: str, n: int = 2, top: int = 20,
     applied to the FIRST token of the n-gram (typical use: "find adjective+noun
     bigrams" → pos_filter=["ADJ"]). On a large candidate pool the spaCy pass
     runs only on the top ~5x final size, so it stays cheap.
+
+    year_from / year_to: filter by author birth_year+30 (writing prime proxy).
+    Use author_regex='.*' to mean "any author" when filtering only by period.
     """
     t0 = time.perf_counter()
     if n not in (1, 2, 3):
         return {"error": "n must be 1, 2 or 3"}
     try:
-        sel = _select_books(author_regex)
+        sel = _select_books(author_regex, year_from=year_from, year_to=year_to)
         if not len(sel):
-            return {"error": "no books matched", "author_regex": author_regex}
+            return {"error": "no books matched", "author_regex": author_regex,
+                    "year_from": year_from, "year_to": year_to}
 
         counter: Counter = Counter()
         used = 0
@@ -500,7 +527,9 @@ def top_ngrams_by_author(author_regex: str, n: int = 2, top: int = 20,
 
 
 # ============================ TOOL 4: affinity_by_author ============================
-def affinity_by_author(author_regex: str, top: int = 50, min_author_count: int = 5) -> dict:
+def affinity_by_author(author_regex: str, top: int = 50, min_author_count: int = 5,
+                       min_corpus_count: int = 0,
+                       pos_filter: list[str] | None = None) -> dict:
     """Per-author affinity vs corpus. Uses cached CSV if present, else runs
     spgc_author_affinity.py.
 
@@ -509,7 +538,13 @@ def affinity_by_author(author_regex: str, top: int = 50, min_author_count: int =
     out via spaCy NER, so the top is real stylistic markers like "blighter"
     instead of "Wrykyn" / "Threepwood". For authors without a clean variant we
     apply an inline heuristic: drop words whose corpus_count is essentially 0
-    (appears only in this author = almost always a proper noun)."""
+    (appears only in this author = almost always a proper noun).
+
+    min_corpus_count: if > 0, drop rows where corpus_count < min_corpus_count.
+    Useful for filtering OOV/proper-noun bleed-through that spaCy POS misses
+    on lowercased archaic words (oinos/luchesi/ulalume in Poe etc.). compare_authors
+    passes 100 by default — words present in the 2.8B-token corpus < 100 times
+    are almost always OOV character/place names from a single author's universe."""
     t0 = time.perf_counter()
     slug = _slug(author_regex)
     csv_path = DERIVED_DIR / f"{slug}_affinity.csv"
@@ -538,6 +573,16 @@ def affinity_by_author(author_regex: str, top: int = 50, min_author_count: int =
         use_clean = clean_path.exists()
         df = pd.read_csv(clean_path if use_clean else csv_path)
         df = df[df["author_count"] >= min_author_count]
+        # When narrowing by POS, OOV proper nouns get systematically mis-tagged
+        # by spaCy as ADJ/NOUN (czarevitch, mahaffy, tuppy from Wilde). Force
+        # min_corpus_count up to 1000 in that case unless the caller asked for
+        # something higher — known English adjectives are abundant in a 2.8B
+        # corpus, so this hurdle barely filters real lexemes.
+        effective_min_corpus = min_corpus_count
+        if pos_filter:
+            effective_min_corpus = max(effective_min_corpus, 1000)
+        if effective_min_corpus > 0:
+            df = df[df["corpus_count"] >= effective_min_corpus]
         # Stylometric heuristic: a word is a real stylistic marker only if it
         # appears MORE in the corpus-without-this-author than in the author
         # alone. Words with corpus_count ≈ author_count are almost always
@@ -561,14 +606,25 @@ def affinity_by_author(author_regex: str, top: int = 50, min_author_count: int =
         # leans toward NOUN/VERB/ADJ for real lexemes; rare OOV strings get
         # tagged PROPN. This catches what the corpus-diff heuristic misses
         # (e.g. Wodehouse 'marvis' / 'stanning' which leak through).
+        # When pos_filter is set we narrow further to those POS tags
+        # ("characteristic adjectives of Wilde" → pos_filter=["ADJ"]).
         sorted_df = df.sort_values("affinity", ascending=False, na_position="last")
-        candidate_pool = sorted_df.head(top * 4).copy()
+        # Pool 8x the requested top when narrowing by POS, since most words
+        # won't match the filter; 4x is enough for the default PROPN drop.
+        pool_mult = 8 if pos_filter else 4
+        candidate_pool = sorted_df.head(top * pool_mult).copy()
         if len(candidate_pool):
             try:
                 tags = _spacy_pos_tags(candidate_pool["word"].tolist())
-                keep_mask = candidate_pool["word"].map(
-                    lambda w: tags.get(w, "") != "PROPN"
-                )
+                if pos_filter:
+                    allowed = {p.upper() for p in pos_filter}
+                    keep_mask = candidate_pool["word"].map(
+                        lambda w: tags.get(w, "") in allowed
+                    )
+                else:
+                    keep_mask = candidate_pool["word"].map(
+                        lambda w: tags.get(w, "") != "PROPN"
+                    )
                 propn_dropped = int((~keep_mask).sum())
                 df = candidate_pool[keep_mask]
             except Exception as e:
@@ -588,6 +644,8 @@ def affinity_by_author(author_regex: str, top: int = 50, min_author_count: int =
         out = {
             "author_regex":       author_regex,
             "slug":               slug,
+            "pos_filter":         pos_filter,
+            "effective_min_corpus_count": effective_min_corpus,
             "total_unique_words": total_unique,
             "top":                top_rows,
             "cached":             cached,
@@ -648,12 +706,19 @@ def word_contexts(author_regex: str, word: str, window: int = 10, max_samples: i
 
 
 # ============================ TOOL 6: compare_authors ============================
-def compare_authors(author1_regex: str, author2_regex: str, top: int = 20) -> dict:
-    """Composition of affinity_by_author for two authors + cosine similarity of their affinity vectors."""
+def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
+                    min_corpus_count: int = 100) -> dict:
+    """Composition of affinity_by_author for two authors + cosine similarity of their affinity vectors.
+
+    min_corpus_count: minimum corpus_count for a word to be included as a
+    "stylistic marker". Default 100 in a 2.8B-token corpus filters out OOV
+    character/place names (oinos, ulalume, dunwich, threepwood) that the
+    spaCy PROPN heuristic misses on lowercased archaic words. Pass 0 to
+    include rare words too."""
     t0 = time.perf_counter()
     try:
-        a1 = affinity_by_author(author1_regex, top=top * 5)
-        a2 = affinity_by_author(author2_regex, top=top * 5)
+        a1 = affinity_by_author(author1_regex, top=top * 5, min_corpus_count=min_corpus_count)
+        a2 = affinity_by_author(author2_regex, top=top * 5, min_corpus_count=min_corpus_count)
         if "error" in a1:
             return {"error": f"author1 failed: {a1['error']}", "details": a1}
         if "error" in a2:
@@ -676,11 +741,28 @@ def compare_authors(author1_regex: str, author2_regex: str, top: int = 20) -> di
         n2 = math.sqrt(sum(b * b for b in v2)) or 1.0
         cosine = round(dot / (n1 * n2), 4)
 
+        # Cosine on top-N affinity vectors is structurally low: the affinity
+        # vector is concentrated on each author's *unique* high-affinity words,
+        # so unless two authors share signature vocabulary the intersection is
+        # near-empty and cosine ≈ 0. This does NOT mean "styles are unrelated"
+        # — it means "the top stylistic markers do not overlap". Flag this so
+        # the agent doesn't over-interpret a 0.0 result.
+        if cosine < 0.05:
+            cosine_note = ("low cosine (< 0.05) reflects that each author's top "
+                           "affinity vector is dominated by author-unique words; "
+                           "this is structural, not a measure of overall stylistic "
+                           "distance. Use `shared_high_affinity` to see common "
+                           "stylistic markers if any exist.")
+        else:
+            cosine_note = "non-trivial overlap between top affinity vectors"
+
         out = {
             "author1": {"regex": author1_regex, "slug": a1["slug"], "top_unique": a1["top"][:top]},
             "author2": {"regex": author2_regex, "slug": a2["slug"], "top_unique": a2["top"][:top]},
             "shared_high_affinity": shared,
             "cosine_similarity":    cosine,
+            "cosine_note":          cosine_note,
+            "min_corpus_count":     min_corpus_count,
         }
         _log(f"compare_authors done in {time.perf_counter()-t0:.2f}s, cosine={cosine}")
         return out
@@ -767,7 +849,16 @@ def lexical_diversity(scope: dict | str) -> dict:
 # ============================ TOOL 8: word_collocates ============================
 def word_collocates(scope: dict | str, word: str, window: int = 4,
                     top: int = 20, exclude_stopwords: bool = True) -> dict:
-    """Words that co-occur within ±window tokens of `word` in the scope's books."""
+    """Words that co-occur within ±window tokens of `word` in the scope's books.
+
+    scope:
+        {'book': 'PG1342'}                        — single book
+        {'author': '^Doyle,'}                     — all books of author(s)
+        {'author': '.*', 'year_from': 1837,       — period filter via author
+                          'year_to':  1901}         birth_year+30 (writing prime).
+                                                    e.g. Victorians: 1837-1901.
+                                                    Use '.*' as author_regex to mean "any author".
+    """
     t0 = time.perf_counter()
     word_lc = word.strip().lower()
     if not word_lc:
@@ -779,13 +870,17 @@ def word_collocates(scope: dict | str, word: str, window: int = 4,
             book_ids = [pg]
             label = f"book:{pg}"
         elif isinstance(scope, dict) and scope.get("author"):
-            sel = _select_books(scope["author"])
+            yf = scope.get("year_from")
+            yt = scope.get("year_to")
+            sel = _select_books(scope["author"], year_from=yf, year_to=yt)
             if not len(sel):
-                return {"error": "no books matched", "author_regex": scope["author"]}
+                return {"error": "no books matched", "author_regex": scope["author"],
+                        "year_from": yf, "year_to": yt}
             book_ids = list(sel["id"])
-            label = f"author:{scope['author']}"
+            period = f" {yf}-{yt}" if (yf or yt) else ""
+            label = f"author:{scope['author']}{period} ({len(sel)} books)"
         else:
-            return {"error": "bad scope; use {'book':PGid} | {'author':regex}"}
+            return {"error": "bad scope; use {'book':PGid} | {'author':regex, [year_from, year_to]}"}
 
         neighbors: Counter = Counter()
         hits = 0
@@ -986,7 +1081,50 @@ def word_freq_timeline(word: str, bucket_years: int = 25,
 
 
 # ============================ TOOL 11: word_contexts_global ============================
-def word_contexts_global(word: str, k: int = 12, snippet_chars: int = 280) -> dict:
+def _normalize_lang(raw: str) -> str:
+    """Pull a plain ISO code out of the various shapes `language` can take in
+    the merged metadata frame: ``"en"``, ``"['en']"``, ``"['en', 'fr']"``,
+    ``""``, ``"nan"``. Returns lower-cased primary code or "" if unknown."""
+    if not raw:
+        return ""
+    s = str(raw).strip().lower()
+    if s in {"nan", "none"}:
+        return ""
+    # Strip Python-list-repr brackets and quotes: "['en']" → "en"
+    s = s.replace("[", "").replace("]", "").replace("'", "").replace('"', "")
+    if not s:
+        return ""
+    # Multiple codes separated by comma — take primary.
+    return s.split(",")[0].strip()
+
+
+# Metalinguistic books — dictionaries, grammar manuals, encyclopedias — match
+# a target word as a *headword/definition*, not a usage example. Drop them.
+METALINGUISTIC_SUBJECT_SUBSTRINGS = (
+    "dictionar", "encyclopedi", "grammar", "lexico",
+    "philolog", "linguistic", "etymolog",
+    " language --", " language",  # "English language", "Malay language", etc.
+)
+METALINGUISTIC_TITLE_SUBSTRINGS = (
+    "dictionary", "encyclopaedia", "encyclopedia", "grammar",
+    "manual of", "book about words", "lexicon", "thesaurus",
+)
+
+
+def _is_metalinguistic(title: str, subjects: str) -> bool:
+    """True if the book is a dictionary/grammar/encyclopedia where a word
+    appears as a headword instead of in natural usage."""
+    t_lc = (title or "").lower()
+    s_lc = (subjects or "").lower()
+    if any(s in t_lc for s in METALINGUISTIC_TITLE_SUBSTRINGS):
+        return True
+    if any(s in s_lc for s in METALINGUISTIC_SUBJECT_SUBSTRINGS):
+        return True
+    return False
+
+
+def word_contexts_global(word: str, k: int = 12, snippet_chars: int = 280,
+                         lang: str = "en") -> dict:
     """Contexts of a target word from many authors at once.
 
     Uses the ChromaDB semantic index to fetch chunks that are likely to
@@ -994,6 +1132,13 @@ def word_contexts_global(word: str, k: int = 12, snippet_chars: int = 280) -> di
     retriever), then filters to chunks that actually mention the word.
     Returns up to k samples, each with author/title/PG id + snippet around
     the first occurrence.
+
+    Post-filters via _metadata_df():
+    - language must match `lang` (default "en") — drops Malay/Spanish hits where
+      the word is a homograph in another language.
+    - drops dictionaries, grammars, encyclopedias and other metalinguistic
+      books where the word appears as a headword, not in natural usage.
+    Pass lang=None to disable language filter.
     """
     t0 = time.perf_counter()
     word_lc = word.strip().lower()
@@ -1006,7 +1151,8 @@ def word_contexts_global(word: str, k: int = 12, snippet_chars: int = 280) -> di
         # retrieve chunks that literally contain the word. Then we rank what
         # comes back by semantic distance to a paraphrastic query.
         q = f"usage of the word {word_lc} in literature"
-        fetch = max(k * 4, 40)
+        # Fetch wider — metalinguistic + non-English filtering can drop a lot.
+        fetch = max(k * 8, 80)
         try:
             res = col.query(query_texts=[q], n_results=fetch,
                             where_document={"$contains": word_lc})
@@ -1014,8 +1160,19 @@ def word_contexts_global(word: str, k: int = 12, snippet_chars: int = 280) -> di
             # fallback if backend doesn't support where_document
             res = col.query(query_texts=[q], n_results=fetch * 4)
 
+        # Build a pg_id → (language, subjects) lookup from the merged metadata
+        # frame. Cheap because _metadata_df() is mtime-cached.
+        meta = _metadata_df()
+        meta_lookup = {}
+        if meta is not None and len(meta):
+            for _, row in meta[["id", "language", "subjects"]].iterrows():
+                meta_lookup[str(row["id"])] = (str(row.get("language", "") or ""),
+                                               str(row.get("subjects", "") or ""))
+
         seen_authors = set()
         out_samples = []
+        dropped_lang = 0
+        dropped_meta = 0
         for doc, md, dist in zip(res["documents"][0], res["metadatas"][0], res["distances"][0]):
             doc_lc = doc.lower()
             idx = doc_lc.find(word_lc)
@@ -1027,6 +1184,24 @@ def word_contexts_global(word: str, k: int = 12, snippet_chars: int = 280) -> di
             if before.isalnum() or after.isalnum():
                 continue
             author = md.get("author") or ""
+            pg_id = str(md.get("pg_id") or "")
+            title = md.get("title") or ""
+
+            # Language + metalinguistic filters via metadata lookup.
+            # NOTE: language is missing for many orphan_pg / user_upload rows,
+            # so we only drop on a KNOWN non-match. Unknown language → keep
+            # (better to show borderline samples than miss the obvious
+            # English ones whose metadata just isn't filled in).
+            book_lang_raw, book_subj = meta_lookup.get(pg_id, ("", ""))
+            book_lang = _normalize_lang(book_lang_raw)
+            want_lang = lang.strip().lower() if lang else ""
+            if want_lang and book_lang and book_lang != want_lang:
+                dropped_lang += 1
+                continue
+            if _is_metalinguistic(title, book_subj):
+                dropped_meta += 1
+                continue
+
             if author in seen_authors:
                 continue
             seen_authors.add(author)
@@ -1035,15 +1210,18 @@ def word_contexts_global(word: str, k: int = 12, snippet_chars: int = 280) -> di
             snippet = doc[lo:hi].replace("\n", " ").strip()
             out_samples.append({
                 "author":   author,
-                "title":    md.get("title") or "",
-                "pg_id":    md.get("pg_id") or "",
+                "title":    title,
+                "pg_id":    pg_id,
                 "distance": round(float(dist), 4),
                 "snippet":  snippet,
             })
             if len(out_samples) >= k:
                 break
         return {"word": word_lc, "k": k, "samples": out_samples,
-                "unique_authors": len(seen_authors)}
+                "unique_authors": len(seen_authors),
+                "filter_stats": {"dropped_lang": dropped_lang,
+                                 "dropped_metalinguistic": dropped_meta,
+                                 "lang": lang}}
     except Exception as e:
         return {"error": "word_contexts_global failed", "details": str(e)}
     finally:
@@ -1279,14 +1457,18 @@ TOOLS_SPEC = [
             "Топ N-грамм у автора (n=1 unigrams, n=2 bigrams, n=3 trigrams). "
             "Используй для «топ биграмм у X», «фирменные обороты», «частые связки слов», "
             "«какие прилагательные характерны для X» (pos_filter=['ADJ'])."
-            "Стоп-слова и пунктуация уже отфильтрованы."
+            "Стоп-слова и пунктуация уже отфильтрованы. "
+            "Для эпохи передай year_from/year_to (e.g. 1837-1901 = Victorian) и "
+            "author_regex='.*' если автор любой."
         ),
         "parameters": {"type": "object", "properties": {
-            "author_regex": {"type": "string", "description": "Regex, например '^Dostoyevsky,'"},
+            "author_regex": {"type": "string", "description": "Regex, например '^Dostoyevsky,'. Use '.*' if filtering only by period."},
             "n":   {"type": "integer", "description": "1, 2 или 3"},
             "top": {"type": "integer", "description": "Сколько вернуть (default 20)"},
             "pos_filter": {"type": "array", "items": {"type": "string"},
                            "description": "Фильтр POS первой токена ngram: ['NOUN','VERB','ADJ','ADV','PROPN']"},
+            "year_from": {"type": "integer", "description": "Начало периода (writing prime = author birth + 30). 1837 = Викторианский."},
+            "year_to":   {"type": "integer", "description": "Конец периода. 1901 = Викторианский."},
         }, "required": ["author_regex"]},
     }},
     {"type": "function", "function": {
@@ -1299,6 +1481,11 @@ TOOLS_SPEC = [
             "author_regex":     {"type": "string", "description": "Regex, например '^Wodehouse,'"},
             "top":              {"type": "integer", "description": "Сколько вернуть (default 50)"},
             "min_author_count": {"type": "integer", "description": "Минимум встреч у автора (default 5)"},
+            "min_corpus_count": {"type": "integer", "description":
+                "Минимум встреч в корпусе (default 0). Поставь 100, чтобы отфильтровать OOV/имена собственные (oinos/dunwich/threepwood) когда они проскальзывают через NER."},
+            "pos_filter": {"type": "array", "items": {"type": "string"},
+                "description":
+                "POS фильтр: ['ADJ'] = только характерные прилагательные, ['NOUN'] = существительные, ['VERB'] = глаголы. Используй для запросов «характерные прилагательные/глаголы автора»."},
         }, "required": ["author_regex"]},
     }},
     {"type": "function", "function": {
@@ -1324,6 +1511,8 @@ TOOLS_SPEC = [
             "author1_regex": {"type": "string", "description": "Regex автора 1, например '^Wodehouse,'"},
             "author2_regex": {"type": "string", "description": "Regex автора 2, например '^Doyle,'"},
             "top":           {"type": "integer", "description": "Сколько слов в топе каждого (default 20)"},
+            "min_corpus_count": {"type": "integer", "description":
+                "Минимум встреч слова в корпусе (default 100). Фильтрует OOV/имена (oinos/dunwich/threepwood). Поставь 0 для включения редких слов."},
         }, "required": ["author1_regex", "author2_regex"]},
     }},
 ]
@@ -1345,9 +1534,14 @@ TOOLS_SPEC += [
         "description": (
             "Слова в окне ±N токенов вокруг target word. "
             "Используй для «слова рядом со sea у Melville», «соседи слова X», «collocates слова X у автора»."
+            " Для запросов по эпохе («что соседствует с fog у викторианцев») передай "
+            "scope={'author': '.*', 'year_from': 1837, 'year_to': 1901} — period фильтр "
+            "через год рождения автора + 30 (расцвет творчества)."
         ),
         "parameters": {"type": "object", "properties": {
-            "scope":  {"type": "object", "description": "{'book': PGid} или {'author': regex}"},
+            "scope":  {"type": "object", "description":
+                "{'book': PGid} | {'author': regex} | {'author': regex, 'year_from': YYYY, 'year_to': YYYY}. "
+                "Use author='.*' to mean 'any author' when filtering only by period."},
             "word":   {"type": "string"},
             "window": {"type": "integer", "description": "размер окна в токенах (default 4)"},
             "top":    {"type": "integer", "description": "сколько вернуть (default 20)"},
@@ -1376,6 +1570,8 @@ TOOLS_SPEC += [
         "parameters": {"type": "object", "properties": {
             "word": {"type": "string", "description": "одно слово (single token)"},
             "k":    {"type": "integer", "description": "сколько разных авторов (default 12)"},
+            "lang": {"type": "string", "description":
+                "фильтр языка книги (default 'en'). Отфильтровывает омонимы из не-английских книг (ajar=учить в малайском)."},
         }, "required": ["word"]},
     }},
     {"type": "function", "function": {
