@@ -276,13 +276,28 @@ def semantic_search(query: str, k: int = 8, author_filter: str | None = None) ->
 
 
 # ============================ TOOL 2: corpus_stats_by_author ============================
+_BROAD_REGEXES = {"", ".", ".*", ".+", "*", "[a-z]", "[A-Za-z]"}
+
+
 def corpus_stats_by_author(author_regex: str) -> dict:
     """Aggregate per-author corpus stats from SPGC counts files."""
     t0 = time.perf_counter()
     try:
+        # Guard against catch-all regex — agents sometimes send '.*' when they want
+        # "all authors", which then scans ~47k books for 100+ seconds and returns
+        # nonsense. Force the caller to specify an actual author.
+        if author_regex.strip() in _BROAD_REGEXES:
+            return {"error": "regex too broad; use '^Surname,' format (e.g. '^Dickens,'). "
+                             "For 'top authors by X' use the top_authors_by tool instead.",
+                    "author_regex": author_regex}
         sel = _select_books(author_regex)
         if not len(sel):
             return {"error": "no books matched", "author_regex": author_regex}
+        # Even with a non-trivial regex, refuse if it matches absurdly many books.
+        if len(sel) > 500:
+            return {"error": f"regex matched {int(len(sel))} books — too broad. "
+                             "Tighten with an '^Surname,' anchor.",
+                    "author_regex": author_regex, "matched": int(len(sel))}
 
         total_tokens = 0
         per_book = []
@@ -422,11 +437,20 @@ def top_ngrams_by_author(author_regex: str, n: int = 2, top: int = 20,
 
 # ============================ TOOL 4: affinity_by_author ============================
 def affinity_by_author(author_regex: str, top: int = 50, min_author_count: int = 5) -> dict:
-    """Per-author affinity vs corpus. Uses cached CSV if present, else runs spgc_author_affinity.py."""
+    """Per-author affinity vs corpus. Uses cached CSV if present, else runs
+    spgc_author_affinity.py.
+
+    If a NER-cleaned variant (`{slug}_affinity_clean.csv`) exists, prefer it —
+    these have proper nouns (character names, place names) explicitly filtered
+    out via spaCy NER, so the top is real stylistic markers like "blighter"
+    instead of "Wrykyn" / "Threepwood". For authors without a clean variant we
+    apply an inline heuristic: drop words whose corpus_count is essentially 0
+    (appears only in this author = almost always a proper noun)."""
     t0 = time.perf_counter()
     slug = _slug(author_regex)
     csv_path = DERIVED_DIR / f"{slug}_affinity.csv"
-    cached = csv_path.exists()
+    clean_path = DERIVED_DIR / f"{slug}_affinity_clean.csv"
+    cached = csv_path.exists() or clean_path.exists()
     try:
         if not cached:
             _log(f"running spgc_author_affinity.py for {author_regex!r} (slug={slug})")
@@ -447,8 +471,48 @@ def affinity_by_author(author_regex: str, top: int = 50, min_author_count: int =
                 return {"error": "affinity CSV not produced (no matching books?)",
                         "stdout": proc.stdout[-500:]}
 
-        df = pd.read_csv(csv_path)
+        use_clean = clean_path.exists()
+        df = pd.read_csv(clean_path if use_clean else csv_path)
         df = df[df["author_count"] >= min_author_count]
+        # Stylometric heuristic: a word is a real stylistic marker only if it
+        # appears MORE in the corpus-without-this-author than in the author
+        # alone. Words with corpus_count ≈ author_count are almost always
+        # fictional names that en_core_web_sm NER missed (Threepwood,
+        # Stockheath, Merevale, ...). Threshold: corpus_count - author_count >=
+        # max(10, author_count * 0.5) — i.e. the word shows up "elsewhere" at
+        # at least half the rate it appears in this author. "blighter" (143
+        # corpus / 65 author → diff 78 ≥ 32.5) survives; "threepwood" (35/35 →
+        # diff 0) is dropped.
+        before = len(df)
+        diff = df["corpus_count"] - df["author_count"]
+        threshold = pd.concat([
+            pd.Series(10, index=df.index),
+            (df["author_count"] * 0.5).astype(int),
+        ], axis=1).max(axis=1)
+        df = df[diff >= threshold]
+        heuristic_dropped = before - len(df)
+
+        # Second pass: spaCy POS-tag the surviving top-N candidates and drop
+        # anything tagged PROPN. spaCy's POS for isolated lowercased words
+        # leans toward NOUN/VERB/ADJ for real lexemes; rare OOV strings get
+        # tagged PROPN. This catches what the corpus-diff heuristic misses
+        # (e.g. Wodehouse 'marvis' / 'stanning' which leak through).
+        sorted_df = df.sort_values("affinity", ascending=False, na_position="last")
+        candidate_pool = sorted_df.head(top * 4).copy()
+        if len(candidate_pool):
+            try:
+                tags = _spacy_pos_tags(candidate_pool["word"].tolist())
+                keep_mask = candidate_pool["word"].map(
+                    lambda w: tags.get(w, "") != "PROPN"
+                )
+                propn_dropped = int((~keep_mask).sum())
+                df = candidate_pool[keep_mask]
+            except Exception as e:
+                _log(f"spaCy POS filter failed: {e}")
+                propn_dropped = 0
+                df = sorted_df
+        else:
+            propn_dropped = 0
         df = df.sort_values("affinity", ascending=False, na_position="last").head(top)
         top_rows = [
             {"word": r["word"], "author_count": int(r["author_count"]),
@@ -456,14 +520,21 @@ def affinity_by_author(author_regex: str, top: int = 50, min_author_count: int =
              "affinity": round(float(r["affinity"]), 2)}
             for _, r in df.iterrows() if pd.notna(r["affinity"])
         ]
+        total_unique = int(len(pd.read_csv(clean_path if use_clean else csv_path)))
         out = {
             "author_regex":       author_regex,
             "slug":               slug,
-            "total_unique_words": int(len(pd.read_csv(csv_path))),
+            "total_unique_words": total_unique,
             "top":                top_rows,
             "cached":             cached,
+            "proper_noun_filter": (
+                f"corpus-diff heuristic dropped {heuristic_dropped}, "
+                f"spaCy PROPN dropped {propn_dropped}"
+                + (" (over NER-cleaned base)" if use_clean else "")
+            ),
         }
-        _log(f"affinity_by_author done in {time.perf_counter()-t0:.2f}s (cached={cached})")
+        _log(f"affinity_by_author done in {time.perf_counter()-t0:.2f}s "
+             f"(cached={cached}, clean={use_clean})")
         return out
     except Exception as e:
         return {"error": "affinity_by_author failed", "details": str(e)}
@@ -925,6 +996,150 @@ def word_contexts_global(word: str, k: int = 12, snippet_chars: int = 280) -> di
         _log(f"word_contexts_global({word_lc}) done in {time.perf_counter()-t0:.2f}s")
 
 
+# ============================ TOOL 12: top_authors_by ============================
+# Placeholders/collective authors that pollute "most popular" lists.
+# Check by first-comma-segment (the "Surname" slot in SPGC format), case-insensitive.
+GENERIC_AUTHOR_FIRSTNAMES = {
+    "various", "anonymous", "unknown", "anonymous (translator)",
+    "catholic church", "church of england", "project gutenberg",
+    "united states", "national gallery (great britain)",
+}
+# Fuzzy substring matches anywhere in author string (also lowercased).
+GENERIC_AUTHOR_SUBSTRINGS = (
+    "encyclopedia", "department of", "international organization",
+    "library of congress",
+)
+
+
+def top_authors_by(metric: str = "books", top: int = 10, lang: str = "en",
+                   include_generic: bool = False) -> dict:
+    """Top N authors by metric.
+
+    metric:
+      - 'books':     count of distinct books per author in the metadata table
+      - 'downloads': sum of `downloads` column per author
+      - 'tokens':    sum of SPGC counts per author (slower; aggregates files)
+
+    include_generic=False (default): drop "Various / Anonymous / Unknown /
+    Catholic Church / Encyclopedia" — these dominate raw counts but aren't
+    what a user means by "most popular author".
+
+    For 'кто самый популярный автор?' default 'books' if the user doesn't
+    clarify what 'popular' means; offer 'downloads' as a follow-up.
+    """
+    t0 = time.perf_counter()
+    if metric not in ("books", "downloads", "tokens"):
+        return {"error": f"unknown metric: {metric!r} (use 'books'|'downloads'|'tokens')"}
+    try:
+        df = _metadata_df()
+        df = df[df["language"].fillna("").str.contains(f"'{lang}'", regex=False)]
+        df = df[df["author"].notna() & (df["author"].str.strip() != "")]
+        if not include_generic:
+            # split on first comma → "Various" or "Lytton" etc., lowercased
+            head = df["author"].str.split(",").str[0].str.strip().str.lower()
+            mask_set = head.isin(GENERIC_AUTHOR_FIRSTNAMES)
+            mask_sub = df["author"].str.lower().apply(
+                lambda s: any(sub in s for sub in GENERIC_AUTHOR_SUBSTRINGS)
+            )
+            df = df[~(mask_set | mask_sub)]
+        if metric == "books":
+            grouped = df.groupby("author").size().reset_index(name="books")
+            grouped = grouped.sort_values("books", ascending=False).head(top)
+            rows = [{"author": r["author"], "books": int(r["books"])}
+                    for _, r in grouped.iterrows()]
+        elif metric == "downloads":
+            df = df.copy()
+            df["downloads"] = pd.to_numeric(df["downloads"], errors="coerce").fillna(0)
+            grouped = df.groupby("author").agg(
+                downloads=("downloads", "sum"),
+                books=("id", "count"),
+            ).reset_index()
+            grouped = grouped.sort_values("downloads", ascending=False).head(top)
+            rows = [{"author": r["author"],
+                     "downloads": int(r["downloads"]),
+                     "books": int(r["books"])}
+                    for _, r in grouped.iterrows()]
+        else:  # tokens
+            tot: Counter = Counter()
+            book_count: Counter = Counter()
+            for _, row in df.iterrows():
+                pg = row["id"]; author = row["author"]
+                f = SPGC_COUNTS_DIR / f"{pg}_counts.txt"
+                if not f.exists():
+                    continue
+                with open(f, encoding="utf-8") as fh:
+                    book_total = sum(int(line.split("\t", 1)[1]) for line in fh
+                                     if "\t" in line)
+                tot[author] += book_total
+                book_count[author] += 1
+            ranked = tot.most_common(top)
+            rows = [{"author": a, "tokens": int(t),
+                     "books_with_counts": int(book_count[a])}
+                    for a, t in ranked]
+        out = {"metric": metric, "top_n": top, "lang": lang, "top": rows}
+        _log(f"top_authors_by({metric}) done in {time.perf_counter()-t0:.2f}s")
+        return out
+    except Exception as e:
+        return {"error": "top_authors_by failed", "details": str(e)}
+
+
+# ============================ TOOL 13: top_books_by_downloads ============================
+def top_books_by_downloads(top: int = 20, lang: str = "en",
+                           author_regex: str | None = None) -> dict:
+    """Top N most-downloaded books from SPGC metadata. Optional author filter."""
+    t0 = time.perf_counter()
+    try:
+        df = _metadata_df()
+        df = df[df["language"].fillna("").str.contains(f"'{lang}'", regex=False)]
+        if author_regex:
+            df = df[df["author"].fillna("").str.contains(author_regex, case=False, regex=True)]
+        df = df.copy()
+        df["downloads"] = pd.to_numeric(df["downloads"], errors="coerce").fillna(0)
+        df = df.sort_values("downloads", ascending=False).head(top)
+        rows = [{"id": r["id"],
+                 "title": (r["title"] or "")[:120],
+                 "author": r["author"] or "",
+                 "downloads": int(r["downloads"])}
+                for _, r in df.iterrows()]
+        out = {"top_n": top, "lang": lang, "author_regex": author_regex, "top": rows}
+        _log(f"top_books_by_downloads done in {time.perf_counter()-t0:.2f}s")
+        return out
+    except Exception as e:
+        return {"error": "top_books_by_downloads failed", "details": str(e)}
+
+
+# ============================ TOOL 14: author_metadata ============================
+def author_metadata(author_regex: str) -> dict:
+    """Quick metadata for an author: birth/death year, language, book count,
+    total downloads, sample titles. For questions like «когда родился X» /
+    «сколько у X книг» — use this BEFORE going to per-author tools."""
+    t0 = time.perf_counter()
+    try:
+        if author_regex.strip() in _BROAD_REGEXES:
+            return {"error": "regex too broad; use '^Surname,' format"}
+        sel = _select_books(author_regex)
+        if not len(sel):
+            return {"error": "no books matched", "author_regex": author_regex}
+        # extract author-level info (uniform across rows for a given author)
+        yob = pd.to_numeric(sel["authoryearofbirth"], errors="coerce").dropna()
+        yod = pd.to_numeric(sel["authoryearofdeath"], errors="coerce").dropna()
+        dl = pd.to_numeric(sel["downloads"], errors="coerce").fillna(0)
+        out = {
+            "author_regex":  author_regex,
+            "books_matched": int(len(sel)),
+            "authors_matched": sorted(sel["author"].dropna().unique().tolist())[:10],
+            "year_of_birth_min": int(yob.min()) if len(yob) else None,
+            "year_of_death_max": int(yod.max()) if len(yod) else None,
+            "total_downloads":   int(dl.sum()),
+            "languages":         sorted({lang for lang in sel["language"].dropna().unique()})[:5],
+            "sample_titles":     sel["title"].dropna().head(10).tolist(),
+        }
+        _log(f"author_metadata done in {time.perf_counter()-t0:.2f}s")
+        return out
+    except Exception as e:
+        return {"error": "author_metadata failed", "details": str(e)}
+
+
 # ============================ Ollama tool schemas ============================
 TOOLS_SPEC = [
     {"type": "function", "function": {
@@ -1080,6 +1295,44 @@ TOOLS_SPEC += [
             "min_books_per_bucket": {"type": "integer", "description": "default 3"},
         }, "required": ["word"]},
     }},
+    {"type": "function", "function": {
+        "name": "top_authors_by",
+        "description": (
+            "🆕 Топ-N авторов в корпусе по выбранной метрике. ОБЯЗАТЕЛЬНО используй для вопросов "
+            "«кто самый популярный автор», «топ-N авторов по числу книг», «у кого больше всего книг». "
+            "НЕ ПЫТАЙСЯ собрать ответ из corpus_stats_by_author — он работает на ОДНОГО автора."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "metric": {"type": "string",
+                       "description": "'books' (по числу книг) | 'downloads' (по скачиваниям) | 'tokens' (по объёму, медленно)"},
+            "top":    {"type": "integer", "description": "Сколько вернуть (default 10)"},
+            "lang":   {"type": "string", "description": "Язык (default 'en')"},
+        }, "required": ["metric"]},
+    }},
+    {"type": "function", "function": {
+        "name": "top_books_by_downloads",
+        "description": (
+            "🆕 Топ-N самых скачиваемых книг Gutenberg по метадате (column 'downloads'). "
+            "Используй для «топ-20 самых популярных книг», «самые скачиваемые книги X». "
+            "Опционально с author_regex чтобы ограничить одним автором."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "top":          {"type": "integer", "description": "default 20"},
+            "lang":         {"type": "string",  "description": "default 'en'"},
+            "author_regex": {"type": "string",  "description": "опционально: regex по author, например '^Dickens,'"},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "author_metadata",
+        "description": (
+            "🆕 Биографическая метадата автора: годы жизни (рождение/смерть), количество книг, "
+            "общее число скачиваний, языки, образцы названий. Используй для «когда родился X», "
+            "«сколько у X книг и скачиваний», «о каком авторе мы говорим». Быстро (без агрегации SPGC)."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "author_regex": {"type": "string", "description": "Regex по author, например '^Wodehouse,'"},
+        }, "required": ["author_regex"]},
+    }},
 ]
 
 TOOL_DISPATCH = {
@@ -1095,6 +1348,9 @@ TOOL_DISPATCH = {
     "book_readability":       book_readability,
     "word_freq_timeline":     word_freq_timeline,
     "word_contexts_global":   word_contexts_global,
+    "top_authors_by":         top_authors_by,
+    "top_books_by_downloads": top_books_by_downloads,
+    "author_metadata":        author_metadata,
 }
 
 

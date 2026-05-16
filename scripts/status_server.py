@@ -125,7 +125,22 @@ def slug_for_author(author: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", surname).strip("_") or "author"
 
 
-def collect_status():
+# Module-level TTL cache. Without it, every HTTP hit (dashboard auto-refreshes
+# every 30s, plus /api/status pollers) re-spawns `docker exec ... python -c
+# "import chromadb..."` — a ~10s import that piles up under concurrency and
+# eventually wedges the docker daemon → SSH dies, host becomes unreachable.
+# 30s TTL keeps the dashboard responsive without DDoSing the container.
+_STATUS_CACHE: dict = {"data": None, "ts": 0.0}
+_STATUS_TTL_SEC = 30.0
+
+
+def collect_status(force_fresh: bool = False):
+    now_ts = time.time()
+    if (not force_fresh
+            and _STATUS_CACHE["data"] is not None
+            and (now_ts - _STATUS_CACHE["ts"]) < _STATUS_TTL_SEC):
+        return _STATUS_CACHE["data"]
+
     corpus_meta = safe_json(DERIVED / "corpus_meta.json")
     wode_meta   = safe_json(DERIVED / "wodehouse_affinity_meta.json")
     ner_meta    = safe_json(DERIVED / "wodehouse_ner_filter_meta.json")
@@ -236,7 +251,7 @@ def collect_status():
     except Exception:
         uptime = "?"
 
-    return {
+    result = {
         "now": time.strftime("%Y-%m-%d %H:%M:%S"),
         "spgc": {
             "tokens_dir":   str(TOKENS_DIR),
@@ -274,6 +289,9 @@ def collect_status():
         "top_authors": top_authors(20),
         "health": _collect_health(ollama, chroma_bytes, build_running, du),
     }
+    _STATUS_CACHE["data"] = result
+    _STATUS_CACHE["ts"] = now_ts
+    return result
 
 
 def _check_http(url: str, timeout: float = 2.0) -> bool:
@@ -325,11 +343,15 @@ def _collect_health(ollama: dict, chroma_bytes: int, build_running: bool, du) ->
     chroma_detail = "indexing in progress" if build_running else "unknown"
     if not build_running:
         try:
+            # 5s timeout (was 15s) — chromadb cold-import takes ~3s, anything
+            # longer means the daemon is congested and we'd rather skip than
+            # pile up. The TTL cache wrapping collect_status means this only
+            # fires every 30s anyway.
             proc = subprocess.run(
                 ["docker", "exec", "wordcracker-gutenberg-lab-1", "python", "-c",
                  "import chromadb; c=chromadb.PersistentClient(path='/workspace/chroma_db');"
                  "print(c.get_collection('gutenberg-index').count())"],
-                capture_output=True, text=True, timeout=15,
+                capture_output=True, text=True, timeout=5,
             )
             if proc.returncode == 0 and proc.stdout.strip().isdigit():
                 n = int(proc.stdout.strip())
@@ -337,6 +359,8 @@ def _collect_health(ollama: dict, chroma_bytes: int, build_running: bool, du) ->
                 chroma_detail = f"{n:,} chunks"
             else:
                 chroma_detail = f"read failed: {(proc.stderr or proc.stdout)[:80]}"
+        except subprocess.TimeoutExpired:
+            chroma_detail = "chromadb check timed out (5s) — daemon busy"
         except Exception as e:
             chroma_detail = f"exec failed: {str(e)[:80]}"
     components.append({"name": "ChromaDB index", "ok": chroma_ok, "detail": chroma_detail})
