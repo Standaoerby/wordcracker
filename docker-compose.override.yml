@@ -8,6 +8,11 @@ services:
       - /data/ollama:/root/.ollama
     deploy:
       resources:
+        # qwen3:14b lives in VRAM (~14 GB), the host RAM footprint of the ollama
+        # serve process is tiny (~1 GB). 16 GB cap protects against runaway
+        # mmap loading of a larger model someone might pull later.
+        limits:
+          memory: 16G
         reservations:
           devices:
             - driver: nvidia

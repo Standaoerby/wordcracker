@@ -22,6 +22,12 @@ services:
       - /data/gutenberg_raw:/workspace/gutenberg_raw
     deploy:
       resources:
+        # cap RAM at 40 GB: ChromaDB hnsw (~5 GB) + sentence-transformers (~1 GB)
+        # + chat_server + admin_server + jupyter + tools + ~10 GB headroom. Past
+        # this the kernel kills the container instead of the host (previous OOM
+        # event under unbounded memory took down SSH and required a hard reboot).
+        limits:
+          memory: 40G
         reservations:
           devices:
             - driver: nvidia
