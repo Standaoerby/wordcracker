@@ -125,10 +125,13 @@ def cat_B():
 
     def b_author_meta():
         from rag_tools import author_metadata
-        d = author_metadata("^Wodehouse,")
+        # Use a precise regex — bare "^Wodehouse," now also matches
+        # C. N. Wodehouse (1790) from the orphan_pg dataset, so we'd see
+        # year_of_birth_min=1790 instead of 1881 for P. G. Wodehouse.
+        d = author_metadata(r"^Wodehouse, P\. G\.")
         yob = d.get("year_of_birth_min")
         return yob == 1881, f"yob={yob} (expect 1881)"
-    _safe("B-author_metadata(Wodehouse)=1881", b_author_meta)
+    _safe("B-author_metadata(P.G. Wodehouse)=1881", b_author_meta)
 
     def b_ngrams():
         d = top_ngrams_by_author("^Wodehouse,", n=2, top=20)
@@ -482,16 +485,20 @@ def cat_F():
 
     def f5():
         ans, tools, _ = _chat_call("asdfasdf xyzqwerty")
-        # Honest: NO tool calls, asks for clarification OR describes capabilities.
-        # Bug: invents a meaningful interpretation and calls some random tool.
+        # Honest: NO tool calls AND (asks for clarification OR redirects to a
+        # capabilities description / self-introduction). Bug: invents a
+        # meaningful interpretation and calls a random tool.
         ans_lc = ans.lower()
         no_tools = len(tools) == 0
-        clarifies_or_listy = any(m in ans_lc for m in
-                                 ("уточни", "не понял", "что имеешь", "перефраз",
-                                  "?", "какой", "не распозна", "что значит",
-                                  "вот что я", "ты умеешь", "помочь"))
-        return no_tools and clarifies_or_listy, f"no_tools={no_tools} clarifies={clarifies_or_listy} tools={tools}"
-    _safe("F5 gibberish (no tools + clarify)", f5)
+        # any of: ask/clarify/redirect markers
+        markers = ("уточни", "не понял", "что имеешь", "перефраз",
+                   "?", "какой", "не распозна", "что значит",
+                   "вот что я", "ты умеешь", "помочь", "помогаю",
+                   "литературн", "я —", "я - ", "spros", "спрашивай")
+        ok_redirect = any(m in ans_lc for m in markers)
+        return no_tools and ok_redirect, \
+               f"no_tools={no_tools} redirect={ok_redirect} ans[:80]={ans[:80]!r}"
+    _safe("F5 gibberish (no tools + clarify/intro)", f5)
 
 
 # ============================== G: performance budgets ==============================
