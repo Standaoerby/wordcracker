@@ -125,6 +125,64 @@ def _normalize_author(raw: str) -> str:
     return f"{parts[-1]}, {' '.join(parts[:-1])}"
 
 
+def _open_library_enrich(meta: dict, timeout: float = 8.0) -> dict:
+    """Fill missing metadata fields from Open Library if the EPUB DC tags are
+    incomplete. Best-effort: any failure (network, rate-limit, no match)
+    leaves the original meta dict unchanged.
+
+    Triggered only when something is actually missing — we don't overwrite
+    fields the EPUB already provided.
+
+    https://openlibrary.org/dev/docs/api/search
+    """
+    title = (meta.get("title") or "").strip()
+    if not title:
+        return meta
+    has_author = bool((meta.get("author") or "").strip()) and meta["author"] != "Unknown, "
+    has_year   = bool(meta.get("pub_year"))
+    has_subj   = bool((meta.get("subjects") or "").strip())
+    if has_author and has_year and has_subj:
+        return meta
+
+    try:
+        import urllib.parse, urllib.request, json as _json
+        params = {"title": title, "limit": 3}
+        # narrow search if we already know the author — better match precision
+        if has_author:
+            params["author"] = meta["author"].split(",")[0]
+        q = urllib.parse.urlencode(params)
+        url = f"https://openlibrary.org/search.json?{q}"
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "wordcracker/1.0 (NAS-uploader; contact via slovoeb.net)"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            d = _json.load(r)
+        docs = d.get("docs", [])
+        if not docs:
+            meta["_ol_lookup"] = "no match"
+            return meta
+        top = docs[0]
+        if not has_author and top.get("author_name"):
+            meta["author"] = _normalize_author(top["author_name"][0])
+        if not has_year:
+            y = top.get("first_publish_year")
+            if isinstance(y, int) and 1500 <= y <= 2030:
+                meta["pub_year"] = y
+                # SPGC schema uses authoryearofbirth (writing prime ≈ birth+30)
+                # for time-bucketing. We have publication year, so derive a
+                # birth-year proxy: pub_year - 30. Lets the U-book show up in
+                # word_freq_timeline at roughly the right bucket.
+                if not meta.get("authoryearofbirth"):
+                    meta["authoryearofbirth"] = y - 30
+        if not has_subj and top.get("subject"):
+            meta["subjects"] = "; ".join(s for s in top["subject"][:8] if s)
+        meta["_ol_lookup"] = top.get("key", "matched")
+    except Exception as e:
+        meta["_ol_lookup"] = f"error: {type(e).__name__}"
+    return meta
+
+
 def _extract_epub_metadata(epub_path: Path) -> dict:
     """Read DC metadata (title/creator/language/date/subjects) from an EPUB.
 
@@ -292,6 +350,10 @@ def _link_into_raw(files: list[Path]) -> dict:
                 })
                 if not meta.get("title"):
                     meta["title"] = Path(f.name).stem.replace("_", " ").replace("-", " ").strip()
+                # Try Open Library before falling back to "Unknown" — fills
+                # missing author/year/subjects from the public catalog when
+                # the EPUB itself didn't ship DC metadata.
+                meta = _open_library_enrich(meta)
                 if not meta.get("author"):
                     meta["author"] = "Unknown, "
                 _append_user_meta(meta)
