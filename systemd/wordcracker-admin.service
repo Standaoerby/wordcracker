@@ -1,0 +1,24 @@
+[Unit]
+Description=wordcracker admin upload server (port 8891, inside gutenberg-lab container)
+Documentation=file:///home/claude/wordcracker/scripts/admin_server.py
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=claude
+Group=claude
+WorkingDirectory=/home/claude/wordcracker
+ExecStartPre=/usr/bin/docker compose up -d gutenberg-lab
+ExecStart=/usr/bin/docker compose exec -T gutenberg-lab python -u /workspace/scripts/admin_server.py --port 8891
+Restart=on-failure
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wc-admin
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

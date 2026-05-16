@@ -1,0 +1,28 @@
+[Unit]
+Description=wordcracker status dashboard (port 8889)
+Documentation=file:///home/claude/wordcracker/scripts/status_server.py
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=claude
+Group=claude
+WorkingDirectory=/home/claude/wordcracker
+ExecStart=/usr/bin/python3 -u /home/claude/wordcracker/scripts/status_server.py --port 8889
+Restart=on-failure
+RestartSec=10
+# stdout/stderr go to journald — view with: journalctl -u wordcracker-status -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wc-status
+
+# Hardening (safe for a stdlib http server reading filesystem state)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/var/tmp
+
+[Install]
+WantedBy=multi-user.target
