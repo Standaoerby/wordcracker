@@ -53,6 +53,7 @@ SCRIPTS_DIR     = Path("/workspace/scripts")
 CORPUS_COUNTS   = DERIVED_DIR / "corpus_counts.csv"
 RAW_DIR         = Path("/workspace/raw_text")
 USER_UPLOADS_META = DERIVED_DIR / "user_uploads_metadata.csv"
+ORPHAN_PG_META    = DERIVED_DIR / "orphan_pg_metadata.csv"
 OLLAMA_HOST     = os.environ.get("OLLAMA_HOST", "http://ollama:11434")
 
 STOPWORDS = {
@@ -108,31 +109,50 @@ def _get_chroma_collection_with_embedder():
 
 # mtime-aware cache so user uploads added by admin_server become visible to a
 # long-running chat_server without needing a restart. SPGC dump never changes
-# so its mtime is stable in practice; user_uploads_metadata.csv grows on upload.
-_metadata_cache: dict = {"df": None, "spgc_mtime": 0.0, "user_mtime": 0.0}
+# so its mtime is stable in practice; user_uploads (admin upload) and
+# orphan_pg (fetch_orphan_pg_metadata.py) both grow over time.
+_metadata_cache: dict = {"df": None, "spgc_mtime": 0.0,
+                         "user_mtime": 0.0, "orphan_mtime": 0.0}
 
 
 def _metadata_df() -> pd.DataFrame:
-    spgc_m = SPGC_METADATA.stat().st_mtime if SPGC_METADATA.exists() else 0.0
-    user_m = USER_UPLOADS_META.stat().st_mtime if USER_UPLOADS_META.exists() else 0.0
+    spgc_m   = SPGC_METADATA.stat().st_mtime    if SPGC_METADATA.exists()   else 0.0
+    user_m   = USER_UPLOADS_META.stat().st_mtime if USER_UPLOADS_META.exists() else 0.0
+    orphan_m = ORPHAN_PG_META.stat().st_mtime    if ORPHAN_PG_META.exists()   else 0.0
     if (_metadata_cache["df"] is not None
             and _metadata_cache["spgc_mtime"] == spgc_m
-            and _metadata_cache["user_mtime"] == user_m):
+            and _metadata_cache["user_mtime"] == user_m
+            and _metadata_cache["orphan_mtime"] == orphan_m):
         return _metadata_cache["df"]
     df = pd.read_csv(SPGC_METADATA)
-    if USER_UPLOADS_META.exists():
+
+    def _merge(path, label):
+        nonlocal df
+        if not path.exists():
+            return
         try:
-            ud = pd.read_csv(USER_UPLOADS_META)
-            # align columns to SPGC schema; missing → NaN, extra → dropped
+            extra = pd.read_csv(path)
             for col in df.columns:
-                if col not in ud.columns:
-                    ud[col] = pd.NA
-            ud = ud[df.columns]
-            df = pd.concat([df, ud], ignore_index=True)
-            _log(f"merged {len(ud)} user uploads into metadata ({len(df)} total)")
+                if col not in extra.columns:
+                    extra[col] = pd.NA
+            extra = extra[df.columns]
+            df = pd.concat([df, extra], ignore_index=True)
+            _log(f"merged {len(extra)} {label} → {len(df)} total rows")
         except Exception as e:
-            _log(f"failed to load user uploads metadata: {e}")
-    _metadata_cache.update({"df": df, "spgc_mtime": spgc_m, "user_mtime": user_m})
+            _log(f"failed to load {label} metadata: {e}")
+
+    _merge(USER_UPLOADS_META, "user uploads")
+    _merge(ORPHAN_PG_META,   "orphan PG (post-2018)")
+
+    # Drop duplicate ids — SPGC wins over orphan_pg (SPGC has consistent
+    # token/counts files), user uploads are unique by construction.
+    if "id" in df.columns:
+        df = df.drop_duplicates(subset="id", keep="first")
+
+    _metadata_cache.update({
+        "df": df, "spgc_mtime": spgc_m,
+        "user_mtime": user_m, "orphan_mtime": orphan_m,
+    })
     return df
 
 
