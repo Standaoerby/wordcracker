@@ -13,6 +13,11 @@ WorkingDirectory=/home/claude/wordcracker
 Environment=ASSISTANT_NAME=Словоёб
 # Ensure the container is up before we try to exec into it. Idempotent.
 ExecStartPre=/usr/bin/docker compose up -d gutenberg-lab
+# SIGTERM doesn't propagate from `docker compose exec` to the python process
+# inside the container, so old chat_server.py instances can survive a restart
+# and keep port 8890 bound. Reap any orphan before binding the port. `-`
+# prefix swallows the exit code if pkill finds nothing.
+ExecStartPre=-/usr/bin/docker compose exec -T gutenberg-lab pkill -9 -f /workspace/scripts/chat_server.py
 # Run the chat server in the foreground, attached to systemd. SIGTERM from
 # `systemctl stop` propagates to the python process via docker exec.
 ExecStart=/usr/bin/docker compose exec -T -e ASSISTANT_NAME=Словоёб gutenberg-lab python -u /workspace/scripts/chat_server.py --port 8890

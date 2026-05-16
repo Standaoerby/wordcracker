@@ -318,12 +318,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send(self, code, body, ctype):
         body_bytes = body if isinstance(body, bytes) else body.encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body_bytes)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body_bytes)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body_bytes)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body_bytes)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # client closed the connection mid-response
 
     def do_GET(self):
         if self.path == "/health":
@@ -338,27 +341,35 @@ class Handler(BaseHTTPRequestHandler):
 
     def _stream_chat(self, payload):
         """SSE endpoint — pump ask_stream events to the client."""
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Accel-Buffering", "no")  # disable nginx buffering
-        self.end_headers()
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Accel-Buffering", "no")  # disable nginx buffering
+            self.end_headers()
+        except (BrokenPipeError, ConnectionResetError):
+            return  # client already gone before we wrote a byte
 
         question = (payload.get("question") or "").strip()
         history = payload.get("history") or []
         if not isinstance(history, list):
             history = []
         if not question:
-            self.wfile.write(b'data: {"event":"error","message":"empty question"}\n\n')
+            try:
+                self.wfile.write(b'data: {"event":"error","message":"empty question"}\n\n')
+            except (BrokenPipeError, ConnectionResetError):
+                pass
             return
         try:
             for ev in ask_stream(question, history=history):
                 line = "data: " + json.dumps(ev, ensure_ascii=False, default=str) + "\n\n"
-                self.wfile.write(line.encode("utf-8"))
                 try:
+                    self.wfile.write(line.encode("utf-8"))
                     self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    return  # client gone — stop pumping events
                 except Exception:
-                    return  # client gone
+                    return  # client gone (TLS error, etc.)
         except Exception as e:
             try:
                 self.wfile.write(

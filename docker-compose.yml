@@ -11,6 +11,7 @@ services:
     volumes:
       - ./notebooks:/workspace/notebooks
       - ./scripts:/workspace/scripts
+      - ./tests:/workspace/tests
       - ./data:/workspace/data
       - ./raw_books:/workspace/raw_books
       - /data/books:/workspace/books
