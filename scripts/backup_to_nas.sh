@@ -5,7 +5,8 @@
 #   NAS_USER=...
 #   NAS_PASS=...
 #   NAS_HOST=Storage       # or an IP if NetBIOS name doesn't resolve
-#   NAS_SHARE=safe/WC      # path on the share
+#   NAS_SHARE=SAFE         # share name on the NAS (case-sensitive)
+#   NAS_SUBDIR=WC          # optional subdirectory inside the share
 #
 # What gets backed up (small, NON-regenerable bits only — ~50 MB):
 #   - source code (scripts/, *.md, Dockerfile, docker-compose*)
@@ -45,9 +46,16 @@ fi
 : "${NAS_USER:?NAS_USER missing in $CREDS_FILE}"
 : "${NAS_PASS:?NAS_PASS missing in $CREDS_FILE}"
 : "${NAS_HOST:=Storage}"
-: "${NAS_SHARE:=safe/WC}"
+: "${NAS_SHARE:=SAFE}"
+: "${NAS_SUBDIR:=WC}"
 
 NAS_PATH="//${NAS_HOST}/${NAS_SHARE}"
+# Build the smbclient command prefix: cd into subdir if set, otherwise stay at root.
+if [ -n "$NAS_SUBDIR" ]; then
+    SMB_CD="cd \"${NAS_SUBDIR}\";"
+else
+    SMB_CD=""
+fi
 TS=$(date +%Y%m%d-%H%M%S)
 TARBALL="/tmp/wc_backup_${TS}.tar.gz"
 
@@ -73,18 +81,17 @@ SIZE_KB=$(($(stat -c%s "$TARBALL") / 1024))
 echo "[backup] tarball: ${SIZE_KB} KB"
 
 # ---- upload ----
-# smbclient PUT places the file at the share root. Use SMB 3.0 (modern NAS).
 smbclient "$NAS_PATH" \
     --user="${NAS_USER}%${NAS_PASS}" \
     --max-protocol=SMB3 \
-    -c "put ${TARBALL} wc_backup_${TS}.tar.gz"
-echo "[backup] uploaded to ${NAS_PATH}/wc_backup_${TS}.tar.gz"
+    -c "${SMB_CD} put ${TARBALL} wc_backup_${TS}.tar.gz"
+echo "[backup] uploaded to ${NAS_PATH}/${NAS_SUBDIR}/wc_backup_${TS}.tar.gz"
 
 # ---- retention: keep last $KEEP_LAST ----
 OLD=$(smbclient "$NAS_PATH" \
         --user="${NAS_USER}%${NAS_PASS}" \
         --max-protocol=SMB3 \
-        -c "ls wc_backup_*" 2>/dev/null \
+        -c "${SMB_CD} ls wc_backup_*" 2>/dev/null \
         | awk '/wc_backup_.*\.tar\.gz/{print $1}' \
         | sort -r \
         | tail -n +$((KEEP_LAST + 1)) || true)
@@ -96,7 +103,7 @@ if [ -n "$OLD" ]; then
         smbclient "$NAS_PATH" \
             --user="${NAS_USER}%${NAS_PASS}" \
             --max-protocol=SMB3 \
-            -c "rm $f" 2>&1 | grep -v 'NT_STATUS_OBJECT_NAME_NOT_FOUND' || true
+            -c "${SMB_CD} rm $f" 2>&1 | grep -v 'NT_STATUS_OBJECT_NAME_NOT_FOUND' || true
     done <<<"$OLD"
 fi
 
