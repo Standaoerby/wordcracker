@@ -388,6 +388,43 @@ def _check_chromadb_via_sqlite(build_running: bool) -> tuple[bool, str]:
         return False, f"sqlite read failed: {str(e)[:80]}"
 
 
+def _check_cloudflared() -> tuple[bool, str]:
+    """End-to-end tunnel probe.
+
+    `systemctl is-active cloudflared` only verifies the local daemon is alive
+    — it doesn't tell us whether the tunnel can actually carry traffic. We
+    probe https://slovoeb.net/health (CF edge → tunnel → nginx → chat_server)
+    expecting either 200 (open) or 401 (nginx Basic Auth challenge). Both
+    confirm the whole chain works without requiring us to store auth creds
+    in this process. Anything else (530 from CF, timeout, connection reset)
+    means the tunnel is degraded even if systemd thinks it's fine.
+    """
+    if not _systemd_active("cloudflared"):
+        return False, "systemd inactive"
+    try:
+        import urllib.request, urllib.error
+        # HEAD over GET — no body, faster. Use a browser UA so CF Bot Fight
+        # Mode doesn't slap us with a 403 (Python-urllib UA gets challenged).
+        req = urllib.request.Request(
+            "https://slovoeb.net/health",
+            method="HEAD",
+            headers={"User-Agent": "wordcracker-status-probe/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
+            # 200 = nginx allowed-through, 401/403 = nginx auth challenge or
+            # CF bot challenge — both prove the chain (edge→tunnel→nginx) works.
+            return r.status in (200, 401, 403), f"edge HEAD {r.status}"
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return True, f"tunnel up (HTTP {e.code} as expected)"
+        # 502/503/530 = origin unreachable from CF edge → tunnel itself broke.
+        return False, f"edge HEAD {e.code}"
+    except urllib.error.URLError as e:
+        return False, f"network: {str(e.reason)[:60]}"
+    except Exception as e:
+        return False, f"probe failed: {str(e)[:60]}"
+
+
 def _collect_health(ollama: dict, chroma_bytes: int, build_running: bool, du) -> dict:
     """Aggregate health snapshot for the big overview card."""
     components: list[dict] = []
@@ -416,10 +453,9 @@ def _collect_health(ollama: dict, chroma_bytes: int, build_running: bool, du) ->
     components.append({"name": "Admin server (:8891)", "ok": admin_ok,
                        "detail": "port reachable in container" if admin_ok else "not listening"})
 
-    # 5) cloudflared
-    cf_ok = _systemd_active("cloudflared")
-    components.append({"name": "Cloudflare tunnel", "ok": cf_ok,
-                       "detail": "systemd active" if cf_ok else "service down"})
+    # 5) cloudflared — end-to-end probe through CF edge, not just systemctl.
+    cf_ok, cf_detail = _check_cloudflared()
+    components.append({"name": "Cloudflare tunnel", "ok": cf_ok, "detail": cf_detail})
 
     # 6) nginx
     ng_ok = _systemd_active("nginx")
