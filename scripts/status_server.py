@@ -326,6 +326,45 @@ def _systemd_active(unit: str) -> bool:
         return False
 
 
+def _check_chromadb_via_sqlite(build_running: bool) -> tuple[bool, str]:
+    """Read ChromaDB chunk count from its SQLite file on the host.
+
+    Replaces the prior `docker exec python -c "import chromadb..."` subprocess,
+    which under concurrent dashboard pollers piled up zombie processes inside
+    the docker daemon, eventually wedging SSH and OOM-killing the host. Using
+    SQLite read-only with a hard timeout never spawns a subprocess.
+    """
+    import sqlite3
+    chroma_dir = Path("/data/chroma_db")
+    if build_running:
+        return False, "indexing in progress, count unavailable"
+    if not chroma_dir.exists():
+        return False, "/data/chroma_db missing"
+    db = chroma_dir / "chroma.sqlite3"
+    if not db.exists():
+        # fall back to filesystem-size signal so the card stays informative
+        size_gb = sum(f.stat().st_size for f in chroma_dir.rglob("*")
+                      if f.is_file()) / 1e9
+        return True, f"{size_gb:.1f} GB on disk (no SQLite metadata)"
+    try:
+        # Read-only, no journal contention. 2s timeout is generous for a
+        # COUNT(*) on a 4-million-row table with an index.
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+        try:
+            row = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()
+            n = int(row[0]) if row else 0
+            return True, f"{n:,} chunks"
+        finally:
+            conn.close()
+    except sqlite3.OperationalError as e:
+        # busy/locked means the indexer is writing; that's not a failure
+        if "locked" in str(e).lower() or "busy" in str(e).lower():
+            return True, "indexer writing (db locked, skipping count)"
+        return False, f"sqlite: {str(e)[:80]}"
+    except Exception as e:
+        return False, f"sqlite read failed: {str(e)[:80]}"
+
+
 def _collect_health(ollama: dict, chroma_bytes: int, build_running: bool, du) -> dict:
     """Aggregate health snapshot for the big overview card."""
     components: list[dict] = []
@@ -337,32 +376,11 @@ def _collect_health(ollama: dict, chroma_bytes: int, build_running: bool, du) ->
         "detail": ("qwen3:14b in VRAM" if ollama_ok else "API or GPU degraded"),
     })
 
-    # 2) ChromaDB readable — chromadb lives in the container, status_server runs
-    # on the host without that python pkg, so we exec into gutenberg-lab to count.
-    chroma_ok = False
-    chroma_detail = "indexing in progress" if build_running else "unknown"
-    if not build_running:
-        try:
-            # 5s timeout (was 15s) — chromadb cold-import takes ~3s, anything
-            # longer means the daemon is congested and we'd rather skip than
-            # pile up. The TTL cache wrapping collect_status means this only
-            # fires every 30s anyway.
-            proc = subprocess.run(
-                ["docker", "exec", "wordcracker-gutenberg-lab-1", "python", "-c",
-                 "import chromadb; c=chromadb.PersistentClient(path='/workspace/chroma_db');"
-                 "print(c.get_collection('gutenberg-index').count())"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if proc.returncode == 0 and proc.stdout.strip().isdigit():
-                n = int(proc.stdout.strip())
-                chroma_ok = True
-                chroma_detail = f"{n:,} chunks"
-            else:
-                chroma_detail = f"read failed: {(proc.stderr or proc.stdout)[:80]}"
-        except subprocess.TimeoutExpired:
-            chroma_detail = "chromadb check timed out (5s) — daemon busy"
-        except Exception as e:
-            chroma_detail = f"exec failed: {str(e)[:80]}"
+    # 2) ChromaDB readable — read its SQLite metadata directly from the host
+    # filesystem (no docker exec, no subprocess hangs). The persistent client
+    # path /data/chroma_db is bind-mounted into the container and the SQLite
+    # file holds the chunk row count we want.
+    chroma_ok, chroma_detail = _check_chromadb_via_sqlite(build_running)
     components.append({"name": "ChromaDB index", "ok": chroma_ok, "detail": chroma_detail})
 
     # 3) chat_server
