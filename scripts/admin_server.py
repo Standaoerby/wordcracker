@@ -512,6 +512,9 @@ PAGE = r"""<!doctype html>
   .job.fail  { border-color:#e05a5a; }
   .progress { display:none; margin-top:14px; color:#888; }
   .err { color:#e05a5a; }
+  .preview-block { background:#1f2227; border-left:3px solid #50e3c2; border-radius:6px;
+                   padding:12px 16px; font-size:13px; }
+  .preview-row { font-family:ui-monospace,monospace; padding:3px 0; color:#bbb; }
   code { background:#1a1d22; padding:1px 5px; border-radius:3px; }
   a { color:#7ed321; }
 </style>
@@ -533,6 +536,7 @@ PAGE = r"""<!doctype html>
   <div id=prog class=progress></div>
 </form>
 
+<div id=preview style="margin-top:20px"></div>
 <div class=jobs id=jobs></div>
 
 <script>
@@ -540,6 +544,34 @@ const f = document.getElementById('f');
 const prog = document.getElementById('prog');
 const send = document.getElementById('send');
 const jobs = document.getElementById('jobs');
+const preview = document.getElementById('preview');
+
+function renderPreview(r) {
+  // Show the newly-added books with whatever metadata Open Library + tokenize
+  // produced. Empty if nothing was added.
+  if (r.error) { preview.innerHTML = '<div class="job fail">❌ '+r.error+'</div>'; return; }
+  if (!r.new_user_ids?.length && !r.added) { preview.innerHTML = ''; return; }
+  let html = '<div class="preview-block">';
+  html += `<div class=meta>📦 <b>${r.added} added</b> · ${r.epub_converted||0} EPUB→txt · ${r.user_uploaded||0} user (U-prefix) · ${r.skipped_existing||0} skipped`;
+  if (r.skipped_format) html += ' · ' + r.skipped_format + ' unrecognized';
+  html += '</div>';
+  // Per-book row for U-uploads (with tokenize result)
+  if (r.tokenize?.length) {
+    html += '<div class=meta>🔤 Tokenize:</div>';
+    for (const t of r.tokenize) {
+      const status = t.ok ? '✓' : '✗';
+      const detail = t.ok ? (t.stdout.split('\n').pop() || '') : (t.stderr || t.error || '');
+      html += `<div class="preview-row">${status} <code>${t.id}</code> · ${detail}</div>`;
+    }
+  }
+  if (r.reindex_triggered) {
+    html += '<div class=meta>🔄 Reindex запущен. Прогресс на <a href="https://status.slovoeb.net">status dashboard</a> (поле <code>reindex_progress</code>) — обычно ~30-60s на 10 новых книг.</div>';
+  } else if (r.user_uploaded) {
+    html += '<div class=meta>ℹ️ Для семантического поиска по новым книгам нужен reindex (чекбокс выше при следующей загрузке).</div>';
+  }
+  html += '</div>';
+  preview.innerHTML = html;
+}
 
 async function refreshJobs() {
   try {
@@ -577,6 +609,7 @@ f.addEventListener('submit', async (e) => {
       prog.textContent = r.error
         ? 'ERROR: ' + r.error
         : `done: +${r.added} added, ${r.skipped_existing+r.skipped_format} skipped`;
+      renderPreview(r);
       refreshJobs();
     } catch(err) {
       prog.textContent = 'bad response: ' + xhr.responseText.slice(0,200);
