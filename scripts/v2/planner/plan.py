@@ -205,15 +205,30 @@ def _plan_author_compare(e: Entities) -> QueryPlan:
             clarify_question="Нужны два автора для сравнения. Пример: «сравни Wodehouse и Twain».",
             explain="запросил второго автора",
         )
+    # Probe both authors first via cheap author_metadata. compare_authors
+    # internally rebuilds affinity CSV if missing, which fails silently when
+    # the second author has zero books in SPGC (Hemingway etc → corpus-side
+    # gap). The probes are optional and the router gracefully continues to
+    # compare_authors regardless — but they let the renderer warn the user
+    # ahead of time and suggest closest available authors instead.
     return QueryPlan(
         intent="author_compare", entities=e,
-        steps=[PlanStep(tool="compare_authors",
-                        args={"author1_regex": e.author_regex,
-                              "author2_regex": others[0],
-                              "top": e.top_n or 20,
-                              "min_corpus_count": 500})],
+        steps=[
+            PlanStep(tool="author_metadata",
+                     args={"author_regex": e.author_regex},
+                     optional=True),
+            PlanStep(tool="author_metadata",
+                     args={"author_regex": others[0]},
+                     optional=True),
+            PlanStep(tool="compare_authors",
+                     args={"author1_regex": e.author_regex,
+                           "author2_regex": others[0],
+                           "top": e.top_n or 20,
+                           "min_corpus_count": 500}),
+        ],
         expected_cost="medium",
-        explain=f"compare_authors({e.author_regex}, {others[0]})",
+        explain=(f"probe({e.author_regex}) + probe({others[0]}) + "
+                 f"compare_authors"),
     )
 
 

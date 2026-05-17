@@ -43,9 +43,11 @@ class PlanAuthorIntents(unittest.TestCase):
     def test_author_compare(self):
         _, _, p = _full("Найди слова, которые повторяются у Диккенса, но не у Хемингуэя.")
         self.assertEqual(p.intent, "author_compare")
-        self.assertEqual(p.steps[0].tool, "compare_authors")
-        self.assertEqual(p.steps[0].args["author1_regex"], "^Dickens,")
-        self.assertEqual(p.steps[0].args["author2_regex"], "^Hemingway,")
+        # Plan now probes both authors first, then runs compare_authors.
+        self.assertEqual([s.tool for s in p.steps],
+                         ["author_metadata", "author_metadata", "compare_authors"])
+        self.assertEqual(p.steps[-1].args["author1_regex"], "^Dickens,")
+        self.assertEqual(p.steps[-1].args["author2_regex"], "^Hemingway,")
 
     def test_author_compare_no_second(self):
         _, _, p = _full("Сравни Wodehouse")

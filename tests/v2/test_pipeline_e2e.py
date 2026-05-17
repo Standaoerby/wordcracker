@@ -30,8 +30,7 @@ def _stub_factory(name: str):
 
 
 def _install_stubs():
-    legacy_tools = [
-        # rag_tools
+    rag_tools_names = [
         "corpus_overview", "semantic_search", "corpus_stats_by_author",
         "top_ngrams_by_author", "affinity_by_author", "word_contexts",
         "compare_authors", "lexical_diversity", "word_collocates",
@@ -41,19 +40,26 @@ def _install_stubs():
         "word_pos_distribution", "word_etymology", "find_words_by_etymology",
         "top_authors_by", "top_authors_by_country", "author_profile",
         "top_books_by_downloads", "top_books_by_recency", "author_metadata",
-        "book_archaic_words",
-        # learning_tools
-        "affinity_by_book", "learning_words", "enrich_word",
-        "export_word_list", "bulk_enrich",
     ]
+    learning_names = [
+        "affinity_by_book", "learning_words", "enrich_word",
+        "export_word_list", "bulk_enrich", "book_archaic_words",
+    ]
+    all_names = rag_tools_names + learning_names
+
     q = types.ModuleType("scripts.rag_query")
-    q.TOOL_DISPATCH = {name: _stub_factory(name) for name in legacy_tools}
+    q.TOOL_DISPATCH = {name: _stub_factory(name) for name in all_names}
     sys.modules["scripts.rag_query"] = q
 
     t = types.ModuleType("scripts.rag_tools")
-    for n in legacy_tools:
+    for n in rag_tools_names:
         setattr(t, n, _stub_factory(n))
     sys.modules["scripts.rag_tools"] = t
+
+    lt = types.ModuleType("scripts.learning_tools")
+    for n in learning_names:
+        setattr(lt, n, _stub_factory(n))
+    sys.modules["scripts.learning_tools"] = lt
 
 
 def _reset_legacy_cache():

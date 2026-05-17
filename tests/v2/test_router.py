@@ -51,7 +51,7 @@ def _fake_v1_query():
 
 
 def _fake_v1_tools():
-    """Stub of scripts.rag_tools — v2 find_book wrapper imports from here."""
+    """Stub of scripts.rag_tools — v2 wrappers import functions from here."""
     m = types.ModuleType("scripts.rag_tools")
     m.find_book = _stub_find_book
     m.author_metadata = lambda author_regex: {
@@ -60,6 +60,45 @@ def _fake_v1_tools():
     m.top_authors_by = lambda **kw: {"metric": kw.get("metric", "books"),
                                      "top": []}
     m.top_authors_by_country = lambda **kw: {"country": kw["country"], "top": []}
+    m.affinity_by_author = lambda **kw: {
+        "author_regex": kw["author_regex"],
+        "top_words": [{"word": "wicket", "affinity": 22.1}],
+        "n_books": 5,
+    }
+    m.compare_authors = lambda **kw: {
+        "author1_regex": kw["author1_regex"],
+        "author2_regex": kw["author2_regex"],
+        "top_unique_a": [{"word": "blighter"}],
+        "top_unique_b": [{"word": "fish"}],
+        "books_a": 5, "books_b": 5,
+    }
+    m.word_contexts = lambda **kw: {"samples": [{"text": "hello"}]}
+    m.word_contexts_global = lambda **kw: {"samples": [{"pg_id": "PG1"}]}
+    m.word_collocates = lambda **kw: {"top": [{"word": "x"}], "books_total": 100}
+    m.word_freq_timeline = lambda **kw: {"timeline": [{"period": "1900-1925", "freq": 1.0}]}
+    m.words_disappearing_after = lambda **kw: {"words": [{"word": "ye"}],
+                                                "books_before": 100, "books_after": 100}
+    m.word_pos_distribution = lambda **kw: {"distribution": {"NOUN": 0.5, "VERB": 0.5}}
+    m.word_etymology = lambda **kw: {"word": kw["word"], "family_chain": ["latin"]}
+    m.find_words_by_etymology = lambda **kw: {"matches": [{"word": "quid"}],
+                                               "books_total": 5}
+    m.emotion_collocates = lambda **kw: {"top": [{"word": "darkness"}], "n_books": 5}
+    m.book_readability = lambda **kw: {"pg_id": kw["pg_id"], "flesch": 60}
+    m.author_profile = lambda **kw: {"metadata": {"books_total": 5}}
+    m.author_influences = lambda **kw: {"closest": [{"author": "X"}]}
+    m.author_attribution = lambda **kw: {"top": [{"author": "X"}]}
+    return m
+
+
+def _fake_v1_learning():
+    """Stub of scripts.learning_tools — affinity_by_book, learning_words, book_archaic_words."""
+    m = types.ModuleType("scripts.learning_tools")
+    m.affinity_by_book = _stub_affinity_book
+    m.learning_words = lambda **kw: {"words": [{"word": "civility"}], "n_books": 1}
+    m.book_archaic_words = lambda **kw: {"pg_id": kw["pg_id"],
+                                          "archaic": [{"word": "ye"}]}
+    m.LEARNING_TOOLS_SPEC = []
+    m.LEARNING_TOOL_DISPATCH = {}
     return m
 
 
@@ -69,7 +108,7 @@ class RouterClarifyAndOutOfScope(unittest.TestCase):
         sys.modules.pop("scripts.rag_tools", None)
         sys.modules.pop("scripts.rag_tools", None)
         sys.modules["scripts.rag_query"] = _fake_v1_query()
-        sys.modules["scripts.rag_tools"] = _fake_v1_tools()
+        sys.modules["scripts.rag_tools"] = _fake_v1_tools(); sys.modules["scripts.learning_tools"] = _fake_v1_learning()
         # Reset v2 registry to a known set.
         from scripts.v2.tool_registry import REGISTRY
         self._snap = dict(REGISTRY); REGISTRY.clear()
@@ -114,7 +153,7 @@ class RouterExecutesSteps(unittest.TestCase):
         sys.modules.pop("scripts.rag_query", None)
         sys.modules.pop("scripts.rag_tools", None)
         sys.modules["scripts.rag_query"] = _fake_v1_query()
-        sys.modules["scripts.rag_tools"] = _fake_v1_tools()
+        sys.modules["scripts.rag_tools"] = _fake_v1_tools(); sys.modules["scripts.learning_tools"] = _fake_v1_learning()
         from scripts.v2 import legacy_dispatch
         legacy_dispatch._LEGACY_DISPATCH_CACHE.clear()
         legacy_dispatch._LEGACY_DISPATCH_CACHE.update({"dispatch": None, "loaded": False})
@@ -211,7 +250,7 @@ class RouterStreamEvents(unittest.TestCase):
         sys.modules.pop("scripts.rag_tools", None)
         sys.modules.pop("scripts.rag_tools", None)
         sys.modules["scripts.rag_query"] = _fake_v1_query()
-        sys.modules["scripts.rag_tools"] = _fake_v1_tools()
+        sys.modules["scripts.rag_tools"] = _fake_v1_tools(); sys.modules["scripts.learning_tools"] = _fake_v1_learning()
         from scripts.v2 import legacy_dispatch
         legacy_dispatch._LEGACY_DISPATCH_CACHE.clear()
         legacy_dispatch._LEGACY_DISPATCH_CACHE.update({"dispatch": None, "loaded": False})
