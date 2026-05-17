@@ -112,8 +112,14 @@ def build_tools_spec(category_filter: list[str] | None = None) -> list[dict]:
 def dispatch(name: str, args: dict | None = None) -> ToolResult:
     """Invoke a registered tool by name with `args`. Always returns a ToolResult.
 
-    No cache layer here yet (Sprint 1 task 1.x covers that — added later under
-    cache.py). For now we just time and error-wrap."""
+    Cache: when spec.cacheable is True, we look up (name, args) in the disk +
+    in-process LRU before running the tool. Stale (older corpus_version) hits
+    come back with a `stale_cache` warning attached so the renderer can flag
+    them. Successful results are written back. Failures are not cached.
+
+    Cache lookups/writes are best-effort: any cache layer error logs and falls
+    through to executing the tool, so we never crash on a corrupt cache file.
+    """
     spec = REGISTRY.get(name)
     if spec is None:
         return ToolResult.fail(
@@ -122,6 +128,16 @@ def dispatch(name: str, args: dict | None = None) -> ToolResult:
             details={"available": sorted(REGISTRY)},
         )
     args = _coerce_args(spec, args or {})
+
+    if spec.cacheable:
+        try:
+            from scripts.v2 import cache as _cache
+            cached = _cache.cache_get(name, args)
+            if cached is not None:
+                return cached
+        except Exception as e:
+            log.warning("cache_get failed for %s: %s", name, e)
+
     t0 = time.perf_counter()
     try:
         result = spec.fn(**args)
@@ -137,7 +153,6 @@ def dispatch(name: str, args: dict | None = None) -> ToolResult:
             message=str(e), details={"exc_type": type(e).__name__},
         )
     if not isinstance(result, ToolResult):
-        # Soft contract violation — wrap raw return so we never crash the router.
         result = ToolResult.from_legacy(
             tool=name, raw=result,
             runtime_ms=now_ms_since(t0),
@@ -148,6 +163,13 @@ def dispatch(name: str, args: dict | None = None) -> ToolResult:
         result.source_info = current_source_info()
     if not result.tool:
         result.tool = name
+
+    if spec.cacheable and result.ok:
+        try:
+            from scripts.v2 import cache as _cache
+            _cache.cache_put(name, args, result)
+        except Exception as e:
+            log.warning("cache_put failed for %s: %s", name, e)
     return result
 
 
