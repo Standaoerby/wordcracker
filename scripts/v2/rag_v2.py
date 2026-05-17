@@ -139,7 +139,10 @@ def ask(
             "iterations": 0,
             "model": model,
             "elapsed_sec": round(time.perf_counter() - t0, 2),
-            "intent": intent.label,
+            # Surface as out_of_scope so functional runners classify this as
+            # an intentional refusal, not a missing answer.
+            "intent": "out_of_scope",
+            "original_intent": intent.label,
             "intent_confidence": intent.confidence,
         }
 

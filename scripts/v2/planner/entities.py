@@ -271,10 +271,25 @@ def _find_book(text: str) -> tuple[str | None, str | None]:
 
 # Quoted single words like "fog", «ajar», 'blue'. Or "слово X" patterns.
 _WORD_QUOTED = re.compile(r"[\"'«“]([a-zA-Zа-яёА-ЯЁ-]{2,30})[\"'»”]")
+# Match only "слово X" (singular), not "слова X" (plural — usually a question
+# phrasing like "слова чаще всего..."). For an unquoted bare word after the
+# keyword we still require it to dodge the stopword set so a question phrasing
+# like "слова чаще встречаются" doesn't get bucketed as e.word="чаще".
 _WORD_AFTER_KEY = re.compile(
-    r"\b(слов(?:а|ом|у|е|ах)?|слово|word)\b\s+[\"'«“]?([a-zA-Zа-яё-]{2,30})[\"'»”]?",
+    r"\bслово\b\s+[\"'«“]?([a-zA-Zа-яё-]{2,30})[\"'»”]?",
     re.IGNORECASE,
 )
+
+# Common Russian/English fillers that the legacy regex used to mis-match.
+_WORD_STOPWORDS = {
+    # Russian frequency / comparison adverbs
+    "чаще", "реже", "всего", "обычно", "часто", "редко", "больше", "меньше",
+    "много", "мало", "несколько", "разных", "примерно", "вдруг", "почти",
+    # Russian pronouns / fillers
+    "что", "это", "тот", "та", "те", "наш", "ваш", "ваши", "наши",
+    # English fillers occasionally caught by the same regex
+    "the", "and", "but", "with", "from", "than", "more", "less",
+}
 
 
 def _find_word(text: str) -> str | None:
@@ -283,9 +298,9 @@ def _find_word(text: str) -> str | None:
         return m.group(1).lower()
     m = _WORD_AFTER_KEY.search(text)
     if m:
-        # filter out obvious non-words (avoid matching "из «Dracula»" → "dracula" as word)
-        w = m.group(2).lower()
-        if len(w) >= 2 and not w.istitle():
+        w = m.group(1).lower()
+        if (len(w) >= 2 and not w.istitle()
+                and w not in _WORD_STOPWORDS):
             return w
     return None
 
