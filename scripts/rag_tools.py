@@ -710,6 +710,26 @@ def affinity_by_author(author_regex: str, top: int = 50, min_author_count: int =
                 df = sorted_df
         else:
             propn_dropped = 0
+
+        # v1.1.5 Q12 fix — second-line defence via word_dictionary cache.
+        # spaCy POS on isolated lowercase words mistags real proper nouns
+        # (mahaffy/arcady/algy from Wilde's circle) as ADJ. enrich_word
+        # has likely seen these in previous learning_words runs and
+        # tagged them proper_noun=True. Drop them.
+        try:
+            from learning_tools import _load_word_dict
+            wd = _load_word_dict()
+            propn_words = {key.split("|", 1)[0]
+                           for key, info in wd.items()
+                           if info.get("proper_noun")}
+            if propn_words and len(df):
+                pre = len(df)
+                df = df[~df["word"].isin(propn_words)]
+                if pre != len(df):
+                    _log(f"affinity_by_author dropped {pre-len(df)} extra "
+                         f"propn via word_dict cache")
+        except Exception as e:
+            _log(f"propn cache filter skipped: {e}")
         df = df.sort_values("affinity", ascending=False, na_position="last").head(top)
         top_rows = [
             {"word": r["word"], "author_count": int(r["author_count"]),
@@ -784,14 +804,15 @@ def word_contexts(author_regex: str, word: str, window: int = 10, max_samples: i
 
 # ============================ TOOL 6: compare_authors ============================
 def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
-                    min_corpus_count: int = 100) -> dict:
+                    min_corpus_count: int = 500) -> dict:
     """Composition of affinity_by_author for two authors + cosine similarity of their affinity vectors.
 
     min_corpus_count: minimum corpus_count for a word to be included as a
-    "stylistic marker". Default 100 in a 2.8B-token corpus filters out OOV
-    character/place names (oinos, ulalume, dunwich, threepwood) that the
-    spaCy PROPN heuristic misses on lowercased archaic words. Pass 0 to
-    include rare words too."""
+    "stylistic marker". Default 500 (bumped from 100 in v1.1.5 after Q14
+    regression — ulalume/israfel/fortunato/maelström all had corpus_count
+    100-310, just over the old threshold). 500 keeps real markers like
+    blighter/gentlemanlike (corp 1k+) and aggressively drops poem-title and
+    character names. Pass 0 to include rare words for forensic stylometry."""
     t0 = time.perf_counter()
     try:
         a1 = affinity_by_author(author1_regex, top=top * 5, min_corpus_count=min_corpus_count)
@@ -925,7 +946,8 @@ def lexical_diversity(scope: dict | str) -> dict:
 
 # ============================ TOOL 8: word_collocates ============================
 def word_collocates(scope: dict | str, word: str, window: int = 4,
-                    top: int = 20, exclude_stopwords: bool = True) -> dict:
+                    top: int = 20, exclude_stopwords: bool = True,
+                    max_books: int = 8000) -> dict:
     """Words that co-occur within ±window tokens of `word` in the scope's books.
 
     scope:
@@ -958,10 +980,24 @@ def word_collocates(scope: dict | str, word: str, window: int = 4,
             if not len(sel):
                 return {"error": "no books matched", "author_regex": scope["author"],
                         "year_from": yf, "year_to": yt, "country": country}
-            book_ids = list(sel["id"])
+            # Hard-cap: prevent agent-loop timeout on full-corpus period
+            # queries. v1.1.4 had 'fog у викторианцев' running 112s for
+            # 27860 books which exceeded the 180s chat budget once wrapped
+            # in the LLM eval. We sample by downloads desc so the cap keeps
+            # the most-popular (= most-evidence) books and the result stays
+            # representative.
+            sel = sel.copy()
+            sel["downloads"] = pd.to_numeric(sel.get("downloads"),
+                                             errors="coerce").fillna(0)
+            sel_sorted = sel.sort_values("downloads", ascending=False)
+            capped = len(sel_sorted) > max_books
+            if capped:
+                sel_sorted = sel_sorted.head(max_books)
+            book_ids = list(sel_sorted["id"])
             period = f" {yf}-{yt}" if (yf or yt) else ""
             cn = f" country={country}" if country else ""
-            label = f"author:{scope['author']}{period}{cn} ({len(sel)} books)"
+            cap_note = f" capped@{max_books}/{len(sel)}" if capped else ""
+            label = f"author:{scope['author']}{period}{cn} ({len(book_ids)} books{cap_note})"
         else:
             return {"error": "bad scope; use {'book':PGid} | {'author':regex, [year_from, year_to, country]}"}
 
@@ -1228,6 +1264,125 @@ def word_freq_timeline(word: str, bucket_years: int = 25,
         return {"error": "word_freq_timeline failed", "details": str(e)}
     finally:
         _log(f"word_freq_timeline({word_lc}) done in {time.perf_counter()-t0:.2f}s")
+
+
+# ============================ TOOL: words_disappearing_after ============================
+def words_disappearing_after(year: int = 1920, top: int = 25,
+                             min_pre_pm: float = 50.0,
+                             min_post_books: int = 50,
+                             min_pre_books: int = 50,
+                             basis: str = "auto") -> dict:
+    """Words that drop sharply in usage after a given year.
+
+    Computes per-million frequency in two buckets — pre-`year` and post-`year`
+    — across the corpus, then ranks by drop ratio = pre_pm / max(post_pm, 1).
+    Filters: pre_pm >= min_pre_pm (word was actually common before),
+    and both buckets have >= min_books to keep ratios stable.
+
+    Defaults target 'words that vanished after 1920' (Q16): year=1920,
+    min_pre_pm=50/million ensures we're talking about real working
+    vocabulary, not random rare words.
+
+    basis: 'auto' (pub_year if known else birth+30, Sprint 9.7 enrichment)
+    is the default; 'birth' for legacy proxy; 'pub_year' for strict OL only.
+
+    NOTE: For year=1920 the OL pub_year enrichment is still filling — meanwhile
+    the birth+30 proxy underestimates post-1920 because most 'modern' authors
+    were born ~1880-1900. Results will improve as fetch_pub_year.py catches up.
+    """
+    t0 = time.perf_counter()
+    try:
+        df = _metadata_df()
+        df = df[df["language"].fillna("").str.contains("'en'", regex=False)].copy()
+        birth = pd.to_numeric(df["authoryearofbirth"], errors="coerce")
+        birth_proxy = birth + 30
+        pub = pd.to_numeric(df.get("pub_year"), errors="coerce") \
+            if "pub_year" in df.columns else pd.Series([pd.NA] * len(df), index=df.index)
+        if basis == "pub_year":
+            df["axis_year"] = pub
+        elif basis == "birth":
+            df["axis_year"] = birth_proxy
+        else:
+            df["axis_year"] = pub.fillna(birth_proxy)
+        df = df.dropna(subset=["axis_year"])
+        df["axis_year"] = df["axis_year"].astype(int)
+
+        pre = df[df["axis_year"] < year]
+        post = df[df["axis_year"] >= year]
+        if len(pre) < min_pre_books or len(post) < min_post_books:
+            return {"error": "not enough books in one bucket",
+                    "pre_books": int(len(pre)), "post_books": int(len(post)),
+                    "min_pre_books": min_pre_books, "min_post_books": min_post_books,
+                    "year": year}
+
+        def _aggregate(book_ids):
+            counts: Counter = Counter()
+            total_tokens = 0
+            for pg in book_ids:
+                f = _counts_path(pg)
+                if not f.exists():
+                    continue
+                with open(f, encoding="utf-8") as fh:
+                    for line in fh:
+                        parts = line.rstrip("\n").split("\t")
+                        if len(parts) != 2:
+                            continue
+                        try:
+                            n = int(parts[1])
+                        except ValueError:
+                            continue
+                        counts[parts[0]] += n
+                        total_tokens += n
+            return counts, total_tokens
+
+        # Cap each bucket for runtime — 5000 books per bucket × ~10ms counts
+        # read = ~50s. Sort by downloads desc so the cap keeps representative
+        # books.
+        pre = pre.copy()
+        post = post.copy()
+        pre["downloads"] = pd.to_numeric(pre["downloads"], errors="coerce").fillna(0)
+        post["downloads"] = pd.to_numeric(post["downloads"], errors="coerce").fillna(0)
+        pre_ids = list(pre.sort_values("downloads", ascending=False).head(5000)["id"])
+        post_ids = list(post.sort_values("downloads", ascending=False).head(5000)["id"])
+
+        pre_counts, pre_total = _aggregate(pre_ids)
+        post_counts, post_total = _aggregate(post_ids)
+        if not pre_total or not post_total:
+            return {"error": "empty bucket totals"}
+
+        pre_pm_factor = 1_000_000 / pre_total
+        post_pm_factor = 1_000_000 / post_total
+
+        rows = []
+        for w, pre_c in pre_counts.items():
+            if not w.isalpha() or len(w) < 3:
+                continue
+            pre_pm = pre_c * pre_pm_factor
+            if pre_pm < min_pre_pm:
+                continue
+            post_c = post_counts.get(w, 0)
+            post_pm = post_c * post_pm_factor
+            drop = pre_pm / max(post_pm, 0.1)
+            rows.append({
+                "word": w,
+                "pre_per_million":  round(pre_pm, 2),
+                "post_per_million": round(post_pm, 2),
+                "drop_ratio":       round(drop, 2),
+                "pre_count":        pre_c,
+                "post_count":       post_c,
+            })
+        rows.sort(key=lambda r: -r["drop_ratio"])
+        return {
+            "year_cutoff":     year,
+            "basis":           basis,
+            "pre_bucket":      {"books": len(pre_ids), "total_tokens": pre_total},
+            "post_bucket":     {"books": len(post_ids), "total_tokens": post_total},
+            "min_pre_per_million": min_pre_pm,
+            "top": rows[:top],
+            "_elapsed_s": round(time.perf_counter() - t0, 2),
+        }
+    except Exception as e:
+        return {"error": "words_disappearing_after failed", "details": str(e)}
 
 
 # ============================ TOOL 11: word_contexts_global ============================
@@ -2661,7 +2816,7 @@ TOOLS_SPEC = [
             "author2_regex": {"type": "string", "description": "Regex автора 2, например '^Doyle,'"},
             "top":           {"type": "integer", "description": "Сколько слов в топе каждого (default 20)"},
             "min_corpus_count": {"type": "integer", "description":
-                "Минимум встреч слова в корпусе (default 100). Фильтрует OOV/имена (oinos/dunwich/threepwood). Поставь 0 для включения редких слов."},
+                "Минимум встреч слова в корпусе (default 500 since v1.1.5). Фильтрует OOV/имена (ulalume/israfel/fortunato/dunwich/threepwood). Поставь 0 для forensic stylometry."},
         }, "required": ["author1_regex", "author2_regex"]},
     }},
 ]
@@ -2824,6 +2979,26 @@ TOOLS_SPEC += [
         }, "required": ["author_regex"]},
     }},
     {"type": "function", "function": {
+        "name": "words_disappearing_after",
+        "description": (
+            "🆕 Слова резко вышедшие из употребления после данного года (Sprint 11). "
+            "Разбивает корпус на pre-year и post-year buckets (по pub_year если "
+            "известен, иначе birth+30) и возвращает топ-N слов с наибольшим "
+            "drop_ratio = pre_per_million / post_per_million. Фильтр min_pre_pm "
+            "(default 50/million) гарантирует что слово было common в pre-period. "
+            "Используй для «слова исчезнувшие после 1920», «викторианизмы вышедшие "
+            "из моды», «obsolete vocabulary after WWI». Замена для bulk-scanning "
+            "которого word_freq_timeline не делает (он per-word)."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "year":            {"type": "integer", "description": "default 1920"},
+            "top":             {"type": "integer", "description": "default 25"},
+            "min_pre_pm":      {"type": "number", "description": "default 50.0 per-million"},
+            "basis":           {"type": "string", "description":
+                "'auto' (default) | 'pub_year' (strict OL) | 'birth' (legacy)"},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
         "name": "word_pos_distribution",
         "description": (
             "🆕 POS-распределение слова по фактическим вхождениям в scope "
@@ -2969,6 +3144,7 @@ TOOL_DISPATCH = {
     "book_readability":         book_readability,
     "word_freq_timeline":       word_freq_timeline,
     "word_contexts_global":     word_contexts_global,
+    "words_disappearing_after": words_disappearing_after,
     "find_book":                find_book,
     "book_emotion_profile":     book_emotion_profile,
     "emotion_collocates":       emotion_collocates,

@@ -418,6 +418,18 @@ def learning_words(
         if info.get("proper_noun"):
             known_proper.add(key.split("|", 1)[0])
 
+    # v1.1.5 — book-scope queries also get the per-book spaCy NER pass that
+    # affinity_by_book uses. Q09/Q13 regression: 'B1-B2 words from P&P'
+    # returned darcy/bennet/lizzy/gardiner — they weren't in word_dictionary
+    # cache (never enriched) so the previous filter missed them. NER on the
+    # raw text catches them deterministically.
+    if isinstance(scope, dict) and scope.get("book") and context_book_ids:
+        try:
+            for pg_id in context_book_ids:
+                known_proper |= _book_propn_set(pg_id)
+        except Exception as e:
+            _log(f"per-book NER skip in learning_words: {e}")
+
     candidates = []
     for w, sc in scope_counts.items():
         if sc < 3 or len(w) < 3:
