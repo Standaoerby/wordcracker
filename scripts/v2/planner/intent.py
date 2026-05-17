@@ -24,6 +24,7 @@ INTENTS = frozenset({
     "introduction",
     "corpus_meta",
     "author_metadata",
+    "book_compare",
     "author_vocab",
     "author_top_words",
     "author_compare",
@@ -87,6 +88,7 @@ PRIORITY = {
     "author_attribution": 112,
     "author_influences": 110,
     "author_compare": 108,
+    "book_compare": 110,
     "lexical_wealth": 105,
     "word_movement": 105,
     "word_dialogue": 105,
@@ -154,6 +156,19 @@ RULES: list[tuple[Pattern[str], str, float]] = [
          r"\b.{0,40}\b(автор\w*|book|книг)"), "top_authors_books", 0.9),
     (_re(r"\b(топ|top)\s*\d*\s*(скачив\w*|downloaded|книг|book)"),
      "top_authors_books", 0.7),
+
+    # ===== book_compare (Q24 / Q27 style — two or more books contrast) =====
+    # «X1 и X2 но редко в Y», «слова в X и Y, но не в Z», multi-book combos.
+    # Higher priority than author_compare so the title-list pattern wins.
+    (_re(r"(в|of)\s+[«\"“‘][^»\"”’]+[»\"”’]\s+и\s+[«\"“‘][^»\"”’]+[»\"”’]"
+         r".{0,40}(редко|а|но\s+редко|не\s+встречаются?|but rarely)"),
+     "book_compare", 0.92),
+    (_re(r"\bотличают\s+(готическ\w*|приключенческ\w*)\s+\w+\s+(от|vs)\s+"),
+     "book_compare", 0.6),  # genre-compare bucket
+    # «у морских авторов Мелвилла, Конрада и Стивенсона» — multi-author
+    # vs the corpus — same shape, route through compare too.
+    (_re(r"\bу\s+[а-яёА-ЯЁa-zA-Z\s,]+\s+но\s+редко\s+в\s+остальном\b"),
+     "book_compare", 0.85),
 
     # ===== author_compare =====
     (_re(r"\b(сравни|compare)\s+.{1,60}\s+(и|vs|with)\s+"), "author_compare", 0.95),

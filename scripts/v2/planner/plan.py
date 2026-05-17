@@ -249,6 +249,49 @@ def _plan_author_vocab(e: Entities) -> QueryPlan:
     )
 
 
+def _plan_book_compare(e: Entities) -> QueryPlan:
+    """Q24-style: «слова в Treasure Island и Moby Dick, но редко в David
+    Copperfield». Strategy: find_book each title (cached), then run
+    affinity_by_book on each — the renderer surfaces words common to the
+    positive set and rare in the negative.
+
+    For v2-alpha we fire affinity_by_book on the *first* resolved book
+    only and let the renderer say «here's signature for X — compare with
+    Y/Z by re-asking». Full set-intersection is Sprint 9.x deferred.
+    """
+    refusal = _copyright_refusal_if_book_under_copyright(e)
+    if refusal:
+        return refusal
+    # Need at least the primary book.
+    if not e.book_id and not e.book_title:
+        return _need_book(e)
+    if e.book_id:
+        return QueryPlan(
+            intent="book_compare", entities=e,
+            steps=[PlanStep(tool="affinity_by_book",
+                            args={"pg_id": e.book_id,
+                                  "top": e.top_n or 30,
+                                  "min_corpus_count": 500,
+                                  "exclude_proper_nouns": True})],
+            expected_cost="medium",
+            explain=(f"affinity_by_book({e.book_id}) — primary book; "
+                     f"renderer suggests follow-up for secondary titles"),
+        )
+    return QueryPlan(
+        intent="book_compare", entities=e,
+        steps=[
+            PlanStep(tool="find_book", args={"title": e.book_title}),
+            PlanStep(tool="affinity_by_book",
+                     args={"top": e.top_n or 30,
+                           "min_corpus_count": 500,
+                           "exclude_proper_nouns": True},
+                     depends_on=[0], inject_result_as="pg_id"),
+        ],
+        expected_cost="medium",
+        explain="find_book → affinity_by_book (primary); renderer asks for next",
+    )
+
+
 def _plan_author_compare(e: Entities) -> QueryPlan:
     others = e.multi_author_regex
     if not e.author_regex or not others:
@@ -859,6 +902,7 @@ PLAN_BUILDERS = {
     "author_vocab":         _plan_author_vocab,
     "author_top_words":     _plan_author_top_words,
     "author_compare":       _plan_author_compare,
+    "book_compare":         _plan_book_compare,
     "author_attribution":   _plan_author_attribution,
     "author_influences":    _plan_author_influences,
     "author_closest":       _plan_author_closest,
