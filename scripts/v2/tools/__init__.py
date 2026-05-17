@@ -5,7 +5,7 @@ from scripts.v2.tools.authors import (  # noqa: F401
     author_metadata, top_authors, affinity, author_profile,
 )
 from scripts.v2.tools.words import (  # noqa: F401
-    contexts, collocates, timeline, emotion, pos, etymology,
+    contexts, collocates, timeline, emotion, pos, etymology, lemma_profile,
 )
 from scripts.v2.tools.learning import learning_words  # noqa: F401
 from scripts.v2.tools.search import lexical, hybrid  # noqa: F401

@@ -30,13 +30,32 @@ from scripts.v2._types import Coverage, ToolResult
     timeout_s=60,
 )
 def author_profile(author_regex: str, country: str | None = None) -> ToolResult:
+    # Sprint 7.2: AuthorProfile SQLite store is the fast path. Re-asks for
+    # the same author return in <5ms instead of paying the ~11s parallel
+    # rebuild via v1.author_profile. The store is corpus_version-tagged so
+    # stale entries get rebuilt automatically on corpus updates.
+    try:
+        from scripts.v2.profiles import author as profile_mod
+        cached = profile_mod.get_or_build(author_regex, country=country)
+    except Exception:
+        cached = None
+    query = {"author_regex": author_regex, "country": country}
+    if cached is not None:
+        md = cached.get("metadata") or {}
+        return ToolResult.success(
+            tool="author_profile", data=cached,
+            coverage=Coverage(books_matched=md.get("books_total", -1),
+                              books_total=-1),
+            query=query,
+        )
+    # Cache miss + build failed → fall through to direct v1 call so we
+    # at least return *something* useful instead of bubbling up an error.
     try:
         from scripts.rag_tools import author_profile as _v1
     except ImportError as e:
         return ToolResult.fail(tool="author_profile", err_type="internal",
                                message=f"v1 unavailable: {e}")
     raw = _v1(author_regex=author_regex, country=country)
-    query = {"author_regex": author_regex, "country": country}
     if isinstance(raw, dict) and raw.get("error"):
         return ToolResult.fail(tool="author_profile", err_type="not_found",
                                message=str(raw["error"]), query=query)

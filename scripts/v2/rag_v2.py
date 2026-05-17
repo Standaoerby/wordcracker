@@ -26,6 +26,7 @@ from typing import Iterator
 import requests
 
 from scripts.v2 import critic as critic_mod
+from scripts.v2 import observability as obs_mod
 from scripts.v2.planner import entities as ent_mod
 from scripts.v2.planner import history as history_mod
 from scripts.v2.planner import intent as int_mod
@@ -219,6 +220,22 @@ def ask(
          "ok": r.ok, "runtime_ms": r.runtime_ms}
         for r in rr.results
     ]
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    obs_mod.log_request({
+        "question_truncated": question[:300],
+        "intent": intent.label,
+        "intent_confidence": intent.confidence,
+        "plan_steps": [s.tool for s in plan.steps],
+        "tool_calls": [
+            {"name": r.tool, "runtime_ms": r.runtime_ms,
+             "ok": r.ok, "cache_hit": r.cache_hit}
+            for r in rr.results
+        ],
+        "total_elapsed_ms": elapsed_ms,
+        "critic_verified": verdict.verified,
+        "critic_unsupported_n": len(verdict.unsupported_claims),
+        "answer_truncated": answer[:300],
+    })
     return {
         "answer": answer,
         "tool_calls": tool_calls,
@@ -230,7 +247,7 @@ def ask(
             "summary": verdict.summary,
         },
         "model": model,
-        "elapsed_sec": round(time.perf_counter() - t0, 2),
+        "elapsed_sec": round(elapsed_ms / 1000, 2),
         "intent": intent.label,
         "intent_confidence": intent.confidence,
     }

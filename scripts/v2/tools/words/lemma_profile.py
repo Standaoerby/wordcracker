@@ -1,0 +1,57 @@
+"""v2 lemma_profile — quick rarity/POS/difficulty lookup for a single lemma.
+
+Powered by scripts/v2/profiles/lemma.py. First call on a new lemma builds
++ persists; subsequent calls return cached.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+_REPO = Path(__file__).resolve().parents[3]
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+from scripts.v2.profiles import lemma as lemma_mod
+from scripts.v2.tool_registry import tool
+from scripts.v2._types import Coverage, ToolResult, ToolWarning
+
+
+@tool(
+    name="lemma_profile",
+    category="words",
+    description=(
+        "Снимок леммы: global_count, rarity (0-1, выше = реже), "
+        "difficulty (basic/intermediate/advanced/rare/ultra_rare). "
+        "Для «насколько частое слово», «что за уровень слова X»."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {"lemma": {"type": "string"}},
+        "required": ["lemma"],
+    },
+    requires=["word"],
+    cost="cheap",
+    cacheable=True,
+)
+def lemma_profile(lemma: str) -> ToolResult:
+    p = lemma_mod.get_or_build(lemma)
+    if p is None:
+        return ToolResult(
+            ok=False, tool="lemma_profile", query={"lemma": lemma},
+            data={"lemma": lemma}, error=None,
+            warnings=[ToolWarning(
+                "not_in_corpus",
+                f"'{lemma}' has 0 occurrences in corpus_counts — possibly a typo, "
+                f"proper noun, or post-2018 coinage.",
+            )],
+            coverage=Coverage(),
+        )
+    return ToolResult.success(
+        tool="lemma_profile", data=p,
+        coverage=Coverage(
+            books_matched=p.get("book_count") or -1,
+            books_total=-1,
+        ),
+        query={"lemma": lemma},
+    )
