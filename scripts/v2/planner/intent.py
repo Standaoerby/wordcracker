@@ -157,12 +157,22 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"\b(топ|top)\s*\d*\s*(скачив\w*|downloaded|книг|book)"),
      "top_authors_books", 0.7),
 
-    # ===== book_compare (Q24 / Q27 style — two or more books contrast) =====
+    # ===== book_compare (Q24 / Q27 / Q5-style — two or more books contrast) =====
     # «X1 и X2 но редко в Y», «слова в X и Y, но не в Z», multi-book combos.
     # Higher priority than author_compare so the title-list pattern wins.
     (_re(r"(в|of)\s+[«\"“‘][^»\"”’]+[»\"”’]\s+и\s+[«\"“‘][^»\"”’]+[»\"”’]"
          r".{0,40}(редко|а|но\s+редко|не\s+встречаются?|but rarely)"),
      "book_compare", 0.92),
+    # Q5-style: «у Диккенса в "Bleak House", но почти не встречаются у Марка
+    # Твена в "Adventures of Huckleberry Finn"». Two book titles each
+    # attached to an author — author_compare's regex won't catch the inner
+    # «в "..."» qualifier, and the rendered table comes back as character
+    # names instead of style markers. Route to book_compare which uses
+    # affinity_by_book with PROPN exclusion.
+    (_re(r"у\s+[А-ЯA-Z][\w\s]{1,30}\s+в\s+[«\"“‘][^»\"”’]+[»\"”’]"
+         r".{0,40}\b(но|а)\b.{0,30}у\s+[А-ЯA-Z][\w\s]{1,30}\s+"
+         r"в\s+[«\"“‘][^»\"”’]+[»\"”’]"),
+     "book_compare", 0.96),
     (_re(r"\bотличают\s+(готическ\w*|приключенческ\w*)\s+\w+\s+(от|vs)\s+"),
      "book_compare", 0.6),  # genre-compare bucket
     # «у морских авторов Мелвилла, Конрада и Стивенсона» — multi-author

@@ -307,6 +307,13 @@ def _plan_author_compare(e: Entities) -> QueryPlan:
     # gap). The probes are optional and the router gracefully continues to
     # compare_authors regardless — but they let the renderer warn the user
     # ahead of time and suggest closest available authors instead.
+    #
+    # min_corpus_count=2000 (was 500): character names like Pickwick / Weller
+    # / Heep / Nickleby / Squeers / Trotwood occur 1000-1800 times in PG via
+    # cross-references in commentaries and adaptations, so 500 wasn't strict
+    # enough to filter them out. 2000 keeps actual stylistic markers
+    # (cheerily / drawing-room / villainous / waistcoat / etc) while
+    # cutting the character-name floor.
     return QueryPlan(
         intent="author_compare", entities=e,
         steps=[
@@ -320,11 +327,11 @@ def _plan_author_compare(e: Entities) -> QueryPlan:
                      args={"author1_regex": e.author_regex,
                            "author2_regex": others[0],
                            "top": e.top_n or 20,
-                           "min_corpus_count": 500}),
+                           "min_corpus_count": 2000}),
         ],
         expected_cost="medium",
         explain=(f"probe({e.author_regex}) + probe({others[0]}) + "
-                 f"compare_authors"),
+                 f"compare_authors(min_corpus_count=2000 anti-PROPN)"),
     )
 
 

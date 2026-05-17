@@ -494,11 +494,25 @@ def _find_emotion(text: str) -> str | None:
 
 
 def _find_etymology(text: str) -> str | None:
+    """First-match wins, but pick the *most specific* family when the user
+    listed several (e.g. 'latin/french' or 'germanic and norse'). v1
+    find_words_by_etymology accepts only one family per call, so we pick
+    the first canonical bucket that appears.
+
+    The intro suggested «latin/french» — that used to extract family=
+    'latin/french' as a single string and break v1. Now we pick 'latin'
+    (or whichever comes first in the text) and the planner runs one
+    family. Multi-family parallel chains can come later if Stan finds
+    them useful."""
     s = text.lower()
+    best_pos = len(s) + 1
+    best_family = None
     for k, v in ETYMOLOGY_FAMILIES.items():
-        if k in s:
-            return v
-    return None
+        pos = s.find(k)
+        if 0 <= pos < best_pos:
+            best_pos = pos
+            best_family = v
+    return best_family
 
 
 # ---------- POS filter ----------
