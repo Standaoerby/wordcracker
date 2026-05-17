@@ -119,6 +119,16 @@ PAGE = r"""<!doctype html>
   .live-status .iter       { color:#50e3c2; font-size:11px; margin-top:6px; }
   .live-status .think      { color:#50e3c2; }
   .live-status .think::after { content:"…"; animation:dots 1.2s steps(4) infinite; }
+  /* Sprint 10: badges shown next to the assistant bubble */
+  .badges { display:flex; gap:6px; margin-top:6px; flex-wrap:wrap; font-size:11px; }
+  .badge { padding:2px 7px; border-radius:9px; font-variant-numeric:tabular-nums; }
+  .badge.intent  { background:#2d3a4d; color:#a0c4ff; }
+  .badge.critic.ok    { background:#1e3a2e; color:#7ed321; }
+  .badge.critic.warn  { background:#3a3320; color:#e0a04e; }
+  .badge.engine  { background:#2a2630; color:#b599e5; }
+  .copy-btn      { background:transparent; color:#888; border:1px solid #2f343c;
+                   font-size:11px; padding:2px 8px; border-radius:4px; cursor:pointer; }
+  .copy-btn:hover { color:#eaeaea; border-color:#50e3c2; }
   @keyframes dots { 0% { content:""; } 25% { content:"."; } 50% { content:".."; } 75% { content:"..."; } }
   @keyframes spin { to { transform: rotate(360deg); } }
   table { border-collapse:collapse; margin:8px 0; }
@@ -143,7 +153,7 @@ PAGE = r"""<!doctype html>
 <body>
 <header>
   <h1>__ASSISTANT_NAME__ · wordcracker</h1>
-  <span class=meta>qwen3:14b · 11 tools · agentic loop · multi-turn</span>
+  <span class=meta>v2 engine · wordcracker:v2 · planner→router→renderer→critic</span>
   <span style="flex:1"></span>
   <button class=secondary type=button onclick="clearHistory()">clear</button>
 </header>
@@ -236,6 +246,8 @@ async function submit(text) {
 
   const toolRows = {};   // name → row element (last-pending)
   const tools = [];
+  let intentLabel = null;   // captured from {event:'intent'} early in stream
+  let criticInfo  = null;   // captured from {event:'critic'} late in stream
 
   try {
     const r = await fetch('/api/chat/stream', {
@@ -295,6 +307,16 @@ async function submit(text) {
             tools[tools.length-1].result_summary = ev.summary;
             break;
           }
+          case 'intent':
+            intentLabel = ev.label;
+            // Update the live-status header so the user sees the planner
+            // verdict immediately.
+            const ihint = status.querySelector('.think');
+            if (ihint) ihint.textContent = 'planner: ' + ev.label;
+            break;
+          case 'critic':
+            criticInfo = ev;
+            break;
           case 'answer':
             answerText = ev.text;
             break;
@@ -311,6 +333,40 @@ async function submit(text) {
     // upgrade the live block to the proper assistant bubble
     clearInterval(timer);
     live.innerHTML = marked.parse(answerText || '');
+
+    // Sprint 10 badges row: engine / intent / critic / copy button.
+    const badges = document.createElement('div');
+    badges.className = 'badges';
+    const eng = document.createElement('span');
+    eng.className = 'badge engine'; eng.textContent = 'v2';
+    badges.appendChild(eng);
+    if (intentLabel) {
+      const b = document.createElement('span');
+      b.className = 'badge intent'; b.textContent = 'intent: ' + intentLabel;
+      badges.appendChild(b);
+    }
+    if (criticInfo) {
+      const b = document.createElement('span');
+      b.className = 'badge critic ' + (criticInfo.issues_flagged ? 'warn' : 'ok');
+      b.title = criticInfo.summary || '';
+      b.textContent = criticInfo.issues_flagged
+        ? `⚠ critic: ${criticInfo.unsupported_claims_n} flag(s)`
+        : '✓ critic clean';
+      badges.appendChild(b);
+    }
+    if (answerText) {
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'copy-btn'; copyBtn.type = 'button';
+      copyBtn.textContent = 'copy';
+      copyBtn.onclick = () => {
+        navigator.clipboard.writeText(answerText);
+        copyBtn.textContent = 'copied ✓';
+        setTimeout(() => copyBtn.textContent = 'copy', 1200);
+      };
+      badges.appendChild(copyBtn);
+    }
+    live.appendChild(badges);
+
     if (final) {
       const meta = document.createElement('div');
       meta.className = 'meta-row';
