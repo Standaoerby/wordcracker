@@ -517,6 +517,15 @@ Return JSON ONLY, no other text. Keys:
 - "example_sentence": one short example sentence using the word
 - "etymology": short etymology hint (1 sentence, ok if approximate)
 - "cefr_estimate": "A2"/"B1"/"B2"/"C1"/"C2"
+- "archaic": true if the word is archaic / obsolete / no longer in everyday
+    modern English (Victorian-era or earlier register only). False if still
+    in current use. Examples of archaic=true: thee, thou, hath, ere, oft,
+    nay, wherefore, betwixt, prithee, methinks, anon, forsooth, doth, ye,
+    yon, hither, perchance. Examples archaic=false: house, run, terrible,
+    candle, gentleman (still in use).
+- "archaic_note": one short phrase explaining the archaism if archaic=true,
+    otherwise empty string. e.g. "Middle English 2nd-person singular pronoun";
+    "older 'before/until' conjunction"; "King-James-Bible style affirmation".
 """
 
 
@@ -566,6 +575,141 @@ def enrich_word(word: str, contexts: list[str] | None = None,
     _save_word_dict(cache)
     _log(f"enrich_word({word}) done in {time.perf_counter()-t0:.2f}s")
     return parsed
+
+
+# ============================ TOOL: book_archaic_words ============================
+# Curated seed list of well-known archaisms — every word here is auto-tagged
+# archaic=True regardless of LLM verdict, so 'archaisms in Dracula' returns
+# something useful immediately without first round-tripping every candidate
+# through enrich_word.
+_KNOWN_ARCHAISMS = {
+    "thee", "thou", "thy", "thine", "ye", "yon", "yonder",
+    "hath", "doth", "dost", "art", "wast", "wert", "shalt", "wilt",
+    "ere", "oft", "nay", "yea", "aye",
+    "wherefore", "whither", "whence", "hence", "thence", "hither", "thither",
+    "betwixt", "amongst", "amidst", "athwart", "anon", "betimes",
+    "prithee", "methinks", "perchance", "mayhap", "forsooth", "verily",
+    "fain", "alack", "alas", "lo", "behold",
+    "gainsay", "vouchsafe", "bespoke", "bestrid", "begat", "begot",
+    "quoth", "saith", "speakest", "hearest", "knowest",
+    "naught", "aught", "ought", "wot",
+    "ado", "albeit", "anent", "haply", "natheless", "withal",
+    "morrow", "yestreen", "eventide", "tarry",
+    "varlet", "knave", "wench", "swain", "damsel", "yeoman", "burgess",
+    "smite", "smote", "smitten", "wrought",
+    "thrice", "fortnight", "sennight",
+    "perforce", "betimes", "withal", "albeit",
+    "ado", "bade", "clad", "spake", "girt", "girded",
+}
+
+
+def book_archaic_words(pg_id: str, top: int = 30,
+                       min_book_count: int = 2,
+                       enrich_unknown: bool = False,
+                       enrich_budget: int = 20) -> dict:
+    """Archaic / obsolete words used in one book.
+
+    Strategy:
+      1. Walk the book's counts file.
+      2. Two sources of 'archaic=True' verdicts:
+         - _KNOWN_ARCHAISMS curated seed list (instant, ~80 well-known forms)
+         - word_dictionary.json cache: any previously-enriched word whose
+           archaic flag was set True by the LLM (D36 enrich_word prompt).
+      3. Optionally (enrich_unknown=True), for the next `enrich_budget`
+         mid-frequency candidates not in either source, run enrich_word and
+         tag the result. This is the slow path — disabled by default; agent
+         turns it on when user explicitly asks for a deeper sweep.
+
+    Returns sorted by book_count desc.
+
+    For #10 'архаизмы в Dracula', 'устаревшие слова у Шекспира'.
+    """
+    t0 = time.perf_counter()
+    pg = pg_id.upper()
+    if not (pg.startswith("PG") or pg.startswith("U")):
+        pg = f"PG{pg}"
+    f = SPGC_COUNTS_DIR / f"{pg}_counts.txt"
+    if not f.exists():
+        try:
+            from rag_tools import _counts_path as _cp
+            f = _cp(pg)
+        except Exception:
+            pass
+    if not f.exists():
+        return {"error": "counts file not found", "id": pg}
+
+    cache = _load_word_dict()
+    cache_archaic: set[str] = set()
+    cache_notes: dict[str, str] = {}
+    for key, info in cache.items():
+        if info.get("archaic") is True:
+            w = key.split("|", 1)[0]
+            cache_archaic.add(w)
+            note = info.get("archaic_note") or ""
+            if note:
+                cache_notes[w] = note
+
+    # 1) seed pass
+    book_counts: dict[str, int] = {}
+    with open(f, encoding="utf-8") as fh:
+        for line in fh:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) != 2:
+                continue
+            w, c = parts[0], int(parts[1])
+            if c < min_book_count:
+                continue
+            book_counts[w] = c
+
+    rows: list[dict] = []
+    for w, c in book_counts.items():
+        if w in _KNOWN_ARCHAISMS:
+            rows.append({"word": w, "book_count": c,
+                         "source": "seed",
+                         "note": cache_notes.get(w, "")})
+        elif w in cache_archaic:
+            rows.append({"word": w, "book_count": c,
+                         "source": "enrich_cache",
+                         "note": cache_notes.get(w, "")})
+
+    # 2) optional enrich pass for mid-frequency candidates
+    enriched_count = 0
+    if enrich_unknown:
+        seen = {r["word"] for r in rows}
+        # Look at moderately-rare words first (most likely archaisms hide in
+        # the 50-500 corpus-count band).
+        candidates = []
+        try:
+            from rag_tools import _corpus_counts
+            corpus = _corpus_counts()
+        except Exception:
+            corpus = {}
+        for w, c in book_counts.items():
+            if w in seen:
+                continue
+            if not w.isalpha() or len(w) < 3:
+                continue
+            cc = corpus.get(w, 0) if corpus else 0
+            if 30 <= cc <= 5000:
+                candidates.append((w, c, cc))
+        candidates.sort(key=lambda t: t[1], reverse=True)
+        for w, c, cc in candidates[:enrich_budget]:
+            res = enrich_word(w, contexts=[""], lemma_hint=w, pos_hint="")
+            enriched_count += 1
+            if res.get("archaic") is True:
+                rows.append({"word": w, "book_count": c,
+                             "source": "enrich_live",
+                             "note": res.get("archaic_note", "")})
+
+    rows.sort(key=lambda r: -r["book_count"])
+    return {
+        "id": pg,
+        "checked_book_vocab": len(book_counts),
+        "seed_or_cache_hits": len(rows) - sum(1 for r in rows if r["source"] == "enrich_live"),
+        "enriched_now": enriched_count,
+        "top": rows[:top],
+        "_elapsed_s": round(time.perf_counter() - t0, 2),
+    }
 
 
 # ============================ TOOL: export_word_list ============================
@@ -688,6 +832,27 @@ LEARNING_TOOLS_SPEC = [
         }, "required": ["word"]},
     }},
     {"type": "function", "function": {
+        "name": "book_archaic_words",
+        "description": (
+            "🆕 Архаичные / устаревшие слова конкретной книги (Sprint 9 #10). "
+            "Использует два источника: curated seed list (thee/thou/hath/ere/anon/...) "
+            "и enrich_word cache (LLM-tagged archaic). По умолчанию работает "
+            "мгновенно по cache+seed; `enrich_unknown=true` дополнительно запускает "
+            "enrich_word на mid-frequency кандидатах для глубокого sweep'а. "
+            "Используй для «архаизмы в Dracula», «устаревшая лексика у Шекспира»."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "pg_id": {"type": "string", "description": "PG/U id"},
+            "top":   {"type": "integer", "description": "default 30"},
+            "min_book_count": {"type": "integer", "description":
+                "минимум встреч в книге (default 2)"},
+            "enrich_unknown": {"type": "boolean", "description":
+                "default false — instant. true = LLM прогон mid-freq candidates, медленно"},
+            "enrich_budget":  {"type": "integer", "description":
+                "сколько кандидатов прогнать через enrich_word при enrich_unknown=true (default 20)"},
+        }, "required": ["pg_id"]},
+    }},
+    {"type": "function", "function": {
         "name": "export_word_list",
         "description": (
             "Экспорт списка слов в Anki CSV / Markdown / JSON. "
@@ -704,10 +869,11 @@ LEARNING_TOOLS_SPEC = [
 ]
 
 LEARNING_TOOL_DISPATCH = {
-    "affinity_by_book":  affinity_by_book,
-    "learning_words":    learning_words,
-    "enrich_word":       enrich_word,
-    "export_word_list":  export_word_list,
+    "affinity_by_book":   affinity_by_book,
+    "learning_words":     learning_words,
+    "enrich_word":        enrich_word,
+    "book_archaic_words": book_archaic_words,
+    "export_word_list":   export_word_list,
 }
 
 
