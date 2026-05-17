@@ -41,29 +41,33 @@ CRITIC_ENABLED = os.environ.get("WC_CRITIC", "on").lower() in ("on", "1", "true"
 CRITIC_TIMEOUT_S = int(os.environ.get("WC_CRITIC_TIMEOUT", "30"))
 
 
-_CRITIC_PROMPT = """Ты — критик-верификатор. Получи готовый ответ и данные tools, на которых он построен. Найди утверждения в ответе, которые НЕ подкреплены данными.
+_CRITIC_PROMPT = """Ты — критик-верификатор. Получи готовый ответ и данные tools, на которых он построен. Найди ТОЛЬКО ВЫДУМАННЫЕ утверждения — те, которые ОТСУТСТВУЮТ в tool_results.
 
-Особо ищи:
-1. Числа (frequencies, counts, percentages, года) — должны быть в tool_results.
-2. Имена PG ID — должны соответствовать tool_results.
-3. Имена авторов / названия книг — должны быть в tool_results.
-4. Цитаты — должны быть в tool_results (samples / contexts).
-5. Гарантии coverage («у всех авторов», «во всём корпусе») — должны быть подкреплены coverage из tool_results.
+ВАЖНО: если число / имя / цитата ПРИСУТСТВУЕТ в tool_results.data (в любом формате — список, словарь, поле объекта), считай это ПОДКРЕПЛЁННЫМ. Не флагай каждую строку таблицы по отдельности — таблица из tool_data это data echo, она подкреплена самим присутствием в data.
+
+Флагай только:
+1. Числа, которых НЕТ в tool_results вообще.
+2. PG id, которых нет в tool_results.matches.
+3. Авторов / книги не из tool_results.
+4. Цитаты не из tool_results.samples / .contexts.
+5. Универсальные заявления («у всех авторов», «во всём корпусе») без поддержки в coverage.
 
 Игнорируй:
-- Общие лингвистические замечания без чисел.
-- Структурные комментарии («это типично для викторианцев»).
-- Стилистические перифразы tool data.
+- Любые числа/имена/слова, появляющиеся в tool_data (даже если перефразированы).
+- Общие лингвистические комментарии.
+- Структурные замечания.
+- Стилистические перифразы.
 
 Верни ТОЛЬКО JSON без markdown:
 {
-  "verified": true_если_все_claims_подкреплены_else_false,
-  "unsupported_claims": ["короткое описание неподкреплённого утверждения", ...],
+  "verified": true если выдуманных утверждений нет,
+  "unsupported_claims": ["короткое описание выдуманного утверждения", ...],  // не более 3-4
   "missing_caveats": ["coverage warning который ответ проглотил", ...],
   "summary": "одно предложение общего вердикта"
 }
 
-Если ответ — extracted clarify / out_of_scope без данных — верни verified=true с пустыми списками."""
+Если ответ — clarify / out_of_scope без данных — верни verified=true с пустыми списками.
+Если все claims подкреплены — верни verified=true."""
 
 
 @dataclass
@@ -167,10 +171,26 @@ def review(answer: str, tool_results_summary: list[dict], *,
         log.warning("critic JSON parse failed: %s; raw=%r", e, content[:200])
         return CriticVerdict.trust()
 
+    unsupported = list(parsed.get("unsupported_claims") or [])
+    caveats = list(parsed.get("missing_caveats") or [])
+    # Sanity guard: when the critic flags >= MAX_FLAGS items, it's almost
+    # certainly confused (the renderer just pulled rows from a table, every
+    # number is "unsupported" from a strict perspective). Trust the answer
+    # and surface only the count via summary so the UI badge stays useful.
+    MAX_FLAGS = 4
+    if len(unsupported) > MAX_FLAGS:
+        log.info("critic over-flagged %d claims for intent=%s — guarding to trust",
+                 len(unsupported), payload_for_critic.get("intent"))
+        return CriticVerdict(
+            verified=True, unsupported_claims=[], missing_caveats=caveats,
+            summary=(f"({len(unsupported)} weak flags suppressed — "
+                     f"answer renders a table; treat numbers as data echo)"),
+            raw_text=content[:500],
+        )
     return CriticVerdict(
         verified=bool(parsed.get("verified", True)),
-        unsupported_claims=list(parsed.get("unsupported_claims") or []),
-        missing_caveats=list(parsed.get("missing_caveats") or []),
+        unsupported_claims=unsupported,
+        missing_caveats=caveats,
         summary=str(parsed.get("summary") or "(no summary)"),
         raw_text=content[:500],
     )

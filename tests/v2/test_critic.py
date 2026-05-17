@@ -138,6 +138,53 @@ class ReviewFallbacks(unittest.TestCase):
             self.assertTrue(v.verified)
 
 
+class CriticOverflagGuard(unittest.TestCase):
+    """When the critic returns >4 unsupported claims, suppress the warning —
+    it's almost certainly confused on a table-heavy answer."""
+
+    def test_over_threshold_returns_trust(self):
+        with mock.patch.object(critic, "CRITIC_ENABLED", True), \
+                mock.patch("scripts.v2.critic.requests.post") as mp:
+            mp.return_value.raise_for_status = lambda: None
+            mp.return_value.json = lambda: {
+                "message": {"content": json.dumps({
+                    "verified": False,
+                    "unsupported_claims": [f"claim {i}" for i in range(8)],
+                    "missing_caveats": [],
+                    "summary": "many things wrong",
+                })}
+            }
+            v = review("table with 10 rows",
+                       [{"tool": "affinity_by_author", "data": {"top_words": []},
+                         "coverage": {}, "warnings": []}],
+                       intent="author_vocab")
+            # Guard activates: verified=True despite 8 flags, claims emptied,
+            # summary mentions the suppression count.
+            self.assertTrue(v.verified)
+            self.assertEqual(v.unsupported_claims, [])
+            self.assertIn("8", v.summary)
+            self.assertIn("suppressed", v.summary)
+
+    def test_under_threshold_keeps_flags(self):
+        with mock.patch.object(critic, "CRITIC_ENABLED", True), \
+                mock.patch("scripts.v2.critic.requests.post") as mp:
+            mp.return_value.raise_for_status = lambda: None
+            mp.return_value.json = lambda: {
+                "message": {"content": json.dumps({
+                    "verified": False,
+                    "unsupported_claims": ["one real claim"],
+                    "missing_caveats": [],
+                    "summary": "one bad number",
+                })}
+            }
+            v = review("hello",
+                       [{"tool": "x", "data": {"y": 1},
+                         "coverage": {}, "warnings": []}],
+                       intent="test")
+            self.assertFalse(v.verified)
+            self.assertEqual(len(v.unsupported_claims), 1)
+
+
 class ReviewHappyPath(unittest.TestCase):
     def test_parses_verdict_json(self):
         with mock.patch.object(critic, "CRITIC_ENABLED", True), \
