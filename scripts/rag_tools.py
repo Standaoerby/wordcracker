@@ -68,6 +68,7 @@ CORPUS_COUNTS   = DERIVED_DIR / "corpus_counts.csv"
 RAW_DIR         = Path("/workspace/raw_text")
 USER_UPLOADS_META = DERIVED_DIR / "user_uploads_metadata.csv"
 ORPHAN_PG_META    = DERIVED_DIR / "orphan_pg_metadata.csv"
+PUB_YEAR_ENRICH   = DERIVED_DIR / "pub_year_enrichment.csv"
 OLLAMA_HOST     = os.environ.get("OLLAMA_HOST", "http://ollama:11434")
 
 STOPWORDS = {
@@ -133,10 +134,12 @@ def _metadata_df() -> pd.DataFrame:
     spgc_m   = SPGC_METADATA.stat().st_mtime    if SPGC_METADATA.exists()   else 0.0
     user_m   = USER_UPLOADS_META.stat().st_mtime if USER_UPLOADS_META.exists() else 0.0
     orphan_m = ORPHAN_PG_META.stat().st_mtime    if ORPHAN_PG_META.exists()   else 0.0
+    pub_m    = PUB_YEAR_ENRICH.stat().st_mtime   if PUB_YEAR_ENRICH.exists()  else 0.0
     if (_metadata_cache["df"] is not None
             and _metadata_cache["spgc_mtime"] == spgc_m
             and _metadata_cache["user_mtime"] == user_m
-            and _metadata_cache["orphan_mtime"] == orphan_m):
+            and _metadata_cache["orphan_mtime"] == orphan_m
+            and _metadata_cache.get("pub_mtime") == pub_m):
         return _metadata_cache["df"]
     df = pd.read_csv(SPGC_METADATA)
 
@@ -163,9 +166,27 @@ def _metadata_df() -> pd.DataFrame:
     if "id" in df.columns:
         df = df.drop_duplicates(subset="id", keep="first")
 
+    # Open Library pub_year enrichment (Sprint 9.7, D31). Left-merge on id;
+    # books without an OL hit get NaN and the timeline tools fall back to the
+    # birth-year+30 proxy.
+    if PUB_YEAR_ENRICH.exists():
+        try:
+            pe = pd.read_csv(PUB_YEAR_ENRICH, usecols=["id", "pub_year"])
+            pe["pub_year"] = pd.to_numeric(pe["pub_year"], errors="coerce")
+            pe = pe.dropna(subset=["pub_year"]).drop_duplicates(subset="id")
+            df = df.merge(pe[["id", "pub_year"]], on="id", how="left")
+            n_with_pub = int(df["pub_year"].notna().sum())
+            _log(f"merged pub_year enrichment → {n_with_pub:,} books with real pub_year")
+        except Exception as e:
+            _log(f"failed to load pub_year enrichment: {e}")
+            df["pub_year"] = pd.NA
+    else:
+        df["pub_year"] = pd.NA
+
     _metadata_cache.update({
         "df": df, "spgc_mtime": spgc_m,
         "user_mtime": user_m, "orphan_mtime": orphan_m,
+        "pub_mtime": pub_m,
     })
     return df
 
@@ -1028,12 +1049,21 @@ def book_readability(pg_id: str, sample_chars: int = 200_000) -> dict:
 # ============================ TOOL 10: word_freq_timeline ============================
 def word_freq_timeline(word: str, bucket_years: int = 25,
                       min_books_per_bucket: int = 3,
-                      lang: str = "en") -> dict:
-    """Frequency of `word` across periods, bucketed by author birth year.
+                      lang: str = "en",
+                      basis: str = "auto") -> dict:
+    """Frequency of `word` across periods.
 
-    Caveat: SPGC metadata has authoryearofbirth, not publication year. We use
-    birth-year + ~30 (rough writing-prime) as a proxy. Books with missing or
-    out-of-range birth year are dropped.
+    `basis`:
+      - "auto"      (default): pub_year if available for the book, otherwise
+                    `authoryearofbirth + 30` (writing-prime proxy). Mixed
+                    timelines are common because OL coverage isn't 100%.
+      - "pub_year": drop books without pub_year. Cleaner curve for the books
+                    that do have it. Use after the Sprint 9.7 OL batch fills
+                    the enrichment table.
+      - "birth"     : ignore pub_year, always use birth_year+30. The pre-9.7
+                    behaviour — useful when checking that timelines didn't
+                    regress.
+    Books outside [1500, 2030] on the chosen basis are dropped.
     """
     t0 = time.perf_counter()
     word_lc = word.strip().lower()
@@ -1043,9 +1073,24 @@ def word_freq_timeline(word: str, bucket_years: int = 25,
         df = _metadata_df()
         mask_lang = df["language"].fillna("").str.contains(f"'{lang}'", regex=False)
         df = df[mask_lang].copy()
-        df["birth"] = pd.to_numeric(df["authoryearofbirth"], errors="coerce")
-        df = df[(df["birth"] >= 1500) & (df["birth"] <= 2020)]
-        df["period_start"] = (df["birth"] // bucket_years * bucket_years).astype(int)
+        birth = pd.to_numeric(df["authoryearofbirth"], errors="coerce")
+        birth_proxy = birth + 30  # writing prime
+        pub = pd.to_numeric(df.get("pub_year"), errors="coerce") \
+            if "pub_year" in df.columns else pd.Series([pd.NA] * len(df), index=df.index)
+
+        if basis == "pub_year":
+            df["axis_year"] = pub
+            axis_label = "pub_year (Open Library, real publication year)"
+        elif basis == "birth":
+            df["axis_year"] = birth_proxy
+            axis_label = "authoryearofbirth + 30 (writing prime proxy)"
+        else:  # auto
+            df["axis_year"] = pub.fillna(birth_proxy)
+            axis_label = ("pub_year when known (OL enrichment), "
+                          "otherwise authoryearofbirth + 30")
+
+        df = df[(df["axis_year"] >= 1500) & (df["axis_year"] <= 2030)]
+        df["period_start"] = (df["axis_year"] // bucket_years * bucket_years).astype(int)
 
         buckets: dict = {}
         for period, group in df.groupby("period_start"):
@@ -1074,7 +1119,6 @@ def word_freq_timeline(word: str, bucket_years: int = 25,
             if books_used >= min_books_per_bucket and tok_total:
                 buckets[int(period)] = {
                     "period":   f"{int(period)}-{int(period)+bucket_years-1}",
-                    "writing_prime_approx": f"~{int(period)+30}-{int(period)+bucket_years+30}",
                     "books":    books_used,
                     "total_tokens":  tok_total,
                     "occurrences":   occurrences,
@@ -1084,7 +1128,8 @@ def word_freq_timeline(word: str, bucket_years: int = 25,
         return {
             "word": word_lc,
             "bucket_years": bucket_years,
-            "axis_basis":   "authoryearofbirth (writing prime ≈ birth + 30)",
+            "basis":     basis,
+            "axis_basis": axis_label,
             "timeline": timeline,
         }
     except Exception as e:
@@ -1759,17 +1804,18 @@ def top_books_by_downloads(top: int = 20, lang: str = "en",
 
 # ============================ TOOL 13b: top_books_by_recency ============================
 def top_books_by_recency(top: int = 20, lang: str = "en",
-                         author_regex: str | None = None) -> dict:
-    """Top N most recently ADDED to Project Gutenberg's collection.
+                         author_regex: str | None = None,
+                         metric: str = "pg_id") -> dict:
+    """Top N most recent books.
 
-    Sorted by PG id descending — PG ids are sequential, so a higher id means
-    Gutenberg added that book more recently. THIS IS NOT THE BOOK'S ORIGINAL
-    PUBLICATION YEAR — PG doesn't track that; their API only exposes the id
-    and the author's birth/death years.
+    metric (default "pg_id"):
+      - "pg_id": recently ADDED to PG (sort by PG id desc). PG id != pub_year.
+      - "pub_year": newest by REAL publication year (Open Library enrichment,
+                    Sprint 9.7). Books without OL pub_year are dropped — this
+                    mode answers "what's the newest book by publication date".
 
-    For e.g. "топ-10 свежих книг" or "what's been added to PG recently". The
-    author may have lived in 1850 but PG may have added the book in 2026 —
-    the returned entries are recent ADDITIONS, not recent PUBLICATIONS.
+    For "топ-10 свежих книг" / "что нового в PG" use pg_id (default).
+    For "самые новые книги в библиотеке" / "post-1920 fiction" use pub_year.
     """
     t0 = time.perf_counter()
     try:
@@ -1778,23 +1824,40 @@ def top_books_by_recency(top: int = 20, lang: str = "en",
         if author_regex:
             df = df[df["author"].fillna("").str.contains(author_regex, case=False, regex=True)]
         df = df.copy()
-        # Parse "PG12345" → 12345 for numeric sort
-        df["_pg_num"] = df["id"].str.extract(r"PG(\d+)").astype(float)
-        df = df.dropna(subset=["_pg_num"])
-        df = df.sort_values("_pg_num", ascending=False).head(top)
+
+        if metric == "pub_year":
+            if "pub_year" not in df.columns:
+                return {"error": "pub_year column not present — Sprint 9.7 batch hasn't filled it yet",
+                        "fallback": "use metric='pg_id'"}
+            df["pub_year"] = pd.to_numeric(df["pub_year"], errors="coerce")
+            df = df.dropna(subset=["pub_year"])
+            if not len(df):
+                return {"error": "no books with pub_year metadata yet — Sprint 9.7 batch is still filling",
+                        "fallback": "use metric='pg_id'"}
+            df = df.sort_values("pub_year", ascending=False).head(top)
+            sort_label = "pub_year descending (real publication year, OL enrichment)"
+        else:
+            df["_pg_num"] = df["id"].str.extract(r"PG(\d+)").astype(float)
+            df = df.dropna(subset=["_pg_num"])
+            df = df.sort_values("_pg_num", ascending=False).head(top)
+            sort_label = "PG id descending (recently added to Project Gutenberg)"
+
         df["downloads"] = pd.to_numeric(df["downloads"], errors="coerce").fillna(0)
         rows = [{"id": r["id"],
                  "title": (r["title"] or "")[:120],
                  "author": r["author"] or "",
                  "author_birth": (int(r["authoryearofbirth"])
                                   if pd.notna(r["authoryearofbirth"]) else None),
+                 "pub_year": (int(r["pub_year"])
+                              if "pub_year" in df.columns and pd.notna(r.get("pub_year")) else None),
                  "downloads": int(r["downloads"])}
                 for _, r in df.iterrows()]
         out = {"top_n": top, "lang": lang, "author_regex": author_regex,
-               "sort": "PG id descending (recently added to Project Gutenberg)",
-               "note": "PG id != publication year. Author birth year shown for date context.",
-               "top": rows}
-        _log(f"top_books_by_recency done in {time.perf_counter()-t0:.2f}s")
+               "metric": metric, "sort": sort_label, "top": rows}
+        if metric == "pg_id":
+            out["note"] = ("PG id != publication year. "
+                           "Use metric='pub_year' for real publication date.")
+        _log(f"top_books_by_recency(metric={metric}) done in {time.perf_counter()-t0:.2f}s")
         return out
     except Exception as e:
         return {"error": "top_books_by_recency failed", "details": str(e)}
@@ -1995,25 +2058,26 @@ TOOLS_SPEC += [
         "name": "word_freq_timeline",
         "description": (
             "Частота слова по эпохам. "
-            "🔥 ВАЖНО — ось времени = ГОД РОЖДЕНИЯ АВТОРА (не год публикации книги). "
-            "Period of writing approximируется как `birth_year + 30` (расцвет творчества). "
-            "Project Gutenberg не хранит pub_year — это лучшее что мы имеем без external API. "
-            "**Обязательно** объясни это в ответе пользователю: «timeline по году рождения автора, "
-            "ось — год рождения + 30 как proxy для эпохи писательства; точный год публикации книги "
-            "нигде в наших метаданных не хранится». "
+            "Sprint 9.7: после OL pub_year enrichment по умолчанию (`basis='auto'`) ось времени "
+            "= **РЕАЛЬНЫЙ год публикации** когда известен, иначе fallback на `authoryearofbirth + 30` "
+            "(writing-prime proxy). Покрытие pub_year растёт по мере того как фоновый batch "
+            "fetch_pub_year.py заполняет таблицу. "
             "\n"
-            "Limitations которые нужно упомянуть: (1) авторы пишут десятилетиями — Толстой 1828, "
-            "его «Детство» 1852 и «Воскресенье» 1899 в одном bucket; (2) анонимы без birth_year "
-            "выпадают; (3) переводы — год переводчика irrelevant; (4) post-1950 данных мало "
-            "(SPGC в основном pre-1950). "
+            "Если хочется чистый timeline только по подтверждённым pub_year — `basis='pub_year'` "
+            "(книги без OL hit выпадают). Для воспроизведения старого поведения — `basis='birth'`. "
             "\n"
-            "Используй для «как менялось значение awful с XVIII по XX», «когда radio стало "
-            "массовым в литературе»."
+            "Limitations: (1) переводы — OL даёт год оригинала; (2) post-1950 данных меньше "
+            "(SPGC в основном pre-1950); (3) OL coverage ~85-95%. "
+            "\n"
+            "Используй для «как менялось значение awful», «когда radio стало массовым», "
+            "«слова исчезнувшие после 1920»."
         ),
         "parameters": {"type": "object", "properties": {
             "word":         {"type": "string"},
             "bucket_years": {"type": "integer", "description": "default 25"},
             "min_books_per_bucket": {"type": "integer", "description": "default 3"},
+            "basis":        {"type": "string", "description":
+                "'auto' (default, pub_year || birth+30) | 'pub_year' (strict, drop unknown) | 'birth' (legacy)"},
         }, "required": ["word"]},
     }},
     {"type": "function", "function": {
@@ -2046,16 +2110,19 @@ TOOLS_SPEC += [
     {"type": "function", "function": {
         "name": "top_books_by_recency",
         "description": (
-            "🆕 Топ-N книг, недавно добавленных в Project Gutenberg (сортировка по PG id desc). "
-            "Используй для «топ свежих книг», «что недавно появилось в корпусе», «новые книги». "
-            "ВАЖНО: это **дата добавления в коллекцию**, не год публикации. "
-            "Project Gutenberg не хранит pub_year в метадате — для каждой книги показываем "
-            "вместо этого год рождения автора как ориентир эпохи."
+            "🆕 Топ-N свежих книг. Два режима через metric:\n"
+            "  - metric='pg_id' (default): недавно ДОБАВЛЕННЫЕ в Project Gutenberg "
+            "(PG id desc). Это **дата добавления**, НЕ год публикации.\n"
+            "  - metric='pub_year': по реальному году публикации из Open Library "
+            "(Sprint 9.7 enrichment). Книги без OL pub_year выпадают. "
+            "Используй для «самые новые книги по дате публикации», «post-1920 fiction»."
         ),
         "parameters": {"type": "object", "properties": {
             "top":          {"type": "integer", "description": "default 20"},
             "lang":         {"type": "string",  "description": "default 'en'"},
             "author_regex": {"type": "string",  "description": "опционально: regex по author"},
+            "metric":       {"type": "string",  "description":
+                "'pg_id' (when added to PG, default) | 'pub_year' (real publication year via OL)"},
         }, "required": []},
     }},
     {"type": "function", "function": {
