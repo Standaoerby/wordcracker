@@ -155,19 +155,18 @@ def _coerce_args(spec: ToolSpec, args: dict) -> dict:
     """Cast `filter` dicts to FilterSpec where the schema expects it.
 
     Keeps the LLM-facing schema as plain JSON while tools internally work with
-    typed FilterSpec instances."""
-    props = (spec.input_schema or {}).get("properties", {})
+    typed FilterSpec instances.
+
+    Note: we deliberately do NOT coerce `scope` here. v2 wrappers thin-wrap v1
+    tools that still expect plain dict scope, so silently converting their args
+    to a FilterSpec instance breaks them (no `.get()` method, etc). Only the
+    explicit `filter` key — which is v2-native by convention — gets the cast.
+    """
     out = dict(args)
     for k, v in args.items():
         if k == "filter" and isinstance(v, dict):
             out[k] = FilterSpec(**{kk: vv for kk, vv in v.items()
                                    if kk in FilterSpec.__dataclass_fields__})
-        # `scope` legacy: accept v1 shape (dict/str), coerce to FilterSpec
-        if k == "scope" and not isinstance(v, FilterSpec):
-            try:
-                out[k] = FilterSpec.from_legacy_scope(v)
-            except ValueError:
-                pass
     return out
 
 
