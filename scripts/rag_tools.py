@@ -69,6 +69,7 @@ RAW_DIR         = Path("/workspace/raw_text")
 USER_UPLOADS_META = DERIVED_DIR / "user_uploads_metadata.csv"
 ORPHAN_PG_META    = DERIVED_DIR / "orphan_pg_metadata.csv"
 PUB_YEAR_ENRICH   = DERIVED_DIR / "pub_year_enrichment.csv"
+AUTHORS_GEO       = DERIVED_DIR / "authors_geo.csv"
 OLLAMA_HOST     = os.environ.get("OLLAMA_HOST", "http://ollama:11434")
 
 STOPWORDS = {
@@ -191,19 +192,58 @@ def _metadata_df() -> pd.DataFrame:
     return df
 
 
+_geo_cache: dict = {"df": None, "mtime": 0.0}
+
+
+def _authors_geo_df():
+    """Lazy-load authors_geo.csv. Grows as the Sprint 9.2 background batch
+    fills it. Mtime-cached. Returns None if file absent."""
+    if not AUTHORS_GEO.exists():
+        return None
+    m = AUTHORS_GEO.stat().st_mtime
+    if _geo_cache["df"] is not None and _geo_cache["mtime"] == m:
+        return _geo_cache["df"]
+    try:
+        g = pd.read_csv(AUTHORS_GEO)
+        g = g.dropna(subset=["author"])
+        # Keep only the rows where country_code is populated — the rest are
+        # 'wd:no_match'/error/etc. and don't help filtering.
+        g["country_code"] = g["country_code"].fillna("").astype(str).str.strip().str.upper()
+        _geo_cache["df"] = g
+        _geo_cache["mtime"] = m
+        return g
+    except Exception as e:
+        _log(f"authors_geo read failed: {e}")
+        return None
+
+
 def _select_books(author_regex: str, lang: str = "en",
                   year_from: int | None = None,
-                  year_to: int | None = None) -> pd.DataFrame:
+                  year_to: int | None = None,
+                  country: str | None = None) -> pd.DataFrame:
     """Books matching author regex and language.
 
     year_from / year_to filter on `authoryearofbirth + 30` (writing prime
     proxy). Useful for period queries like 'fog у викторианцев'
-    (year_from=1837, year_to=1901). When metadata lacks birth year the book
-    is included (no filter); we never drop on missing data."""
+    (year_from=1837, year_to=1901).
+
+    country: ISO alpha-2 ('GB', 'US', 'RU', 'FR', ...). Filters via
+    authors_geo.csv (Wikidata enrichment, Sprint 9.2). Use to ask for
+    'British vocabulary' / 'AmE literature only'. Books whose author isn't
+    in the geo enrichment yet are dropped when country is set."""
     df = _metadata_df()
     mask_lang = df["language"].fillna("").str.contains(f"'{lang}'", regex=False)
     mask_auth = df["author"].fillna("").str.contains(author_regex, case=False, regex=True)
     out = df[mask_lang & mask_auth]
+    if country and country.strip():
+        cc = country.strip().upper()
+        geo = _authors_geo_df()
+        if geo is None or not len(geo):
+            return out.iloc[0:0]  # empty
+        ok_authors = set(geo[geo["country_code"] == cc]["author"])
+        if not ok_authors:
+            return out.iloc[0:0]
+        out = out[out["author"].isin(ok_authors)]
     if (year_from is not None or year_to is not None) and "authoryearofbirth" in out.columns:
         yob = pd.to_numeric(out["authoryearofbirth"], errors="coerce")
         writing_prime = yob + 30
@@ -483,7 +523,8 @@ def _spacy_pos_tags(words: list[str]) -> dict:
 def top_ngrams_by_author(author_regex: str, n: int = 2, top: int = 20,
                          pos_filter: list[str] | None = None,
                          year_from: int | None = None,
-                         year_to: int | None = None) -> dict:
+                         year_to: int | None = None,
+                         country: str | None = None) -> dict:
     """N-gram frequencies (n=1,2,3) from per-author SPGC tokens.
 
     pos_filter (only n=1): list like ["NOUN","VERB","ADJ","ADV","PROPN"]; keeps
@@ -499,10 +540,12 @@ def top_ngrams_by_author(author_regex: str, n: int = 2, top: int = 20,
     if n not in (1, 2, 3):
         return {"error": "n must be 1, 2 or 3"}
     try:
-        sel = _select_books(author_regex, year_from=year_from, year_to=year_to)
+        sel = _select_books(author_regex, year_from=year_from, year_to=year_to,
+                            country=country)
         if not len(sel):
             return {"error": "no books matched", "author_regex": author_regex,
-                    "year_from": year_from, "year_to": year_to}
+                    "year_from": year_from, "year_to": year_to,
+                    "country": country}
 
         counter: Counter = Counter()
         used = 0
@@ -891,7 +934,10 @@ def word_collocates(scope: dict | str, word: str, window: int = 4,
         {'author': '.*', 'year_from': 1837,       — period filter via author
                           'year_to':  1901}         birth_year+30 (writing prime).
                                                     e.g. Victorians: 1837-1901.
-                                                    Use '.*' as author_regex to mean "any author".
+        {'author': '.*', 'country': 'GB'}         — nationality filter via
+                                                    Sprint 9.2 Wikidata enrichment.
+                                                    'British words near fog'.
+        Combine: {'author': '.*', 'year_from': 1837, 'country': 'GB'}
     """
     t0 = time.perf_counter()
     word_lc = word.strip().lower()
@@ -906,15 +952,18 @@ def word_collocates(scope: dict | str, word: str, window: int = 4,
         elif isinstance(scope, dict) and scope.get("author"):
             yf = scope.get("year_from")
             yt = scope.get("year_to")
-            sel = _select_books(scope["author"], year_from=yf, year_to=yt)
+            country = scope.get("country")
+            sel = _select_books(scope["author"], year_from=yf, year_to=yt,
+                                country=country)
             if not len(sel):
                 return {"error": "no books matched", "author_regex": scope["author"],
-                        "year_from": yf, "year_to": yt}
+                        "year_from": yf, "year_to": yt, "country": country}
             book_ids = list(sel["id"])
             period = f" {yf}-{yt}" if (yf or yt) else ""
-            label = f"author:{scope['author']}{period} ({len(sel)} books)"
+            cn = f" country={country}" if country else ""
+            label = f"author:{scope['author']}{period}{cn} ({len(sel)} books)"
         else:
-            return {"error": "bad scope; use {'book':PGid} | {'author':regex, [year_from, year_to]}"}
+            return {"error": "bad scope; use {'book':PGid} | {'author':regex, [year_from, year_to, country]}"}
 
         neighbors: Counter = Counter()
         hits = 0
@@ -1974,6 +2023,55 @@ GENERIC_AUTHOR_SUBSTRINGS = (
 )
 
 
+def top_authors_by_country(country: str, metric: str = "books", top: int = 20,
+                           lang: str = "en", include_generic: bool = False) -> dict:
+    """Top N authors from a single country (ISO alpha-2 code), ranked by metric.
+
+    For 'top British authors', 'most popular American writers', 'who's
+    French in our corpus'. Underlying enrichment is the Sprint 9.2 Wikidata
+    fetch; coverage grows as authors_geo.csv backfills.
+
+    Returns each author with book_count, total_downloads, country_code.
+    """
+    if not country or not country.strip():
+        return {"error": "country code required (e.g. 'GB', 'US', 'RU')"}
+    cc = country.strip().upper()
+    geo = _authors_geo_df()
+    if geo is None:
+        return {"error": "authors_geo.csv not present yet — Sprint 9.2 batch hasn't filled it"}
+    geo_country = geo[geo["country_code"] == cc]
+    if not len(geo_country):
+        codes = sorted(set(geo["country_code"]) - {""})
+        return {"error": f"no authors tagged {cc!r}",
+                "available_codes_sample": codes[:30],
+                "geo_coverage": int((geo["country_code"] != "").sum())}
+    authors_set = set(geo_country["author"])
+
+    df = _metadata_df()
+    df = df[df["language"].fillna("").str.contains(f"'{lang}'", regex=False)]
+    df = df[df["author"].isin(authors_set)]
+    if not len(df):
+        return {"error": "geo has authors but no matching books in metadata frame"}
+
+    if metric == "downloads":
+        df["downloads"] = pd.to_numeric(df["downloads"], errors="coerce").fillna(0)
+        agg = df.groupby("author").agg(books=("id", "count"),
+                                       downloads=("downloads", "sum"))
+        agg = agg.sort_values("downloads", ascending=False)
+    else:
+        df["downloads"] = pd.to_numeric(df["downloads"], errors="coerce").fillna(0)
+        agg = df.groupby("author").agg(books=("id", "count"),
+                                       downloads=("downloads", "sum"))
+        agg = agg.sort_values("books", ascending=False)
+
+    rows = [{"author": idx, "books": int(r["books"]),
+             "downloads": int(r["downloads"]), "country_code": cc}
+            for idx, r in agg.head(top).iterrows()]
+    return {"country": cc, "metric": metric, "top_n": top,
+            "geo_coverage_for_country": int(len(geo_country)),
+            "top": rows}
+
+
 def top_authors_by(metric: str = "books", top: int = 10, lang: str = "en",
                    include_generic: bool = False) -> dict:
     """Top N authors by metric.
@@ -2211,13 +2309,15 @@ TOOLS_SPEC = [
             "author_regex='.*' если автор любой."
         ),
         "parameters": {"type": "object", "properties": {
-            "author_regex": {"type": "string", "description": "Regex, например '^Dostoyevsky,'. Use '.*' if filtering only by period."},
+            "author_regex": {"type": "string", "description": "Regex, например '^Dostoyevsky,'. Use '.*' if filtering only by period/country."},
             "n":   {"type": "integer", "description": "1, 2 или 3"},
             "top": {"type": "integer", "description": "Сколько вернуть (default 20)"},
             "pos_filter": {"type": "array", "items": {"type": "string"},
                            "description": "Фильтр POS первой токена ngram: ['NOUN','VERB','ADJ','ADV','PROPN']"},
             "year_from": {"type": "integer", "description": "Начало периода (writing prime = author birth + 30). 1837 = Викторианский."},
             "year_to":   {"type": "integer", "description": "Конец периода. 1901 = Викторианский."},
+            "country":   {"type": "string", "description":
+                "ISO alpha-2 фильтр через Wikidata (Sprint 9.2): GB/US/RU/FR/... 'американская vs британская лексика'."},
         }, "required": ["author_regex"]},
     }},
     {"type": "function", "function": {
@@ -2362,6 +2462,24 @@ TOOLS_SPEC += [
             "top":    {"type": "integer", "description": "Сколько вернуть (default 10)"},
             "lang":   {"type": "string", "description": "Язык (default 'en')"},
         }, "required": ["metric"]},
+    }},
+    {"type": "function", "function": {
+        "name": "top_authors_by_country",
+        "description": (
+            "🆕 Топ-N авторов из одной страны (Sprint 9.2 Wikidata enrichment). "
+            "country = ISO alpha-2 code: GB / US / RU / FR / DE / IE / CA / ... "
+            "Используй для «топ британских авторов», «самые популярные American writers», "
+            "«ирландская литература в корпусе». Покрытие растёт по мере того как "
+            "fetch_author_nationality.py заполняет authors_geo.csv."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "country": {"type": "string", "description":
+                "ISO alpha-2: GB / US / RU / FR / DE / IE / CA / AU / NZ / ZA / IN / ..."},
+            "metric":  {"type": "string", "description":
+                "'books' (default) | 'downloads'"},
+            "top":     {"type": "integer", "description": "default 20"},
+            "lang":    {"type": "string", "description": "default 'en'"},
+        }, "required": ["country"]},
     }},
     {"type": "function", "function": {
         "name": "top_books_by_downloads",
@@ -2513,6 +2631,7 @@ TOOL_DISPATCH = {
     "word_etymology":           word_etymology,
     "find_words_by_etymology":  find_words_by_etymology,
     "top_authors_by":           top_authors_by,
+    "top_authors_by_country":   top_authors_by_country,
     "top_books_by_downloads":   top_books_by_downloads,
     "top_books_by_recency":     top_books_by_recency,
     "author_metadata":          author_metadata,
