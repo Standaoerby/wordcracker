@@ -34,6 +34,8 @@ def main():
                     help="how many popular authors to walk (default 30)")
     ap.add_argument("--top-words", type=int, default=30,
                     help="per-author affinity top to enrich (default 30)")
+    ap.add_argument("--pos-filter", type=str, default="",
+                    help="comma-separated POS list; e.g. ADJ for adjective sweep")
     ap.add_argument("--limit", type=int, default=0,
                     help="cap total enrich_word calls (0=no cap)")
     args = ap.parse_args()
@@ -63,8 +65,11 @@ def main():
         regex = f"^{surname},"
         print(f"\n[{ai}/{len(rows)}] {author}  regex={regex!r}", flush=True)
         try:
+            pos_arg = [p.strip().upper() for p in args.pos_filter.split(",")
+                       if p.strip()] or None
             aff = affinity_by_author(regex, top=args.top_words,
-                                     min_corpus_count=0)
+                                     min_corpus_count=0,
+                                     pos_filter=pos_arg)
         except Exception as e:
             print(f"  affinity FAILED: {e}", flush=True)
             continue
