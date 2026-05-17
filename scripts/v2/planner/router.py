@@ -58,6 +58,19 @@ def _inject(args: dict, prior_results: list[ToolResult],
         first_id = src.data.get("first_id") if isinstance(src.data, dict) else None
         if first_id:
             out["scope"] = {"book": first_id}
+    elif inject_as == "author_regex":
+        # Sprint 11.4: pull the leader from top_authors_by(_country).data["top"][0]
+        # and reshape "Surname, First" to v1's "^Surname," regex. Used by the
+        # composite_compare plan to chain top-authors → affinity_by_author
+        # for the leader of each country.
+        if isinstance(src.data, dict):
+            rows = src.data.get("top") or []
+            if rows and isinstance(rows, list) and isinstance(rows[0], dict):
+                author = (rows[0].get("author") or "").strip()
+                if author:
+                    surname = author.split(",", 1)[0].strip()
+                    if surname:
+                        out["author_regex"] = f"^{surname},"
     elif inject_as in src.data if isinstance(src.data, dict) else False:
         out[inject_as] = src.data[inject_as]
     return out

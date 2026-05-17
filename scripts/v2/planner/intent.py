@@ -49,6 +49,7 @@ INTENTS = frozenset({
     "top_authors_books",
     "country_compare",
     "country_vocab",
+    "composite_compare",
     "period_vocab",
     "genre_compare",
     "topic_words",
@@ -73,6 +74,7 @@ def _re(pattern: str) -> Pattern[str]:
 PRIORITY = {
     "out_of_scope": 200,
     "vocab_passport": 150,
+    "composite_compare": 145,
     "translation_quality": 140,
     "country_compare": 135,
     "genre_compare": 130,
@@ -327,6 +329,24 @@ RULES: list[tuple[Pattern[str], str, float]] = [
          r".{0,40}свободн"), "learning", 0.95),
     (_re(r"вызывают\s+сложности\b.{0,30}\b(b1|b2|c1|c2|уровн\w*|level)"),
      "learning", 0.92),
+
+    # ===== composite_compare (Q40-style extreme cross-section) =====
+    # Q40 routes here instead of country_compare because the query asks for a
+    # full lexical differential between two country corpora (with period + CEFR
+    # + multi-field output spec). country_compare's plan only fetches top
+    # authors per country — useful as a starting point but doesn't produce the
+    # actual signature-word contrast Stan's prompt asks for. composite_compare
+    # extends that plan with affinity_by_author probes for the leader of each
+    # country so the renderer has real word-level contrast data.
+    (_re(r"b2[-–—\s]*c1"
+         r".{0,200}\bотличают?\s+британск\w*"),
+     "composite_compare", 0.96),
+    (_re(r"раздели\w*\s+(их\s+)?на\s+британск\w*\s+и\s+американск\w*"
+         r".{0,200}b2[-–—\s]*c1"),
+     "composite_compare", 0.97),
+    (_re(r"раздели\w*\s+(их\s+)?на\s+британск\w*\s+и\s+американск\w*"
+         r".{0,200}\bсгруппируй\w*\s+слов"),
+     "composite_compare", 0.95),
 
     # ===== country_compare =====
     (_re(r"британск\w*.{0,15}vs.{0,15}американск\w*|"

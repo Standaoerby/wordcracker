@@ -716,6 +716,54 @@ def _plan_country_compare(e: Entities) -> QueryPlan:
     )
 
 
+def _plan_composite_compare(e: Entities) -> QueryPlan:
+    """Sprint 11.4 — Q40-style extreme cross-section.
+
+    Q40: «Возьми все английские произведения 1850-1920, раздели на британских
+    и американских, ... покажи 200 слов B2-C1 которые отличают британскую
+    прозу от американской». Full per-corpus affinity over the period would
+    scan ~20k books and blow the chat budget, so we approximate with:
+
+      0. top_authors_by_country(GB, metric=tokens, top=10) — cached via
+         Sprint 11.2 author_tokens.json, ~50ms.
+      1. top_authors_by_country(US, metric=tokens, top=10) — same.
+      2. affinity_by_author for leader of GB top — cached CSV → ~1s.
+      3. affinity_by_author for leader of US top — cached CSV → ~1s.
+
+    The LLM/renderer then surfaces both leaders' signature words side-by-side
+    with the country top-author lists, giving Stan a real lexical contrast
+    instead of just "here are top authors per country." Full B2-C1 lemma
+    differential across the whole period is a Sprint 12 corpus-side
+    pre-computation (build_country_affinity.py is a future enhancement).
+    """
+    yf = e.year_from or 1850
+    yt = e.year_to or 1920
+    return QueryPlan(
+        intent="composite_compare", entities=e,
+        steps=[
+            PlanStep(tool="top_authors_by_country",
+                     args={"country": "GB", "metric": "tokens", "top": 10}),
+            PlanStep(tool="top_authors_by_country",
+                     args={"country": "US", "metric": "tokens", "top": 10}),
+            PlanStep(tool="affinity_by_author",
+                     args={"top": 30, "min_corpus_count": 500,
+                           "pos_filter": e.pos_filter},
+                     depends_on=[0], inject_result_as="author_regex",
+                     optional=True),
+            PlanStep(tool="affinity_by_author",
+                     args={"top": 30, "min_corpus_count": 500,
+                           "pos_filter": e.pos_filter},
+                     depends_on=[1], inject_result_as="author_regex",
+                     optional=True),
+        ],
+        expected_cost="medium",
+        explain=(
+            f"top_authors_by_country GB + US ({yf}-{yt}) + "
+            f"affinity для leader каждой страны (composite Q40-style)"
+        ),
+    )
+
+
 def _plan_country_vocab(e: Entities) -> QueryPlan:
     """Q6: «британские слова Кристи». Author vocab + country filter."""
     if not e.author_regex:
@@ -944,6 +992,7 @@ PLAN_BUILDERS = {
     "top_authors_books":    _plan_top_authors,
     "country_compare":      _plan_country_compare,
     "country_vocab":        _plan_country_vocab,
+    "composite_compare":    _plan_composite_compare,
     "period_vocab":         _plan_period_vocab,
     "genre_compare":        _plan_genre_compare,
     "topic_words":          _plan_topic_words,

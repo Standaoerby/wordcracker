@@ -179,6 +179,31 @@ class PlanCountryAndPeriod(unittest.TestCase):
         self.assertEqual(p.intent, "country_vocab")
         self.assertEqual(p.steps[0].args["author_regex"], "^Christie,")
 
+    def test_composite_compare_q40(self):
+        """Sprint 11.4 — Q40 routes to composite_compare with 4-step fan-out:
+        two top_authors_by_country probes feeding two affinity_by_author calls
+        via inject_result_as=author_regex."""
+        _, _, p = _full(
+            "Возьми все английские произведения 1850-1920 годов, раздели их "
+            "на британских и американских авторов, убери 1000 самых частотных "
+            "слов, сгруппируй по леммам и частям речи, а затем покажи 200 "
+            "слов уровня B2-C1, которые сильнее всего отличают британскую "
+            "прозу от американской."
+        )
+        self.assertEqual(p.intent, "composite_compare")
+        self.assertEqual(len(p.steps), 4)
+        self.assertEqual(p.steps[0].tool, "top_authors_by_country")
+        self.assertEqual(p.steps[0].args["country"], "GB")
+        self.assertEqual(p.steps[1].tool, "top_authors_by_country")
+        self.assertEqual(p.steps[1].args["country"], "US")
+        self.assertEqual(p.steps[2].tool, "affinity_by_author")
+        self.assertEqual(p.steps[2].depends_on, [0])
+        self.assertEqual(p.steps[2].inject_result_as, "author_regex")
+        self.assertTrue(p.steps[2].optional)
+        self.assertEqual(p.steps[3].tool, "affinity_by_author")
+        self.assertEqual(p.steps[3].depends_on, [1])
+        self.assertEqual(p.steps[3].inject_result_as, "author_regex")
+
 
 class PlanCorpusMeta(unittest.TestCase):
     def test_corpus_meta(self):

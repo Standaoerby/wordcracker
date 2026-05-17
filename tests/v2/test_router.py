@@ -208,6 +208,45 @@ class RouterExecutesSteps(unittest.TestCase):
         self.assertTrue(r.results[1].ok)
         self.assertEqual(r.results[1].data["pg_id"], "PG1342")
 
+    def test_chained_steps_with_author_regex_injection(self):
+        """Sprint 11.4 — composite_compare plan threads top_authors_by_country's
+        top[0].author into affinity_by_author.author_regex. Verify the
+        reshape "Surname, First" → "^Surname,"."""
+        # Drop the LRU cache so stale results from earlier tests in the suite
+        # don't pre-empt our patched stub. top_authors_by_country is cacheable.
+        from scripts.v2 import cache as _cache
+        with _cache._lru_lock:
+            _cache._lru.clear()
+        # Override the v1 stub to return a known leader. The v2 wrapper around
+        # top_authors_by_country already calls into rag_tools.top_authors_by_country,
+        # so we don't need to re-register — just swap the underlying function.
+        sys.modules["scripts.rag_tools"].top_authors_by_country = lambda **kw: {
+            "country": kw["country"],
+            "top": [{"author": "Dickens, Charles", "books": 50,
+                     "downloads": 1000, "country_code": kw["country"]}],
+        }
+
+        from scripts.v2.planner.entities import Entities
+        from scripts.v2.planner.plan import PlanStep, QueryPlan
+        from scripts.v2.planner.router import execute
+        plan = QueryPlan(
+            intent="composite_compare", entities=Entities(),
+            steps=[
+                PlanStep(tool="top_authors_by_country",
+                         args={"country": "GB", "metric": "tokens", "top": 10}),
+                PlanStep(tool="affinity_by_author",
+                         args={"top": 30, "min_corpus_count": 500},
+                         depends_on=[0], inject_result_as="author_regex",
+                         optional=True),
+            ],
+        )
+        r = execute(plan)
+        self.assertEqual(r.kind, "results")
+        self.assertEqual(len(r.results), 2)
+        self.assertTrue(r.results[0].ok)
+        self.assertTrue(r.results[1].ok)
+        self.assertEqual(r.results[1].data["author_regex"], "^Dickens,")
+
     def test_failed_required_step_stops(self):
         from scripts.v2.planner.entities import Entities
         from scripts.v2.planner.plan import PlanStep, QueryPlan
