@@ -165,6 +165,36 @@ class CriticOverflagGuard(unittest.TestCase):
             self.assertIn("8", v.summary)
             self.assertIn("suppressed", v.summary)
 
+    def test_intent_skip_returns_trust(self):
+        """Sprint 11.1: critic skips entirely for table-data intents."""
+        for intent in ("learning", "top_authors_books", "vocab_passport"):
+            v = review("table answer",
+                       [{"tool": "x", "data": {"rows": []},
+                         "coverage": {}, "warnings": []}],
+                       intent=intent)
+            self.assertTrue(v.verified, msg=f"intent={intent} should skip")
+            self.assertIn("skipped", v.summary)
+
+    def test_borderline_3_flags_now_trusted(self):
+        """MAX_FLAGS tightened 4 → 2 in Sprint 11.1 — even 3 flags = trust."""
+        with mock.patch.object(critic, "CRITIC_ENABLED", True), \
+                mock.patch("scripts.v2.critic.requests.post") as mp:
+            mp.return_value.raise_for_status = lambda: None
+            mp.return_value.json = lambda: {
+                "message": {"content": json.dumps({
+                    "verified": False,
+                    "unsupported_claims": ["a", "b", "c"],
+                    "missing_caveats": [],
+                    "summary": "three weak",
+                })}
+            }
+            v = review("hello",
+                       [{"tool": "x", "data": {"y": 1},
+                         "coverage": {}, "warnings": []}],
+                       intent="author_compare")
+            self.assertTrue(v.verified)
+            self.assertEqual(v.unsupported_claims, [])
+
     def test_under_threshold_keeps_flags(self):
         with mock.patch.object(critic, "CRITIC_ENABLED", True), \
                 mock.patch("scripts.v2.critic.requests.post") as mp:

@@ -30,7 +30,13 @@ from typing import Any
 
 log = logging.getLogger("wordcracker.v2.observability")
 
-LOG_DIR = Path(os.environ.get("WC_V2_LOG_DIR", "/data/logs/v2"))
+# Default log dir is inside the SPGC derived bind-mount so logs survive
+# container restarts and are visible from the host without a separate
+# /data/logs volume.
+LOG_DIR = Path(os.environ.get(
+    "WC_V2_LOG_DIR",
+    "/workspace/spgc/derived/v2_logs",
+))
 RING_SIZE = int(os.environ.get("WC_V2_RING_SIZE", "256"))
 
 _ring: deque[dict] = deque(maxlen=RING_SIZE)

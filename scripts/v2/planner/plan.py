@@ -237,15 +237,30 @@ def _plan_author_vocab(e: Entities) -> QueryPlan:
         return refusal
     if not e.author_regex:
         return _need_author(e)
+    # Sprint 11.3: when several authors are named (Q27 «морские авторы —
+    # Мелвилл, Конрад, Стивенсон»), run affinity_by_author for each in
+    # parallel — the renderer can present the joined signature lists or
+    # compute set intersections downstream.
+    steps = [PlanStep(tool="affinity_by_author",
+                      args={"author_regex": e.author_regex,
+                            "top": e.top_n or 30,
+                            "min_corpus_count": _auto_min_corpus_count(e),
+                            "pos_filter": e.pos_filter})]
+    for extra in e.multi_author_regex[:3]:  # cap at 4 total to bound time
+        steps.append(PlanStep(
+            tool="affinity_by_author",
+            args={"author_regex": extra,
+                  "top": e.top_n or 30,
+                  "min_corpus_count": _auto_min_corpus_count(e),
+                  "pos_filter": e.pos_filter},
+            optional=True))
+    explain = f"affinity_by_author({e.author_regex})"
+    if e.multi_author_regex:
+        explain += f" + {len(e.multi_author_regex[:3])} more"
     return QueryPlan(
-        intent="author_vocab", entities=e,
-        steps=[PlanStep(tool="affinity_by_author",
-                        args={"author_regex": e.author_regex,
-                              "top": e.top_n or 30,
-                              "min_corpus_count": _auto_min_corpus_count(e),
-                              "pos_filter": e.pos_filter})],
+        intent="author_vocab", entities=e, steps=steps,
         expected_cost="medium",
-        explain=f"affinity_by_author({e.author_regex})",
+        explain=explain,
     )
 
 

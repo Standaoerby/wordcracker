@@ -41,33 +41,33 @@ CRITIC_ENABLED = os.environ.get("WC_CRITIC", "on").lower() in ("on", "1", "true"
 CRITIC_TIMEOUT_S = int(os.environ.get("WC_CRITIC_TIMEOUT", "30"))
 
 
-_CRITIC_PROMPT = """Ты — критик-верификатор. Получи готовый ответ и данные tools, на которых он построен. Найди ТОЛЬКО ВЫДУМАННЫЕ утверждения — те, которые ОТСУТСТВУЮТ в tool_results.
+_CRITIC_PROMPT = """Ты — критик-верификатор. Получи ответ + tool_results на котором он построен. Твоя задача — найти ТОЛЬКО ОТКРОВЕННО ВЫДУМАННЫЕ утверждения. ОЧЕНЬ ВАЖНО: ложные срабатывания дороже пропусков. Если не уверен — НЕ флагай.
 
-ВАЖНО: если число / имя / цитата ПРИСУТСТВУЕТ в tool_results.data (в любом формате — список, словарь, поле объекта), считай это ПОДКРЕПЛЁННЫМ. Не флагай каждую строку таблицы по отдельности — таблица из tool_data это data echo, она подкреплена самим присутствием в data.
+ДЕФОЛТ: verified=true. Флагай ТОЛЬКО при чёткой фальсификации.
 
-Флагай только:
-1. Числа, которых НЕТ в tool_results вообще.
-2. PG id, которых нет в tool_results.matches.
-3. Авторов / книги не из tool_results.
-4. Цитаты не из tool_results.samples / .contexts.
-5. Универсальные заявления («у всех авторов», «во всём корпусе») без поддержки в coverage.
+ПРИЗНАКИ ФАЛЬСИФИКАЦИИ (когда обязательно флагать):
+- Число которого ВООБЩЕ нет ни в одном поле tool_results.data (типа «у Толстого 250 книг» когда tool_results показывают 47).
+- PG id типа «PG12345» которого нет ни в одном tool_result.
+- Книга названа канонически (e.g. "Anna Karenina") но её НЕТ в matches / data — а ответ говорит что есть.
+- Цитата в кавычках которая не присутствует в samples / contexts / snippet любого tool.
 
-Игнорируй:
-- Любые числа/имена/слова, появляющиеся в tool_data (даже если перефразированы).
-- Общие лингвистические комментарии.
-- Структурные замечания.
-- Стилистические перифразы.
+НЕ ФЛАГАЙ (data echo — это нормально):
+- Любую таблицу из tool_data — даже если ответ перечисляет 20 строк, считай таблицу одним agreement с data.
+- Числа из data в перифразе («Holmes встречается 4045 раз» → ответ «4 тысячи раз» — это compression, не fabrication).
+- Стилистические комментарии («это типично для викторианцев», «голос Wodehouse») если они общие.
+- Заявления о coverage если в data есть coverage info.
+- Названия инструментов и intent в ответе.
+- Любые цифры внутри tool's `data` поля, даже если они в nested objects.
 
-Верни ТОЛЬКО JSON без markdown:
+Верни ТОЛЬКО JSON без markdown, без объяснений:
 {
-  "verified": true если выдуманных утверждений нет,
-  "unsupported_claims": ["короткое описание выдуманного утверждения", ...],  // не более 3-4
-  "missing_caveats": ["coverage warning который ответ проглотил", ...],
-  "summary": "одно предложение общего вердикта"
+  "verified": true|false,
+  "unsupported_claims": [],   // максимум 2 строки; пустой массив = чисто
+  "missing_caveats": [],
+  "summary": "1 предложение"
 }
 
-Если ответ — clarify / out_of_scope без данных — верни verified=true с пустыми списками.
-Если все claims подкреплены — верни verified=true."""
+Empty arrays = clean answer = verified true. Это наиболее частый случай. Не ищи проблем где их нет."""
 
 
 @dataclass
@@ -120,11 +120,31 @@ def _shrink(value, *, max_chars: int) -> object:
     return s[:max_chars] + "...(truncated)"
 
 
+# Sprint 11.1: skip critic entirely for intents that are inherently
+# table-data echoes — the LLM is just rendering rows from tool_results,
+# the critic adds noise without catching real hallucinations.
+_INTENT_SKIP_CRITIC = {
+    # learning_words returns ranked rows; renderer literally copies them
+    "learning",
+    # top_authors_by / top_books_by_downloads: pure table
+    "top_authors_books",
+    # learning vocab passport already heavy-cached + audited
+    "vocab_passport",
+}
+
+
 def review(answer: str, tool_results_summary: list[dict], *,
            intent: str = "unknown",
            model: str = CRITIC_MODEL,
            ollama_host: str | None = None) -> CriticVerdict:
-    """Run the critic call. Returns trust() on any failure path."""
+    """Run the critic call. Returns trust() on any failure path.
+
+    Skips the LLM round-trip entirely for table-data intents (Sprint 11.1
+    add) — the critic over-flagged tabular answers in bench v2.0.7
+    (23/32 noise vs ~3 real catches). For those intents the planner +
+    tool envelope already gates correctness; the second LLM pass added
+    cost without benefit.
+    """
     if not CRITIC_ENABLED:
         return CriticVerdict.trust()
     if not answer or not answer.strip():
@@ -133,6 +153,11 @@ def review(answer: str, tool_results_summary: list[dict], *,
         # Pure no-tool answers (introduction, clarify, out_of_scope) — nothing
         # to verify against.
         return CriticVerdict.trust()
+    if intent in _INTENT_SKIP_CRITIC:
+        return CriticVerdict(
+            verified=True, unsupported_claims=[], missing_caveats=[],
+            summary=f"(critic skipped for table intent: {intent})",
+        )
 
     host = ollama_host or os.environ.get("OLLAMA_HOST", "http://ollama:11434")
     payload_for_critic = _build_payload_for_critic(
@@ -177,7 +202,11 @@ def review(answer: str, tool_results_summary: list[dict], *,
     # certainly confused (the renderer just pulled rows from a table, every
     # number is "unsupported" from a strict perspective). Trust the answer
     # and surface only the count via summary so the UI badge stays useful.
-    MAX_FLAGS = 4
+    # Sprint 11.1: tightened to 2 (was 4) so even one borderline case
+    # treats the critic as confused. Real hallucinations almost always
+    # produce exactly 1 distinct flag (the one fabricated number); 3+ is
+    # a critic-quality issue, not the renderer.
+    MAX_FLAGS = 2
     if len(unsupported) > MAX_FLAGS:
         log.info("critic over-flagged %d claims for intent=%s — guarding to trust",
                  len(unsupported), payload_for_critic.get("intent"))
