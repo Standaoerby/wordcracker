@@ -129,6 +129,18 @@ PAGE = r"""<!doctype html>
   .copy-btn      { background:transparent; color:#888; border:1px solid #2f343c;
                    font-size:11px; padding:2px 8px; border-radius:4px; cursor:pointer; }
   .copy-btn:hover { color:#eaeaea; border-color:#50e3c2; }
+  /* Sprint 11.5 retry-with-scope button — shown when planner asked clarify */
+  .retry-scope   { background:transparent; color:#a0c4ff; border:1px solid #2d3a4d;
+                   font-size:11px; padding:2px 8px; border-radius:4px; cursor:pointer;
+                   margin-top:6px; }
+  .retry-scope:hover { color:#eaeaea; border-color:#a0c4ff; }
+  /* Sprint 11.5 sticky stats footer */
+  #stats-footer  { padding:4px 18px; border-top:1px solid #2f343c; background:#161a1f;
+                   color:#666; font-size:11px; font-variant-numeric:tabular-nums;
+                   display:flex; gap:14px; align-items:center; }
+  #stats-footer .stat-key { color:#555; }
+  #stats-footer .stat-val { color:#a0c4ff; }
+  #stats-footer .stat-warn { color:#e0a04e; }
   @keyframes dots { 0% { content:""; } 25% { content:"."; } 50% { content:".."; } 75% { content:"..."; } }
   @keyframes spin { to { transform: rotate(360deg); } }
   table { border-collapse:collapse; margin:8px 0; }
@@ -163,6 +175,14 @@ PAGE = r"""<!doctype html>
   <textarea id=q placeholder="Ctrl+Enter — отправить" autofocus></textarea>
   <button id=send>send</button>
 </form>
+<div id=stats-footer>
+  <span class=stat-key>queries:</span><span id=stat-total class=stat-val>—</span>
+  <span class=stat-key>avg:</span><span id=stat-avg class=stat-val>—</span>
+  <span class=stat-key>cache:</span><span id=stat-cache class=stat-val>—</span>
+  <span class=stat-key>critic flags:</span><span id=stat-critic class=stat-val>—</span>
+  <span style="flex:1"></span>
+  <span class=stat-key id=stat-window>last 256 reqs</span>
+</div>
 
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <script>
@@ -367,6 +387,23 @@ async function submit(text) {
     }
     live.appendChild(badges);
 
+    // Sprint 11.5: retry-with-scope on clarify. Pre-fill the textarea with
+    // the last user question so Stan can append the missing scope (author,
+    // book, period) and re-send without retyping. Cheap UX win — clarify
+    // answers happen ~3-4/40 in the bench, and retyping the long Q40
+    // pasted from the vault is annoying.
+    if (intentLabel === 'clarify') {
+      const retryBtn = document.createElement('button');
+      retryBtn.className = 'retry-scope'; retryBtn.type = 'button';
+      retryBtn.textContent = '↻ уточнить и переспросить';
+      retryBtn.onclick = () => {
+        q.value = text;
+        q.focus();
+        q.setSelectionRange(text.length, text.length);
+      };
+      live.appendChild(retryBtn);
+    }
+
     if (final) {
       const meta = document.createElement('div');
       meta.className = 'meta-row';
@@ -397,6 +434,37 @@ async function submit(text) {
     q.focus();
   }
 }
+
+// Sprint 11.5: poll /api/stats every 30s so the sticky footer shows live
+// counters from the in-process ring buffer (queries today, avg latency,
+// cache hit rate, critic flags). Failures are silent — footer just keeps
+// the last successful values.
+async function refreshStats() {
+  try {
+    const r = await fetch('/api/stats');
+    if (!r.ok) return;
+    const s = await r.json();
+    const total = s.total || 0;
+    document.getElementById('stat-total').textContent = total;
+    if (total > 0) {
+      const avgMs = s.avg_elapsed_ms || 0;
+      document.getElementById('stat-avg').textContent = (avgMs / 1000).toFixed(1) + 's';
+      const cacheRate = s.cache_hit_rate || 0;
+      document.getElementById('stat-cache').textContent =
+        (cacheRate * 100).toFixed(0) + '% (' + (s.cache_hits || 0) + '/' + (s.cache_calls || 0) + ')';
+      const cflag = s.critic_flagged || 0;
+      const cel = document.getElementById('stat-critic');
+      cel.textContent = cflag + '/' + total;
+      cel.className = cflag > total * 0.3 ? 'stat-warn' : 'stat-val';
+    } else {
+      document.getElementById('stat-avg').textContent = '—';
+      document.getElementById('stat-cache').textContent = '—';
+      document.getElementById('stat-critic').textContent = '—';
+    }
+  } catch (e) { /* silent */ }
+}
+refreshStats();
+setInterval(refreshStats, 30000);
 
 // restore history
 for (const m of loadHistory()) {
@@ -445,6 +513,17 @@ class Handler(BaseHTTPRequestHandler):
             tools = [{"name": t["function"]["name"],
                       "description": t["function"]["description"]} for t in TOOLS_SPEC]
             return self._send(200, json.dumps(tools, ensure_ascii=False, indent=2),
+                              "application/json; charset=utf-8")
+        if self.path == "/api/stats":
+            # Sprint 11.5: stats footer polls this every 30s. Aggregates the
+            # in-process ring buffer of the last 256 v2 requests. Empty when
+            # the engine is v1 or the ring buffer is fresh after restart.
+            try:
+                from scripts.v2.observability import aggregate_recent
+                payload = aggregate_recent()
+            except ImportError:
+                payload = {"total": 0, "engine": "v1"}
+            return self._send(200, json.dumps(payload, ensure_ascii=False, default=str),
                               "application/json; charset=utf-8")
         page = PAGE.replace("__ASSISTANT_NAME__", ASSISTANT_NAME)
         return self._send(200, page, "text/html; charset=utf-8")
