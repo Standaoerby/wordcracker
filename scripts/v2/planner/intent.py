@@ -192,9 +192,15 @@ RULES: list[tuple[Pattern[str], str, float]] = [
          r".{0,30}\bу\s+[А-ЯA-Z]"), "author_compare", 0.9),
 
     # ===== author_closest =====
+    # Bare `похож\w*\s+на` used to live here but it false-matched any
+    # «похожи на ИИ / похоже на правду / похожа на сказку» phrasing and
+    # bucketed those as author_closest. Require an author/style anchor
+    # after «похож…на» so only stylometric queries land here.
     (_re(r"лексически\s+ближе|ближе\s+всего\s+к|"
          r"closest( authors)? to|похожи\s+на\s+стиль|"
-         r"кто\s+похож\s+на|похож\w*\s+на"), "author_closest", 0.9),
+         r"кто\s+похож\s+на|"
+         r"похож\w*\s+на\s+(автор\w*|писател\w*|стил\w*|поэт\w*)"),
+     "author_closest", 0.9),
 
     # ===== author_attribution =====
     (_re(r"кто автор|определи автора|attribute (this )?text|authorship of"),

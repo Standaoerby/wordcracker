@@ -390,6 +390,14 @@ _WORD_AFTER_KEY = re.compile(
     r"\bслово\b\s+[\"'«“]?([a-zA-Zа-яё-]{2,30})[\"'»”]?",
     re.IGNORECASE,
 )
+# «имени Анна / имя Anna / по имени X» — Stan asks for usage examples of a
+# personal name in literature. We capture the bare proper noun after the
+# keyword and pass it through to word_contexts / hybrid_search; the search
+# layer's `_maybe_translate` handles Russian→English on the way to ChromaDB.
+_NAME_AFTER_KEY = re.compile(
+    r"\b(?:им(?:я|ени|енем))\s+[\"'«“]?([A-ZА-ЯЁ][a-zA-Zа-яё-]{1,29})[\"'»”]?",
+    re.IGNORECASE,
+)
 
 # Common Russian/English fillers that the legacy regex used to mis-match.
 _WORD_STOPWORDS = {
@@ -415,6 +423,15 @@ def _find_word(text: str) -> str | None:
         w = m.group(1).lower()
         if (len(w) >= 2 and not w.istitle()
                 and w not in _WORD_STOPWORDS):
+            return w
+    # «имени X / имя X» — name probe. The original-case requirement in the
+    # regex (capital first letter) sidesteps Russian/English fillers like
+    # «имя автора» — we want a proper noun. Result is lowercased before
+    # returning so it threads cleanly through `word_contexts`/`hybrid_search`.
+    m = _NAME_AFTER_KEY.search(text)
+    if m:
+        w = m.group(1).lower()
+        if w not in _WORD_STOPWORDS:
             return w
     return None
 

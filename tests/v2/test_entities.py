@@ -74,6 +74,15 @@ class WordExtraction(unittest.TestCase):
     def test_no_word(self):
         self.assertIsNone(extract("какая статистика по Wodehouse").word)
 
+    def test_name_after_imya(self):
+        """Bug B: «имени Анна / имя Anna» → e.word should capture the name."""
+        self.assertEqual(
+            extract("приведи примеры использования имени Анна в английской классике").word,
+            "анна",
+        )
+        self.assertEqual(extract("примеры имени Anna").word, "anna")
+        self.assertEqual(extract("под именем John в романе").word, "john")
+
 
 class YearExtraction(unittest.TestCase):
     def test_after_year(self):

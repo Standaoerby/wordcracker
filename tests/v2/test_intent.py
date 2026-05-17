@@ -149,6 +149,19 @@ class IntentEdgeCases(unittest.TestCase):
         self.assertEqual(m.label, "clarify")
         self.assertEqual(m.confidence, 0.0)
 
+    def test_pohozhi_na_AI_not_author_closest(self):
+        """Bug A: «похожи на ИИ / на правду / на сказку» used to false-match
+        author_closest via the bare `похож\\w*\\s+на` rule. Tightened to
+        require an author/style anchor afterwards."""
+        m = classify("почему тексты Азимова так похожи на написанные искусственным интеллектом")
+        self.assertNotEqual(m.label, "author_closest")
+        m = classify("ответ похож на правду")
+        self.assertNotEqual(m.label, "author_closest")
+        # «кто похож на Doyle» still resolves via the explicit «кто похож на» rule.
+        self.assertEqual(classify("кто похож на Doyle").label, "author_closest")
+        # «похожи на стиль Уайльда» still resolves via the explicit «похожи на стиль» rule.
+        self.assertEqual(classify("похожи на стиль Уайльда").label, "author_closest")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
