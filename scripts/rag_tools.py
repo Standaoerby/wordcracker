@@ -1335,6 +1335,131 @@ def word_contexts_global(word: str, k: int = 12, snippet_chars: int = 280,
         _log(f"word_contexts_global({word_lc}) done in {time.perf_counter()-t0:.2f}s")
 
 
+# ============================ TOOL: word_pos_distribution ============================
+_POS_SENTENCE_RE = re.compile(r"[^.!?\n]*[.!?\n]")
+
+
+def word_pos_distribution(scope: dict, word: str,
+                          max_occurrences: int = 200,
+                          samples_per_pos: int = 3) -> dict:
+    """Run spaCy on each in-scope occurrence of `word` and report the per-POS
+    distribution. Closes #18-style polysemy questions like 'light как N vs V
+    у Вулф', 'how does Austen use "duty" — abstract noun or duty-verb sense'.
+
+    scope: {'book': PGid} | {'author': regex, [year_from, year_to, country]}.
+
+    Walks raw_text/<id>.txt for each book in scope, splits into sentences,
+    spaCy-tags each sentence whose lowercased tokens contain the target,
+    pulls .pos_ for that token. Caps at max_occurrences total to keep
+    runtime bounded — first 200 matches are usually enough to see the
+    dominant POS pattern and at least a couple alternatives.
+    """
+    t0 = time.perf_counter()
+    word_lc = word.strip().lower()
+    if not word_lc or " " in word_lc:
+        return {"error": "word must be a single token"}
+
+    # Resolve scope to a list of (pg_id, raw_path)
+    try:
+        if isinstance(scope, dict) and scope.get("book"):
+            pg = scope["book"].upper()
+            if not (pg.startswith("PG") or pg.startswith("U")): pg = f"PG{pg}"
+            book_ids = [pg]
+            label = f"book:{pg}"
+        elif isinstance(scope, dict) and scope.get("author"):
+            sel = _select_books(scope["author"],
+                                year_from=scope.get("year_from"),
+                                year_to=scope.get("year_to"),
+                                country=scope.get("country"))
+            if not len(sel):
+                return {"error": "no books matched", "scope": scope}
+            book_ids = list(sel["id"])
+            label = f"author:{scope['author']} ({len(sel)} books)"
+        else:
+            return {"error": "bad scope; use {'book':PGid} | {'author':regex}"}
+
+        try:
+            import spacy
+            # Keep tagger + attribute_ruler (POS needs them). Disable expensive
+            # bits we don't use here.
+            nlp = spacy.load("en_core_web_sm", disable=["ner", "parser", "lemmatizer"])
+        except Exception as e:
+            return {"error": f"spaCy load failed: {e}"}
+
+        pos_counts: Counter = Counter()
+        pos_samples: dict[str, list[dict]] = {}
+        total_seen = 0
+
+        for pg in book_ids:
+            if total_seen >= max_occurrences:
+                break
+            raw = Path(f"/workspace/raw_text/{pg.lower()}.txt")
+            if not raw.exists():
+                continue
+            try:
+                text = raw.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            # Cheap PG-boilerplate strip — reuse _GUTENBERG_HEADER/FOOTER
+            m = _GUTENBERG_HEADER.search(text)
+            if m: text = text[m.end():]
+            m = _GUTENBERG_FOOTER.search(text)
+            if m: text = text[:m.start()]
+
+            # Cap text per book for big files
+            text = text[:600_000]
+            # Sentence split (cheap) then keep those containing the word
+            for sent in _POS_SENTENCE_RE.findall(text):
+                if total_seen >= max_occurrences:
+                    break
+                s_lc = sent.lower()
+                if word_lc not in s_lc:
+                    continue
+                # token-boundary check on raw lowercased string
+                # (avoids "light" hitting "delightful")
+                import re as _re
+                if not _re.search(r"(?<![A-Za-z])" + _re.escape(word_lc)
+                                  + r"(?![A-Za-z])", s_lc):
+                    continue
+                doc = nlp(sent.strip())
+                for tok in doc:
+                    if tok.text.lower() != word_lc:
+                        continue
+                    pos = tok.pos_
+                    pos_counts[pos] += 1
+                    total_seen += 1
+                    if len(pos_samples.get(pos, [])) < samples_per_pos:
+                        pos_samples.setdefault(pos, []).append({
+                            "pg_id":   pg,
+                            "sentence": sent.strip()[:200],
+                        })
+                    break  # one tag per sentence even if word appears twice
+
+        if total_seen == 0:
+            return {"scope": label, "word": word_lc,
+                    "warning": "no in-scope occurrences",
+                    "books_scanned": len(book_ids)}
+
+        rows = []
+        for pos, c in pos_counts.most_common():
+            rows.append({
+                "pos":     pos,
+                "count":   c,
+                "share":   round(c / total_seen, 3),
+                "samples": pos_samples.get(pos, []),
+            })
+        return {
+            "scope": label,
+            "word":  word_lc,
+            "total_occurrences": total_seen,
+            "max_occurrences":   max_occurrences,
+            "pos_distribution":  rows,
+            "_elapsed_s": round(time.perf_counter() - t0, 2),
+        }
+    except Exception as e:
+        return {"error": "word_pos_distribution failed", "details": str(e)}
+
+
 # ============================ TOOL: Burrows Delta (stylometric attribution) ============================
 BURROWS_NPZ = DERIVED_DIR / "burrows_vectors.npz"
 _BURROWS_CACHE: dict = {"npz": None, "mtime": 0.0,
@@ -2656,6 +2781,24 @@ TOOLS_SPEC += [
         }, "required": ["author_regex"]},
     }},
     {"type": "function", "function": {
+        "name": "word_pos_distribution",
+        "description": (
+            "🆕 POS-распределение слова по фактическим вхождениям в scope "
+            "(Sprint 9.5). Запускает spaCy на каждом предложении со словом и "
+            "считает в каком POS оно used: NOUN/VERB/ADJ/ADV/.... Возвращает "
+            "share + samples. "
+            "Используй для «light как N vs V у Вулф», «как используется duty "
+            "у Austen — noun или verb», polysemy hints."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "scope": {"type": "object", "description":
+                "{'book': PGid} | {'author': regex, [year_from, year_to, country]}"},
+            "word":  {"type": "string"},
+            "max_occurrences":  {"type": "integer", "description": "default 200, cap для скорости"},
+            "samples_per_pos":  {"type": "integer", "description": "default 3"},
+        }, "required": ["scope", "word"]},
+    }},
+    {"type": "function", "function": {
         "name": "author_attribution",
         "description": (
             "🆕 Burrows Delta stylometric attribution (Sprint 9.3). Принимает "
@@ -2788,6 +2931,7 @@ TOOL_DISPATCH = {
     "emotion_collocates":       emotion_collocates,
     "author_attribution":       author_attribution,
     "author_influences":        author_influences,
+    "word_pos_distribution":    word_pos_distribution,
     "word_etymology":           word_etymology,
     "find_words_by_etymology":  find_words_by_etymology,
     "top_authors_by":           top_authors_by,

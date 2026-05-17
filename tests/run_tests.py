@@ -55,10 +55,10 @@ def cat_A():
             d = json.loads(r.read())
             tools = d.get("tools", d) if isinstance(d, dict) else d
             n = len(tools)
-            # 24 rag_tools (v1.1) + 5 learning_tools (added book_archaic_words
-            # in v1.1.1 for example #10 'archaisms in Dracula') = 29 total.
-            return n == 29, f"got {n} tools (want 29)"
-    _safe("A3 /api/tools = 29", a3)
+            # 25 rag_tools (24 + word_pos_distribution, Sprint 9.5 polysemy
+            # hints) + 5 learning_tools = 30 total.
+            return n == 30, f"got {n} tools (want 30)"
+    _safe("A3 /api/tools = 30", a3)
 
 
 # ============================== B: tool unit ==============================
