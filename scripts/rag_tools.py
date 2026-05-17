@@ -1286,6 +1286,275 @@ def word_contexts_global(word: str, k: int = 12, snippet_chars: int = 280,
         _log(f"word_contexts_global({word_lc}) done in {time.perf_counter()-t0:.2f}s")
 
 
+# ============================ TOOL: NRC sentiment / emotion ============================
+NRC_PATH = DERIVED_DIR / "nrc_emotion_lexicon.json"
+NRC_EMOTIONS = ("anger", "anticipation", "disgust", "fear", "joy",
+                "sadness", "surprise", "trust")
+NRC_VALENCES = ("positive", "negative")
+_NRC_CACHE: dict = {"lex": None, "by_emotion": None}
+
+
+def _nrc_lexicon() -> dict:
+    """Lazy-load NRC Emotion Lexicon JSON (~200KB). Returns {word: [emotions]}.
+
+    Built once via scripts/download_nrc.py; if missing returns {} and downstream
+    tools surface an error. Cached in module memory after first call."""
+    if _NRC_CACHE["lex"] is not None:
+        return _NRC_CACHE["lex"]
+    if not NRC_PATH.exists():
+        _NRC_CACHE["lex"] = {}
+        return _NRC_CACHE["lex"]
+    try:
+        with open(NRC_PATH, encoding="utf-8") as fh:
+            _NRC_CACHE["lex"] = json.load(fh)
+    except Exception as e:
+        _log(f"NRC lexicon read failed: {e}")
+        _NRC_CACHE["lex"] = {}
+    # Build inverted index emotion -> set(words) for emotion_collocates
+    inv: dict = {e: set() for e in NRC_EMOTIONS + NRC_VALENCES}
+    for w, es in _NRC_CACHE["lex"].items():
+        for e in es:
+            if e in inv:
+                inv[e].add(w)
+    _NRC_CACHE["by_emotion"] = inv
+    return _NRC_CACHE["lex"]
+
+
+def _nrc_inverted() -> dict[str, set[str]]:
+    if _NRC_CACHE["by_emotion"] is None:
+        _nrc_lexicon()
+    return _NRC_CACHE["by_emotion"] or {}
+
+
+def book_emotion_profile(pg_id: str) -> dict:
+    """Distribution of NRC emotions across all tokens in one book.
+
+    For each token in /data/spgc/{counts}/{pg_id}_counts.txt we look up the
+    NRC lexicon. A token may carry several emotions ('terrified' → fear +
+    negative). We report:
+      - per_million for each of the 8 emotions + positive/negative
+      - share = emotion_tokens / total_emotion_bearing_tokens (normalised
+        so the 8 emotions sum to less than 1.0 — overlap with the
+        valences is large)
+      - top emotion-anchor words actually used in the book
+
+    Use for 'эмоциональный профиль Dracula', 'насколько у По много слов
+    страха', 'позитивная/негативная окраска книги X'.
+    """
+    t0 = time.perf_counter()
+    pg = pg_id.upper()
+    if not (pg.startswith("PG") or pg.startswith("U")):
+        pg = f"PG{pg}"
+    try:
+        f = _counts_path(pg)
+        if not f.exists():
+            return {"error": "counts file not found", "id": pg,
+                    "hint": "U-books: run tokenize_user_books.py after upload"}
+        lex = _nrc_lexicon()
+        if not lex:
+            return {"error": "NRC lexicon not loaded — run download_nrc.py first"}
+
+        per_emotion: Counter = Counter()
+        sample_words: dict[str, list[tuple[str, int]]] = {e: [] for e in NRC_EMOTIONS + NRC_VALENCES}
+        total_tokens = 0
+        with_emotion = 0
+        seen_for_sample: dict[str, int] = {e: 0 for e in NRC_EMOTIONS + NRC_VALENCES}
+        with open(f, encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) != 2:
+                    continue
+                w, c = parts[0], int(parts[1])
+                total_tokens += c
+                ems = lex.get(w)
+                if not ems:
+                    continue
+                with_emotion += c
+                for e in ems:
+                    per_emotion[e] += c
+                    if seen_for_sample[e] < 8:
+                        sample_words[e].append((w, c))
+                        seen_for_sample[e] += 1
+
+        df = _metadata_df()
+        meta_row = df[df["id"] == pg]
+        title  = meta_row.iloc[0]["title"]  if len(meta_row) else ""
+        author = meta_row.iloc[0]["author"] if len(meta_row) else ""
+
+        per_million = {e: round(1_000_000 * per_emotion[e] / max(1, total_tokens), 2)
+                       for e in NRC_EMOTIONS + NRC_VALENCES}
+        # Share among the 8 primary emotions (skip valences for the share — those
+        # double-count by design).
+        prim_sum = sum(per_emotion[e] for e in NRC_EMOTIONS)
+        share = {e: round(per_emotion[e] / max(1, prim_sum), 3) for e in NRC_EMOTIONS}
+
+        # Sort sample words by count desc within each emotion
+        for e in sample_words:
+            sample_words[e].sort(key=lambda kv: -kv[1])
+            sample_words[e] = sample_words[e][:8]
+
+        out = {
+            "id": pg, "title": title, "author": author,
+            "total_tokens": total_tokens,
+            "emotion_bearing_tokens": with_emotion,
+            "emotion_coverage_pct": round(100 * with_emotion / max(1, total_tokens), 2),
+            "per_million": per_million,
+            "share_among_primary_emotions": share,
+            "sample_anchor_words": sample_words,
+        }
+        _log(f"book_emotion_profile({pg}) done in {time.perf_counter()-t0:.2f}s")
+        return out
+    except Exception as e:
+        return {"error": "book_emotion_profile failed", "details": str(e)}
+
+
+_HIGH_FREQ_NEIGHBOR_DROP = {
+    # Pronouns + auxiliaries + bare prepositions + filler quantifiers that
+    # always rank high in any collocate query. STOPWORDS catches some; this
+    # adds the worst-offenders we kept seeing in 'fear collocates у По' etc.
+    "all", "any", "most", "very", "still", "more", "one", "two", "three",
+    "some", "such", "even", "ever", "never", "again", "also", "yet", "thus",
+    "upon", "into", "among", "between", "without", "within",
+    "me", "him", "us", "them", "myself", "himself", "herself",
+    "thee", "thou", "thy", "thine", "ye",
+    "said", "say", "made", "make", "make", "went", "came", "got", "gone",
+    "great", "little", "good", "own", "much", "many", "long", "old",
+    "well", "right", "left",
+}
+
+
+def emotion_collocates(scope: dict, emotion: str, window: int = 4,
+                      top: int = 25, exclude_stopwords: bool = True,
+                      max_anchors: int = 30,
+                      anchor_min_corpus_rank: int = 1000) -> dict:
+    """Words that co-occur with an emotional-anchor cluster from NRC.
+
+    For example emotion='fear' → anchor words are the NRC fear-tagged terms
+    that actually appear in the scope ('terror', 'dread', 'horror',
+    'fearful', 'panic'...). We collect ±window collocates of those anchors
+    in the scope's tokens and aggregate.
+
+    scope:
+        {'book': 'PG345'}       — one book
+        {'author': '^Poe,'}     — all books of author
+    emotion: one of NRC categories — anger / anticipation / disgust / fear /
+        joy / sadness / surprise / trust / positive / negative.
+
+    For 'слова страха у По', 'tone слов у Лавкрафта', 'joyful collocates of
+    Wodehouse'.
+    """
+    t0 = time.perf_counter()
+    e_lc = emotion.strip().lower()
+    if e_lc not in NRC_EMOTIONS and e_lc not in NRC_VALENCES:
+        return {"error": "unknown emotion",
+                "supported": list(NRC_EMOTIONS + NRC_VALENCES), "got": e_lc}
+    inv = _nrc_inverted()
+    anchors = inv.get(e_lc, set())
+    if not anchors:
+        return {"error": "NRC lexicon not loaded",
+                "hint": "scripts/download_nrc.py"}
+
+    # Drop NRC anchors that are also in the top-N most frequent corpus words.
+    # NRC over-tags generic words ('case', 'force', 'shell' as fear) — these
+    # poison the anchor pool with high-frequency-but-weak-signal words. Drop
+    # top-1000 of the corpus by default; tunable via anchor_min_corpus_rank.
+    if anchor_min_corpus_rank > 0:
+        try:
+            top_general: set = set()
+            with open(CORPUS_COUNTS, encoding="utf-8") as fh:
+                rd = csv.reader(fh); next(rd)
+                for i, (w, _c) in enumerate(rd):
+                    if i >= anchor_min_corpus_rank:
+                        break
+                    top_general.add(w)
+            anchors = {a for a in anchors if a not in top_general}
+        except Exception as e:
+            _log(f"corpus-rank filter failed: {e}")
+
+    try:
+        if isinstance(scope, dict) and scope.get("book"):
+            pg = scope["book"].upper()
+            if not (pg.startswith("PG") or pg.startswith("U")): pg = f"PG{pg}"
+            book_ids = [pg]
+            label = f"book:{pg}"
+        elif isinstance(scope, dict) and scope.get("author"):
+            sel = _select_books(scope["author"],
+                               year_from=scope.get("year_from"),
+                               year_to=scope.get("year_to"))
+            if not len(sel):
+                return {"error": "no books matched", "author_regex": scope["author"]}
+            book_ids = list(sel["id"])
+            label = f"author:{scope['author']} ({len(sel)} books)"
+        else:
+            return {"error": "bad scope; use {'book': PGid} | {'author': regex}"}
+
+        # First pass — pick the top-N anchor words that ACTUALLY appear in
+        # the scope (lots of NRC entries are obscure for any one author).
+        anchor_freq: Counter = Counter()
+        for pg in book_ids:
+            f = _counts_path(pg)
+            if not f.exists():
+                continue
+            with open(f, encoding="utf-8") as fh:
+                for line in fh:
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) != 2:
+                        continue
+                    w, c = parts[0], int(parts[1])
+                    if w in anchors:
+                        anchor_freq[w] += c
+        top_anchors = [w for w, _ in anchor_freq.most_common(max_anchors)]
+        anchor_set = set(top_anchors)
+        if not anchor_set:
+            return {"scope": label, "emotion": e_lc,
+                    "warning": "no anchor words from this emotion in scope",
+                    "anchor_pool_size": len(anchors)}
+
+        # Second pass — sliding window collocates around any anchor.
+        neighbors: Counter = Counter()
+        anchor_hits = 0
+        for pg in book_ids:
+            f = _tokens_path(pg)
+            if not f.exists():
+                continue
+            with open(f, encoding="utf-8") as fh:
+                toks = [t.strip().lower() for t in fh if t.strip()]
+            for i, t in enumerate(toks):
+                if t not in anchor_set:
+                    continue
+                anchor_hits += 1
+                lo, hi = max(0, i - window), min(len(toks), i + window + 1)
+                for j in range(lo, hi):
+                    if j == i:
+                        continue
+                    nb = toks[j]
+                    if not _is_clean_token(nb):
+                        continue
+                    if nb in anchor_set:
+                        continue
+                    if exclude_stopwords and (nb in STOPWORDS or
+                                              nb in _HIGH_FREQ_NEIGHBOR_DROP):
+                        continue
+                    neighbors[nb] += 1
+
+        out = {
+            "scope": label,
+            "emotion": e_lc,
+            "anchor_pool_in_lexicon": len(anchors),
+            "anchors_in_scope": [{"word": w, "count": c}
+                                 for w, c in anchor_freq.most_common(15)],
+            "total_anchor_hits": anchor_hits,
+            "top_collocates": [{"word": w, "count": c}
+                               for w, c in neighbors.most_common(top)],
+        }
+        _log(f"emotion_collocates({e_lc}, {label}) done in "
+             f"{time.perf_counter()-t0:.2f}s, anchors={len(anchor_set)}, "
+             f"hits={anchor_hits}")
+        return out
+    except Exception as e:
+        return {"error": "emotion_collocates failed", "details": str(e)}
+
+
 # ============================ TOOL: find_book ============================
 def find_book(title: str, author: str = "", top: int = 5,
               lang: str = "en") -> dict:
@@ -2137,6 +2406,39 @@ TOOLS_SPEC += [
         }, "required": ["author_regex"]},
     }},
     {"type": "function", "function": {
+        "name": "book_emotion_profile",
+        "description": (
+            "🆕 Эмоциональный профиль книги через NRC Emotion Lexicon (Sprint 9.4). "
+            "Возвращает per-million частоту 8 эмоций (anger / anticipation / disgust / fear / "
+            "joy / sadness / surprise / trust) + 2 valences (positive / negative), плюс "
+            "share среди 8 primary emotions, и top anchor-words для каждой. "
+            "Используй для «эмоциональный профиль Dracula», «насколько у По много слов "
+            "страха», «позитивная/негативная окраска книги X»."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "pg_id": {"type": "string", "description": "PG/U id"},
+        }, "required": ["pg_id"]},
+    }},
+    {"type": "function", "function": {
+        "name": "emotion_collocates",
+        "description": (
+            "🆕 Collocates вокруг слов-якорей конкретной эмоции из NRC Lexicon. "
+            "Для emotion='fear' anchor-слова это NRC fear-tagged terms которые ACTUALLY "
+            "appear в scope (terror/dread/horror/fearful/panic...). Возвращает ±window "
+            "neighbors этих anchor'ов, агрегированные. "
+            "Используй для «слова страха у По», «контекст радости у Wodehouse», "
+            "«мрачная/тревожная лексика автора»."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "scope":   {"type": "object", "description":
+                "{'book': PGid} | {'author': regex, [year_from, year_to]}"},
+            "emotion": {"type": "string", "description":
+                "anger | anticipation | disgust | fear | joy | sadness | surprise | trust | positive | negative"},
+            "window":  {"type": "integer", "description": "default 4"},
+            "top":     {"type": "integer", "description": "default 25"},
+        }, "required": ["scope", "emotion"]},
+    }},
+    {"type": "function", "function": {
         "name": "find_book",
         "description": (
             "🆕 Найти книгу по названию (substring/regex), optional author hint. "
@@ -2206,6 +2508,8 @@ TOOL_DISPATCH = {
     "word_freq_timeline":       word_freq_timeline,
     "word_contexts_global":     word_contexts_global,
     "find_book":                find_book,
+    "book_emotion_profile":     book_emotion_profile,
+    "emotion_collocates":       emotion_collocates,
     "word_etymology":           word_etymology,
     "find_words_by_etymology":  find_words_by_etymology,
     "top_authors_by":           top_authors_by,
