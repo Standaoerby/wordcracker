@@ -70,8 +70,18 @@ class PlanBookIntents(unittest.TestCase):
         self.assertEqual(p.steps[0].tool, "affinity_by_book")
         self.assertEqual(p.steps[0].args["pg_id"], "PG2554")
 
-    def test_book_vocab_unknown_title(self):
+    def test_book_vocab_unknown_title_refused(self):
+        # «1984» is now in KNOWN_BOOKS as a copyright placeholder → planner
+        # returns a graceful out_of_scope refusal rather than chaining
+        # find_book → affinity_by_book that would silently fail.
         _, _, p = _full('Слова в книге «1984» используются чаще обычного.')
+        self.assertEqual(p.intent, "out_of_scope")
+        self.assertIsNotNone(p.out_of_scope_reason)
+        self.assertIn("copyright", p.out_of_scope_reason.lower())
+
+    def test_book_vocab_truly_unknown_title_chains_find_book(self):
+        # A title not in KNOWN_BOOKS still goes through find_book.
+        _, _, p = _full('Слова в книге «Some Obscure Made Up Title» чаще обычного.')
         self.assertEqual(p.intent, "book_vocab")
         self.assertEqual(p.steps[0].tool, "find_book")
         self.assertEqual(p.steps[1].tool, "affinity_by_book")

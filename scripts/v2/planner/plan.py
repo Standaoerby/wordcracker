@@ -66,6 +66,37 @@ def _need_book(e: Entities) -> QueryPlan:
     )
 
 
+def _copyright_refusal_if_book_under_copyright(e: Entities) -> QueryPlan | None:
+    """If the user named a known but unavailable book (Tolkien / Hemingway /
+    Orwell / etc. — recorded in KNOWN_BOOKS with empty PG id), return an
+    `out_of_scope` plan with a friendly explanation instead of letting the
+    chain run and silently fail with a confusing tool error.
+
+    Returns None when this isn't the situation."""
+    if e.book_title and not e.book_id:
+        from scripts.v2.planner.entities import KNOWN_BOOKS
+        key = e.book_title.lower().replace("’", "'").replace("‘", "'")
+        if key in KNOWN_BOOKS:
+            _pg, canonical = KNOWN_BOOKS[key]
+            if not _pg:
+                return QueryPlan(
+                    intent="out_of_scope", entities=e, steps=[],
+                    out_of_scope_reason=(
+                        f"«{canonical}» отсутствует в нашем корпусе — "
+                        f"книга всё ещё под защитой copyright и недоступна "
+                        f"в Project Gutenberg. Корпус покрывает только "
+                        f"public-domain тексты (в основном до 1929 года US "
+                        f"и часть UK до ~1973). "
+                        f"Могу предложить ближайший аналог из тех, что есть: "
+                        f"например, для Tolkien — Уильям Моррис «The Well at "
+                        f"the World's End», для Hemingway — Mark Twain, для "
+                        f"Orwell — Джозеф Конрад «Heart of Darkness»."
+                    ),
+                    explain=f"book under copyright: {canonical}",
+                )
+    return None
+
+
 def _need_word(e: Entities) -> QueryPlan:
     return QueryPlan(
         intent="clarify", entities=e, steps=[],
@@ -181,6 +212,25 @@ def _plan_top_authors(e: Entities) -> QueryPlan:
     )
 
 
+def _plan_author_top_words(e: Entities) -> QueryPlan:
+    """«самое частотное слово автора» / «топ слов X» — raw unigram counts,
+    not affinity. Routes to top_ngrams_by_author(n=1) so the user gets the
+    actual zipf head (mostly stopwords filtered) for a quick stylistic
+    fingerprint that doesn't require comparison to the rest of the corpus.
+    """
+    if not e.author_regex:
+        return _need_author(e)
+    return QueryPlan(
+        intent="author_top_words", entities=e,
+        steps=[PlanStep(tool="top_ngrams_by_author",
+                        args={"author_regex": e.author_regex,
+                              "n": 1, "top": e.top_n or 20,
+                              "pos_filter": e.pos_filter})],
+        expected_cost="medium",
+        explain=f"top_ngrams_by_author({e.author_regex}, n=1) — raw frequency",
+    )
+
+
 def _plan_author_vocab(e: Entities) -> QueryPlan:
     if not e.author_regex:
         return _need_author(e)
@@ -277,6 +327,9 @@ def _plan_author_influences(e: Entities) -> QueryPlan:
 
 
 def _plan_book_vocab(e: Entities) -> QueryPlan:
+    refusal = _copyright_refusal_if_book_under_copyright(e)
+    if refusal:
+        return refusal
     if e.book_id:
         return QueryPlan(
             intent="book_vocab", entities=e,
@@ -310,6 +363,9 @@ def _plan_book_vocab(e: Entities) -> QueryPlan:
 
 
 def _plan_book_readability(e: Entities) -> QueryPlan:
+    refusal = _copyright_refusal_if_book_under_copyright(e)
+    if refusal:
+        return refusal
     if e.book_id:
         return QueryPlan(
             intent="book_readability", entities=e,
@@ -334,6 +390,9 @@ def _plan_book_readability(e: Entities) -> QueryPlan:
 
 
 def _plan_book_archaic(e: Entities) -> QueryPlan:
+    refusal = _copyright_refusal_if_book_under_copyright(e)
+    if refusal:
+        return refusal
     if e.book_id:
         return QueryPlan(
             intent="book_archaic", entities=e,
@@ -358,6 +417,9 @@ def _plan_book_archaic(e: Entities) -> QueryPlan:
 
 
 def _plan_book_emotion(e: Entities) -> QueryPlan:
+    refusal = _copyright_refusal_if_book_under_copyright(e)
+    if refusal:
+        return refusal
     if e.book_id:
         return QueryPlan(
             intent="book_emotion", entities=e,
@@ -536,6 +598,9 @@ def _plan_word_emotion(e: Entities) -> QueryPlan:
 
 
 def _plan_learning(e: Entities) -> QueryPlan:
+    refusal = _copyright_refusal_if_book_under_copyright(e)
+    if refusal:
+        return refusal
     scope = _scope_from(e)
     if scope == "all_corpus":
         return QueryPlan(
@@ -786,6 +851,7 @@ PLAN_BUILDERS = {
     "corpus_meta":          _plan_corpus_meta,
     "author_metadata":      _plan_author_metadata,
     "author_vocab":         _plan_author_vocab,
+    "author_top_words":     _plan_author_top_words,
     "author_compare":       _plan_author_compare,
     "author_attribution":   _plan_author_attribution,
     "author_influences":    _plan_author_influences,

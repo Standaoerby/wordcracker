@@ -20,12 +20,17 @@ from typing import Literal
 # are the `^Surname,` regex used by the v1 metadata layer. Expand as needed —
 # this list covers all 40 example queries plus the popular cases from chat.
 AUTHOR_ALIASES: dict[str, str] = {
-    # Russian classics (English translations live in the SPGC corpus)
+    # Russian classics (English translations live in the SPGC corpus).
+    # Stem-forms cover Russian cases: "Достоевского/Достоевскому/Достоевским"
+    # all match "достоевск" prefix.
+    "достоевск":        "^Dostoyevsky,",
     "достоевский":      "^Dostoyevsky,",
+    "толсто":           "^Tolstoy,",
     "толстой":          "^Tolstoy,",
     "чехов":            "^Chekhov,",
     "тургенев":         "^Turgenev,",
     "пушкин":           "^Pushkin,",
+    "гогол":            "^Gogol,",
     "гоголь":           "^Gogol,",
 
     # English / American
@@ -74,6 +79,36 @@ AUTHOR_ALIASES: dict[str, str] = {
     "twain":            "^Twain,",
     "стокер":           "^Stoker,",
     "stoker":           "^Stoker,",
+    "свифт":            "^Swift,",
+    "свифта":           "^Swift,",   # stem-form for Russian genitive Свифта
+    "джонатан свифт":   "^Swift,",
+    "swift":            "^Swift,",
+    "теккерей":         "^Thackeray,",
+    "теккерея":         "^Thackeray,",
+    "thackeray":        "^Thackeray,",
+    "моррис":           "^Morris,",
+    "морриса":          "^Morris,",
+    "morris":           "^Morris,",
+    "уильям моррис":    "^Morris,",
+    "стивенсон":        "^Stevenson,",  # (already had via stevenson, add cyrillic)
+    "конрад":           "^Conrad,",
+    "конрада":          "^Conrad,",
+    "уэллс":            "^Wells,",
+    "h. g. wells":      "^Wells,",
+    "уайлд":            "^Wilde,",
+    "уайлда":           "^Wilde,",
+    "морриса":          "^Morris,",
+    "льюис кэрролл":    "^Carroll,",
+    "кэрролл":          "^Carroll,",
+    "carroll":          "^Carroll,",
+    "шелли":            "^Shelley,",
+    "shelley":          "^Shelley,",
+    "льюис":            "^Lewis,",   # M.G. Lewis for «The Monk»
+    "lewis":            "^Lewis,",
+    "брёнте":           "^Bront",     # Brontë sisters — without trailing ,
+    "бронте":           "^Bront",
+    "bronte":           "^Bront",
+    "brontë":           "^Bront",
 }
 
 

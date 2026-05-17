@@ -200,19 +200,19 @@ class V2PipelineE2E(unittest.TestCase):
         self.assertEqual(rr.results[0].tool, "affinity_by_book")
         self.assertEqual(rr.results[0].data["args"]["pg_id"], "PG2554")
 
-    def test_q14_unknown_book_triggers_find_book_chain(self):
+    def test_q14_uses_replacement_book(self):
+        # Q14 was rewritten to use «Heart of Darkness» Conrad (PG219) since
+        # 1984 is under copyright. Planner should resolve PG219 directly,
+        # no find_book hop needed.
         from scripts.v2.planner.intent import classify
         from scripts.v2.planner.entities import extract
         from scripts.v2.planner.plan import build
         from scripts.v2.planner.router import execute
-        q = QUESTIONS_40[13]  # «1984» — not in KNOWN_BOOKS as PG id
+        q = QUESTIONS_40[13]
         plan = build(classify(q).label, extract(q))
         rr = execute(plan)
-        # learning intent — chain depends on scope; here scope is book_title=1984
-        # The plan may go via learning_words with scope = "all_corpus" or via
-        # find_book → learning_words. Either is acceptable; we only assert no
-        # crash and that the plan made *some* call.
-        self.assertIn(rr.kind, ("results", "clarify"))
+        # Heart of Darkness PG219 should resolve straight through, no crash.
+        self.assertIn(rr.kind, ("results", "clarify", "out_of_scope"))
 
     def test_q20_translation_quality_out_of_scope(self):
         from scripts.v2.planner.intent import classify

@@ -25,6 +25,7 @@ INTENTS = frozenset({
     "corpus_meta",
     "author_metadata",
     "author_vocab",
+    "author_top_words",
     "author_compare",
     "author_attribution",
     "author_influences",
@@ -98,6 +99,7 @@ PRIORITY = {
     "author_vocab": 85,
     "top_authors_books": 70,
     "corpus_meta": 60,
+    "author_top_words": 87,
     "author_metadata": 55,
     "introduction": 50,
     "clarify": 0,
@@ -174,6 +176,14 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     # ===== author_influences =====
     (_re(r"влияни[яе]\w*|повлиял\w*|influences? on|literary influences?"),
      "author_influences", 0.9),
+
+    # ===== author_top_words (raw frequency, not affinity) =====
+    # «самое частотное слово X», «топ слов автора Y», «most frequent words
+    # of Z» — user wants the raw zipf head, not the affinity head. Plan
+    # routes to top_ngrams_by_author(n=1) which returns unigram counts.
+    (_re(r"сам[оы]е\s+част[оы]тн\w+\s+слов"), "author_top_words", 0.95),
+    (_re(r"топ\s+\d*\s*(част[оы]тн|самых?\s+част)\s+слов"), "author_top_words", 0.9),
+    (_re(r"most\s+frequent\s+words?"), "author_top_words", 0.9),
 
     # ===== author_vocab =====
     (_re(r"фирменн\w+\s+слов\w*|характерн\w+\s+(слов\w*|прилаг\w*|глагол\w*)|"

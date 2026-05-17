@@ -26,6 +26,7 @@ from typing import Iterator
 import requests
 
 from scripts.v2.planner import entities as ent_mod
+from scripts.v2.planner import history as history_mod
 from scripts.v2.planner import intent as int_mod
 from scripts.v2.planner import plan as plan_mod
 from scripts.v2.planner import router as router_mod
@@ -120,6 +121,10 @@ def ask(
     t0 = time.perf_counter()
     intent = int_mod.classify(question)
     entities = ent_mod.extract(question)
+    # Multi-turn backfill: «приведи примеры такого», «эти слова», «у этого
+    # автора» reuse the last turn's author/book/word so the planner doesn't
+    # clarify on every follow-up.
+    entities = history_mod.merge_with_history(entities, history, question)
     plan = plan_mod.build(intent.label, entities)
 
     if plan.needs_clarify:
@@ -194,6 +199,7 @@ def ask_stream(
     t0 = time.perf_counter()
     intent = int_mod.classify(question)
     entities = ent_mod.extract(question)
+    entities = history_mod.merge_with_history(entities, history, question)
     plan = plan_mod.build(intent.label, entities)
 
     yield {"event": "intent", "label": intent.label,
