@@ -16,6 +16,8 @@ ExecStartPre=/usr/bin/docker compose up -d gutenberg-lab
 # and keep port 8891 bound. Reap any orphan before binding the port. `-`
 # prefix swallows the exit code if pkill finds nothing.
 ExecStartPre=-/usr/bin/docker compose exec -T gutenberg-lab pkill -9 -f /workspace/scripts/admin_server.py
+# Defensive pyc purge (see chat unit for context).
+ExecStartPre=-/usr/bin/docker compose exec -T gutenberg-lab find /workspace/scripts/__pycache__ -name '*.pyc' -delete
 ExecStart=/usr/bin/docker compose exec -T gutenberg-lab python -u /workspace/scripts/admin_server.py --port 8891
 Restart=on-failure
 RestartSec=15

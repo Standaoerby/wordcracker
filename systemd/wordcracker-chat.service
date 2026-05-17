@@ -18,6 +18,11 @@ ExecStartPre=/usr/bin/docker compose up -d gutenberg-lab
 # and keep port 8890 bound. Reap any orphan before binding the port. `-`
 # prefix swallows the exit code if pkill finds nothing.
 ExecStartPre=-/usr/bin/docker compose exec -T gutenberg-lab pkill -9 -f /workspace/scripts/chat_server.py
+# Purge stale .pyc files before loading rag_tools — fresh scp of .py won't
+# beat an old .pyc if cwd mtime gets touched unexpectedly. Defensive only;
+# Python normally invalidates pyc by source mtime, but we hit it once during
+# the v1.0f deploy where the new find_book code was masked.
+ExecStartPre=-/usr/bin/docker compose exec -T gutenberg-lab find /workspace/scripts/__pycache__ -name '*.pyc' -delete
 # Run the chat server in the foreground, attached to systemd. SIGTERM from
 # `systemctl stop` propagates to the python process via docker exec.
 ExecStart=/usr/bin/docker compose exec -T -e ASSISTANT_NAME=Словоёб gutenberg-lab python -u /workspace/scripts/chat_server.py --port 8890

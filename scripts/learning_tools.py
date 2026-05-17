@@ -85,12 +85,91 @@ def _save_word_dict(d: dict) -> None:
                               encoding="utf-8")
 
 
+# ============================ helper: per-book NER cache ============================
+_BOOK_PROPN_DIR = Path("/workspace/spgc/derived/book_propn_cache")
+
+# Entity types from spaCy en_core_web_sm we treat as proper nouns. Some
+# (DATE, MONEY, QUANTITY, CARDINAL, ORDINAL, PERCENT) are intentionally
+# excluded — they aren't names, even though spaCy tags them.
+_PROPN_ENT_LABELS = {"PERSON", "ORG", "GPE", "LOC", "FAC", "NORP",
+                     "PRODUCT", "WORK_OF_ART", "LAW", "EVENT", "LANGUAGE"}
+
+_GUTENBERG_HDR = re.compile(
+    r"\*\*\*\s*START\s+OF\s+(?:THE|THIS)\s+PROJECT\s+GUTENBERG\s+EBOOK[^*]*\*\*\*",
+    re.IGNORECASE)
+_GUTENBERG_FTR = re.compile(
+    r"\*\*\*\s*END\s+OF\s+(?:THE|THIS)\s+PROJECT\s+GUTENBERG\s+EBOOK[^*]*\*\*\*",
+    re.IGNORECASE)
+
+
+def _book_propn_set(pg_id: str, sample_chars: int = 400_000) -> set[str]:
+    """Set of lowercased tokens spaCy NER tagged as PERSON / GPE / LOC / ... in
+    the book's raw text. Cached at /data/spgc/derived/book_propn_cache/<id>.json
+    so the cost is paid once per book ever.
+
+    For Pride and Prejudice this turns the affinity_by_book top from
+        longbourn / darcy / bennet / lizzy / gracechurch / hertfordshire
+    into actual Austen lexemes
+        civility / elopement / discomposure / apologising / perverseness.
+
+    Sample 400k chars (~70-100k tokens) — enough for NER to see every named
+    entity in any plausibly-sized novel. spaCy en_core_web_sm CPU pass:
+    ~3-10s per book. Result is a flat set of lowercased token strings.
+    """
+    pg = pg_id.upper()
+    cache_path = _BOOK_PROPN_DIR / f"{pg}.json"
+    if cache_path.exists():
+        try:
+            with open(cache_path, encoding="utf-8") as fh:
+                return set(json.load(fh))
+        except Exception as e:
+            _log(f"propn cache read failed for {pg}: {e}")
+
+    raw = Path(f"/workspace/raw_text/{pg.lower()}.txt")
+    if not raw.exists():
+        return set()
+    try:
+        text = raw.read_text(encoding="utf-8", errors="replace")
+        m = _GUTENBERG_HDR.search(text)
+        if m: text = text[m.end():]
+        m = _GUTENBERG_FTR.search(text)
+        if m: text = text[:m.start()]
+        text = text[:sample_chars]
+
+        import spacy
+        try:
+            nlp = spacy.load("en_core_web_sm", disable=["lemmatizer", "tagger", "parser", "attribute_ruler"])
+        except OSError:
+            return set()
+        doc = nlp(text)
+        propn = set()
+        for ent in doc.ents:
+            if ent.label_ not in _PROPN_ENT_LABELS:
+                continue
+            for tok in ent.text.split():
+                t = re.sub(r"[^A-Za-z']+", "", tok).lower()
+                if len(t) >= 3:
+                    propn.add(t)
+
+        _BOOK_PROPN_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(cache_path, "w", encoding="utf-8") as fh:
+                json.dump(sorted(propn), fh, ensure_ascii=False)
+        except Exception as e:
+            _log(f"propn cache write failed for {pg}: {e}")
+        return propn
+    except Exception as e:
+        _log(f"_book_propn_set({pg}) failed: {e}")
+        return set()
+
+
 # ============================ TOOL: affinity_by_book ============================
 def affinity_by_book(pg_id: str, top: int = 50,
                      min_author_count: int = 3,
                      min_corpus_count: int = 200,
                      pos_filter: list[str] | None = None,
-                     exclude_proper_nouns: bool = True) -> dict:
+                     exclude_proper_nouns: bool = True,
+                     use_ner: bool = True) -> dict:
     """Affinity for a single book vs the global corpus.
 
     min_corpus_count: drop words with global corpus_count below this. Default 200
@@ -139,6 +218,8 @@ def affinity_by_book(pg_id: str, top: int = 50,
         # proper noun by previous enrich_word calls is poison for stylistic
         # markers too. This catches book-specific names spaCy POS doesn't catch
         # on lowercased single-token input (longbourn/darcy/bennet etc.).
+        # Plus the per-book NER pass (use_ner=True, default) — this is what
+        # actually shoots character/place names dead for this specific book.
         known_proper: set[str] = set()
         if exclude_proper_nouns or pos_filter:
             try:
@@ -148,6 +229,8 @@ def affinity_by_book(pg_id: str, top: int = 50,
                         known_proper.add(key.split("|", 1)[0])
             except Exception as e:
                 _log(f"failed to load proper-noun cache: {e}")
+            if use_ner:
+                known_proper |= _book_propn_set(pg_id)
 
         rows = []
         for w, bc in book.items():
