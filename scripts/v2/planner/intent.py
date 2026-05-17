@@ -189,6 +189,10 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"фирменн\w+\s+слов\w*|характерн\w+\s+(слов\w*|прилаг\w*|глагол\w*)|"
          r"signature words|маркер\w*\s+(стиля|автор)|"
          r"distinctive (vocabulary|words)"), "author_vocab", 0.85),
+    # «Слова Толкина из LOTR», «лексика Свифта», — generic vocab queries
+    # that name an author / book without a "characteristic" keyword.
+    (_re(r"^\s*слова\s+[A-ZА-Я]\w+"), "author_vocab", 0.65),
+    (_re(r"\bлексик[аиу]\s+[A-ZА-Я]\w+"), "author_vocab", 0.7),
     (_re(r"заметно\s+чаще|непропорционально|disproportionately|"
          r"встречаются\s+заметно\s+(чаще|реже)"), "author_vocab", 0.8),
     (_re(r"чаще\s+всего\s+использует|больше\s+всего\s+использует|"

@@ -74,7 +74,8 @@ def _last_word_list_from_assistant(history: list[dict]) -> list[str]:
         content = msg.get("content") or ""
         if not content:
             continue
-        # Grab tokens inside **bold**, `code`, "quotes", or bracketed [ALL CAPS]
+        # Grab tokens inside **bold**, `code`, [ALL CAPS], or in
+        # comma-separated lowercase lists ("wicket, blighter, hullo").
         candidates = re.findall(
             r"\*\*([a-zA-Z-]{3,30})\*\*"
             r"|`([a-zA-Z-]{3,30})`"
@@ -86,6 +87,15 @@ def _last_word_list_from_assistant(history: list[dict]) -> list[str]:
             for g in tup:
                 if g:
                     words.append(g.lower())
+        # Plain comma-separated list (assistant's compact summary form).
+        # Only consider lines that look like a list: ≥3 comma-separated
+        # tokens, each 3-20 lowercase letters.
+        for line in content.splitlines():
+            tokens = [t.strip().lower() for t in line.split(",")]
+            simple = [t for t in tokens
+                      if 3 <= len(t) <= 20 and re.fullmatch(r"[a-zа-я-]+", t)]
+            if len(simple) >= 3:
+                words.extend(simple)
         # Dedupe while preserving order, cap at 30
         seen = set()
         out = []
@@ -153,6 +163,12 @@ def merge_with_history(current: Entities, history: list[dict] | None,
         backfilled.book_title = prior.book_title
     if backfilled.word is None and prior.word:
         backfilled.word = prior.word
+    # If still no word — look at the last assistant message for a likely
+    # vocabulary entry («the first one» / «эти слова» style follow-ups).
+    if backfilled.word is None:
+        words = _last_word_list_from_assistant(history)
+        if words:
+            backfilled.word = words[0]
     if backfilled.year_from is None and prior.year_from:
         backfilled.year_from = prior.year_from
     if backfilled.year_to is None and prior.year_to:
