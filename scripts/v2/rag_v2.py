@@ -125,6 +125,15 @@ def ask(
     # автора» reuse the last turn's author/book/word so the planner doesn't
     # clarify on every follow-up.
     entities = history_mod.merge_with_history(entities, history, question)
+    # Follow-up intent inference: if the user's phrasing implies a specific
+    # intent (e.g. «приведи примеры» → word_contexts), override clarify so
+    # the planner can route to a real tool. Only kicks in for clarify-class
+    # responses so explicit intents still win.
+    if intent.label == "clarify":
+        inferred = history_mod.infer_followup_intent(question)
+        if inferred:
+            intent = int_mod.IntentMatch(label=inferred, confidence=0.75,
+                                         matched_pattern="followup-inferred")
     plan = plan_mod.build(intent.label, entities)
 
     if plan.needs_clarify:
@@ -200,6 +209,11 @@ def ask_stream(
     intent = int_mod.classify(question)
     entities = ent_mod.extract(question)
     entities = history_mod.merge_with_history(entities, history, question)
+    if intent.label == "clarify":
+        inferred = history_mod.infer_followup_intent(question)
+        if inferred:
+            intent = int_mod.IntentMatch(label=inferred, confidence=0.75,
+                                         matched_pattern="followup-inferred")
     plan = plan_mod.build(intent.label, entities)
 
     yield {"event": "intent", "label": intent.label,

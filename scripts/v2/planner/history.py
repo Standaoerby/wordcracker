@@ -1,4 +1,4 @@
-"""History-aware entity backfill — fill missing entities from prior turns.
+"""History-aware entity backfill + intent inference for follow-up turns.
 
 When the user says «приведи три примера такого использования» or «у этого
 автора есть ещё?», we need to remember:
@@ -99,6 +99,36 @@ def _last_word_list_from_assistant(history: list[dict]) -> list[str]:
         if out:
             return out
     return []
+
+
+# Map follow-up phrasing → inferred intent. The user is responding to a
+# prior assistant message and the literal trigger usually maps cleanly:
+#   «приведи примеры использования» → word_contexts
+#   «расскажи подробнее про эти слова» → word_contexts
+#   «ещё/еще N слов» → re-run author_vocab/learning with bigger top
+#   «more examples» → word_contexts
+_FOLLOWUP_INTENT_RULES = [
+    (re.compile(r"приведи (примеры|три пример|пример)|"
+                r"more examples?|"
+                r"\bдай примеры?\b|"
+                r"в контексте", re.IGNORECASE), "word_contexts"),
+    (re.compile(r"расскажи (подробнее|больше)|"
+                r"что значит\b|"
+                r"что означа\w+", re.IGNORECASE), "word_contexts"),
+    (re.compile(r"ещё (\d+|больше)|еще (\d+|больше)|"
+                r"give me (more|another)", re.IGNORECASE), "author_vocab"),
+]
+
+
+def infer_followup_intent(text: str) -> str | None:
+    """If `text` looks like a follow-up with implicit intent, return it.
+    Otherwise None — caller falls back to the regular intent classifier."""
+    if not _looks_like_followup(text):
+        return None
+    for pat, intent in _FOLLOWUP_INTENT_RULES:
+        if pat.search(text):
+            return intent
+    return None
 
 
 def merge_with_history(current: Entities, history: list[dict] | None,

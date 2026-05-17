@@ -232,6 +232,9 @@ def _plan_author_top_words(e: Entities) -> QueryPlan:
 
 
 def _plan_author_vocab(e: Entities) -> QueryPlan:
+    refusal = _copyright_refusal_if_book_under_copyright(e)
+    if refusal:
+        return refusal
     if not e.author_regex:
         return _need_author(e)
     return QueryPlan(
@@ -548,6 +551,9 @@ def _plan_word_pos(e: Entities) -> QueryPlan:
 
 
 def _plan_word_etymology(e: Entities) -> QueryPlan:
+    refusal = _copyright_refusal_if_book_under_copyright(e)
+    if refusal:
+        return refusal
     if e.author_regex and e.etymology_family:
         scope = {"author": e.author_regex}
         # Heavy tool — each candidate word triggers a Wiktionary HTTP call.
