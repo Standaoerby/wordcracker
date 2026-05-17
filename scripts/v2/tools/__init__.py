@@ -8,3 +8,4 @@ from scripts.v2.tools.words import (  # noqa: F401
     contexts, collocates, timeline, emotion, pos, etymology,
 )
 from scripts.v2.tools.learning import learning_words  # noqa: F401
+from scripts.v2.tools.search import lexical, hybrid  # noqa: F401
