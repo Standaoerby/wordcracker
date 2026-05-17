@@ -274,13 +274,18 @@ def _find_authors(text: str) -> list[tuple[str, str]]:
 
 # ---------- book / title ----------
 
-# Titles can appear inside any of these quote pairs:
-#   «...»  French / Russian guillemets (Stan's earlier vault style)
+# Titles can appear inside any of these quote pairs. We match each pair
+# explicitly so that inside-title characters (Alice'S apostrophe U+2019)
+# don't close the outer span:
+#   «...»  guillemets
 #   "..."  ASCII straight double
-#   "..."  Curly double (Stan's latest update from Obsidian — U+201C/U+201D)
-#   '...'  Curly single — used occasionally for nested titles
+#   "..."  Curly double (U+201C / U+201D — Stan's vault style)
+#   '...'  Curly single
 _BOOK_QUOTED = re.compile(
-    "[«\"“‘]([^«»\"“”‘’]{1,80})[»\"”’]"
+    "«([^»]{1,80})»"
+    "|\"([^\"]{1,80})\""
+    "|“([^”]{1,80})”"
+    "|‘([^’]{1,80})’"
 )
 _BOOK_PG_ID = re.compile(r"\b(PG\d{1,7}|U\d{1,7})\b", re.IGNORECASE)
 
@@ -301,8 +306,13 @@ def _find_book(text: str) -> tuple[str | None, str | None]:
     if m:
         return m.group(1).upper(), None
     for tm in _BOOK_QUOTED.finditer(text):
-        title = tm.group(1).strip()
-        key = title.lower()
+        # Each pair contributes its own capture group; pick the non-None one.
+        title = next((g for g in tm.groups() if g), "").strip()
+        if not title:
+            continue
+        # Normalize curly apostrophes to ASCII so the KNOWN_BOOKS dict lookup
+        # works regardless of which quote style the user pasted in.
+        key = title.lower().replace("’", "'").replace("‘", "'")
         if key in KNOWN_BOOKS:
             pg, _ = KNOWN_BOOKS[key]
             if pg.startswith("PG") and pg != "PG":
@@ -328,8 +338,14 @@ def _find_book(text: str) -> tuple[str | None, str | None]:
 # ---------- word ----------
 
 # Quoted single words like "fog", «ajar», 'blue', "fog" (curly).
+# Use explicit pairs so an internal apostrophe (U+2019 in Alice'S) doesn't
+# accidentally close the span.
 _WORD_QUOTED = re.compile(
-    "[\"'«“‘]([a-zA-Zа-яёА-ЯЁ-]{2,30})[\"'»”’]"
+    "«([a-zA-Zа-яёА-ЯЁ-]{2,30})»"
+    "|\"([a-zA-Zа-яёА-ЯЁ-]{2,30})\""
+    "|“([a-zA-Zа-яёА-ЯЁ-]{2,30})”"
+    "|‘([a-zA-Zа-яёА-ЯЁ-]{2,30})’"
+    "|'([a-zA-Zа-яёА-ЯЁ-]{2,30})'"
 )
 # Match only "слово X" (singular), not "слова X" (plural — usually a question
 # phrasing like "слова чаще всего..."). For an unquoted bare word after the
@@ -355,7 +371,10 @@ _WORD_STOPWORDS = {
 def _find_word(text: str) -> str | None:
     m = _WORD_QUOTED.search(text)
     if m:
-        return m.group(1).lower()
+        # Pick the first non-None capture group across all quote-pair alternatives.
+        word = next((g for g in m.groups() if g), None)
+        if word:
+            return word.lower()
     m = _WORD_AFTER_KEY.search(text)
     if m:
         w = m.group(1).lower()
