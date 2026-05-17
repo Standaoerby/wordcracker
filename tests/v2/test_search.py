@@ -161,5 +161,82 @@ class HybridRRFMerge(unittest.TestCase):
         self.assertGreater(score_b, score_d)
 
 
+class HybridIntegration(unittest.TestCase):
+    """End-to-end hybrid with both retrievers mocked.
+
+    Verifies the merge correctly handles either retriever failing — semantic
+    or lexical alone should still produce useful output."""
+
+    def setUp(self):
+        import types
+        from scripts.v2 import legacy_dispatch
+        from scripts.v2.tool_registry import REGISTRY, ToolSpec
+        from scripts.v2._types import Coverage, ToolResult
+
+        # Snapshot REGISTRY, ensure tools loaded so the spec class exists.
+        # If a prior test cleared REGISTRY, re-import v2.tools to repopulate.
+        if "lexical_search" not in REGISTRY:
+            for mod in list(sys.modules):
+                if mod.startswith("scripts.v2.tools"):
+                    del sys.modules[mod]
+            import scripts.v2.tools  # noqa: F401
+        self._snap = dict(REGISTRY)
+
+        # Replace lexical_search with a mock that returns 3 PG ids.
+        def _mock_lex(query, k=10, snippet_chars=200):
+            return ToolResult.success(
+                tool="lexical_search",
+                data={"query": query, "matches": [
+                    {"pg_id": "PG1", "score": -5.1, "snippet": "[ajar] door"},
+                    {"pg_id": "PG2", "score": -4.5, "snippet": "door [ajar] there"},
+                    {"pg_id": "PG3", "score": -4.0, "snippet": "[ajar]"}]},
+                coverage=Coverage(books_matched=3, books_total=-1),
+            )
+        REGISTRY["lexical_search"] = ToolSpec(
+            name="lexical_search",
+            fn=_mock_lex,
+            category="search",
+            description="mock",
+            input_schema={"type": "object"},
+            cost="cheap",
+            cacheable=False,
+        )
+
+        # Mock semantic via legacy_dispatch
+        m = types.ModuleType("scripts.rag_query")
+        m.TOOL_DISPATCH = {
+            "semantic_search": lambda **kw: {
+                "results": [
+                    {"metadata": {"pg_id": "PG2", "title": "T2", "author": "A2"}, "text": "near"},
+                    {"metadata": {"pg_id": "PG4", "title": "T4", "author": "A4"}, "text": "haze"},
+                ]
+            }
+        }
+        sys.modules["scripts.rag_query"] = m
+        legacy_dispatch._LEGACY_DISPATCH_CACHE.clear()
+        legacy_dispatch._LEGACY_DISPATCH_CACHE.update({"dispatch": None, "loaded": False})
+
+    def tearDown(self):
+        from scripts.v2.tool_registry import REGISTRY
+        REGISTRY.clear(); REGISTRY.update(self._snap)
+        sys.modules.pop("scripts.rag_query", None)
+
+    def test_both_retrievers_merge(self):
+        from scripts.v2.tools.search.hybrid import hybrid_search
+        r = hybrid_search("ajar", k=10, per_retriever=10)
+        self.assertTrue(r.ok)
+        ids = [m["pg_id"] for m in r.data["matches"]]
+        # PG2 appears in both → should rank #1
+        self.assertEqual(ids[0], "PG2")
+        # All 4 unique ids should appear
+        self.assertEqual(set(ids), {"PG1", "PG2", "PG3", "PG4"})
+        self.assertEqual(r.data["lexical_n"], 3)
+        self.assertEqual(r.data["semantic_n"], 2)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
