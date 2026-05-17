@@ -25,6 +25,7 @@ from typing import Iterator
 
 import requests
 
+from scripts.v2 import critic as critic_mod
 from scripts.v2.planner import entities as ent_mod
 from scripts.v2.planner import history as history_mod
 from scripts.v2.planner import intent as int_mod
@@ -60,13 +61,32 @@ Tool trace тебе передан как JSON. Каждая запись — {{
 # ---------- LLM call (renderer only) ----------
 
 
+def _conversation_summary(history: list[dict] | None, plan: plan_mod.QueryPlan) -> dict:
+    """Compact summary of prior turns for the renderer — points to the
+    last resolved author/book/word so the model can say «как мы уже
+    видели» instead of re-asking. Mirrors what history.merge_with_history
+    already extracted at planner time."""
+    e = plan.entities
+    return {
+        "current_author": e.author_label or e.author_regex,
+        "current_book_id": e.book_id,
+        "current_book_title": e.book_title,
+        "current_word": e.word,
+        "current_country": e.country,
+        "current_year_range": [e.year_from, e.year_to] if (e.year_from or e.year_to) else None,
+        "turns_in_history": len(history or []),
+    }
+
+
 def _llm_render(question: str, plan: plan_mod.QueryPlan,
                 results: list[ToolResult], *, model: str,
-                ollama_host: str) -> str:
+                ollama_host: str,
+                history: list[dict] | None = None) -> str:
     """Send one /api/chat call with the render prompt + tool data. No tools."""
     summary_payload = {
         "intent": plan.intent,
         "explain": plan.explain,
+        "conversation_context": _conversation_summary(history, plan),
         "tool_results": [
             {
                 "tool": r.tool,
@@ -168,13 +188,30 @@ def ask(
     else:
         try:
             answer = _llm_render(question, plan, rr.results,
-                                 model=model, ollama_host=ollama_host)
+                                 model=model, ollama_host=ollama_host,
+                                 history=history)
         except Exception as e:
             log.exception("renderer LLM failed")
             answer = (f"[renderer error: {e}]\n\nRaw tool results:\n"
                       + "\n".join(json.dumps(r.to_dict(), ensure_ascii=False,
                                              default=str, indent=2)[:1000]
                                   for r in rr.results))
+
+    # ---- Sprint 6.1: critic pass ----
+    # Verify the rendered answer against tool_results. Only annotates when
+    # the critic flagged something; silent on a clean answer.
+    critic_summary_records = [
+        {"tool": r.tool, "ok": r.ok, "data": r.data,
+         "coverage": {"books_matched": r.coverage.books_matched,
+                      "books_total": r.coverage.books_total},
+         "warnings": [{"code": w.code, "message": w.message} for w in r.warnings]}
+        for r in rr.results
+    ]
+    verdict = critic_mod.review(
+        answer, critic_summary_records, intent=intent.label,
+        ollama_host=ollama_host,
+    )
+    answer = critic_mod.annotate_answer(answer, verdict)
 
     tool_calls = [
         {"name": r.tool, "args": r.query,
@@ -186,6 +223,12 @@ def ask(
         "answer": answer,
         "tool_calls": tool_calls,
         "iterations": len(rr.results),
+        "critic": {
+            "verified": verdict.verified,
+            "issues_flagged": verdict.has_issues(),
+            "unsupported_claims_n": len(verdict.unsupported_claims),
+            "summary": verdict.summary,
+        },
         "model": model,
         "elapsed_sec": round(time.perf_counter() - t0, 2),
         "intent": intent.label,
@@ -256,10 +299,30 @@ def ask_stream(
     else:
         try:
             answer = _llm_render(question, plan, results,
-                                 model=model, ollama_host=ollama_host)
+                                 model=model, ollama_host=ollama_host,
+                                 history=history)
         except Exception as e:
             answer = f"[renderer error: {e}]"
 
+    # Critic pass — same logic as ask() above. We emit the verdict as its
+    # own SSE event so the UI can show a confidence badge before the final
+    # text lands.
+    critic_records = [
+        {"tool": r.tool, "ok": r.ok, "data": r.data,
+         "coverage": {"books_matched": r.coverage.books_matched,
+                      "books_total": r.coverage.books_total},
+         "warnings": [{"code": w.code, "message": w.message} for w in r.warnings]}
+        for r in results
+    ]
+    verdict = critic_mod.review(answer, critic_records,
+                                intent=intent.label, ollama_host=ollama_host)
+    answer = critic_mod.annotate_answer(answer, verdict)
+
+    yield {"event": "critic",
+           "verified": verdict.verified,
+           "issues_flagged": verdict.has_issues(),
+           "unsupported_claims_n": len(verdict.unsupported_claims),
+           "summary": verdict.summary}
     yield {"event": "answer", "text": answer}
     yield {"event": "done", "tool_calls":
            [{"name": r.tool, "args": r.query, "ok": r.ok,

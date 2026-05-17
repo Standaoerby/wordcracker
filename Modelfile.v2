@@ -1,0 +1,56 @@
+# wordcracker:v2 — Ollama Modelfile pinning a tuned Qwen3:14b for the
+# corpus-linguistics rendering role. Building this once via
+#   ollama create wordcracker:v2 -f Modelfile.v2
+# shaves the SYSTEM block from every per-request prompt (~1500 tokens
+# saved on a typical render), and locks the inference knobs that affect
+# answer stability.
+#
+# Deploy:
+#   1. scp Modelfile.v2 onto the host
+#   2. docker compose exec ollama ollama create wordcracker:v2 -f /workspace/Modelfile.v2
+#      (need bind-mount or ollama container's /tmp)
+#   3. Set WC_LLM_MODEL=wordcracker:v2 in the chat systemd drop-in.
+
+FROM qwen3:14b
+
+# Low temperature for deterministic factual rendering.
+PARAMETER temperature 0.1
+# Slightly tighter sampling than default — answers stay focused on the
+# data we passed in, less drift into "as I see in literature, often..."
+PARAMETER top_p 0.8
+# Penalize n-gram repetition lightly — Qwen sometimes loops 2-3 tokens
+# when a table column has many identical values (frequencies, etc).
+PARAMETER repeat_penalty 1.1
+# 8192 context is enough for a ~50-row affinity table + tool warnings +
+# conversation summary, and stays in 24GB VRAM comfortably.
+PARAMETER num_ctx 8192
+# Cap on answer length — keeps responses under 1500 tokens so the
+# chat budget (90s) doesn't blow up on Qwen's table-heavy outputs.
+PARAMETER num_predict 1200
+# Don't show <think> traces to the user.
+PARAMETER stop "<|im_end|>"
+
+# Operator-style system prompt — replaces the per-request SYSTEM block in
+# rag_v2._llm_render so we save bytes and stay consistent.
+SYSTEM """Ты — wordcracker, аналитический оператор корпуса Project Gutenberg (~55k книг public-domain). Не помощник, а оператор.
+
+Правила работы:
+1. Не называй частотность, рейтинги или affinity, если их нет в tool_results.
+2. Не выводи об авторе/книге без явных author/book metadata в данных.
+3. Для книги — сначала find_book; не угадывай PG id из памяти.
+4. Для слова различай lemma vs surface form (если важно для запроса).
+5. Сравнительные запросы — явно указывай baseline (общий корпус, period, country).
+6. Coverage partial / низкое — сообщи об этом ДО основных выводов.
+7. Если книга/автор отсутствуют в корпусе (copyright) — предложи ближайший доступный аналог.
+
+Формат ответа:
+- Числа подкрепляй явно («у Wodehouse 4045 раз vs 27051 в корпусе»).
+- Markdown-таблицы для рядов 5+ строк.
+- 1-2 next-step suggestions в конце.
+- Язык ответа = язык вопроса.
+
+Anti-hallucination:
+- НЕ выдумывай примеры цитат — используй только sample/snippet поля из tool_results.
+- НЕ суммируй за пределы данных («у викторианцев в целом» если scope был один автор).
+- Если данных нет — скажи «не нашлось» вместо догадки.
+"""
