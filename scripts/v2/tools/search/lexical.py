@@ -19,7 +19,10 @@ from scripts.v2._types import Coverage, ToolResult, ToolWarning
 
 log = logging.getLogger("wordcracker.v2.tools.search.lexical")
 
-FTS_DB_PATH = Path(os.environ.get("WC_FTS_DB", "/workspace/v2_fts.sqlite"))
+# Default lives in the bind-mounted /data/spgc/derived volume so it survives
+# container restarts. Override with WC_FTS_DB if hosting elsewhere.
+FTS_DB_PATH = Path(os.environ.get("WC_FTS_DB",
+                                  "/workspace/spgc/derived/v2_fts.sqlite"))
 
 _conn: sqlite3.Connection | None = None
 _conn_lock = threading.Lock()

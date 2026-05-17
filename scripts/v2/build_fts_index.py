@@ -104,7 +104,9 @@ def _strip_gutenberg_markers(text: str) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--raw-dir", default="/workspace/raw_text")
-    ap.add_argument("--out", default="/workspace/v2_fts.sqlite")
+    # Default writes into the bind-mounted SPGC derived dir so the DB
+    # survives container restarts; override for one-off / smoke builds.
+    ap.add_argument("--out", default="/workspace/spgc/derived/v2_fts.sqlite")
     ap.add_argument("--limit", type=int, default=0,
                     help="0 = all books; positive = smoke-test subset")
     ap.add_argument("--reset", action="store_true",
