@@ -407,12 +407,16 @@ def _plan_word_contexts(e: Entities) -> QueryPlan:
             expected_cost="cheap",
             explain=f"word_contexts({e.author_regex}, {e.word})",
         )
+    # No author scope → hybrid_search if FTS5 is available, else legacy
+    # word_contexts_global. hybrid pulls 30 from each retriever, RRF-merges
+    # to top 12, and surfaces both exact mentions ('ajar' literally) and
+    # semantically related passages ('half-open door', 'door slightly open').
     return QueryPlan(
         intent="word_contexts", entities=e,
-        steps=[PlanStep(tool="word_contexts_global",
-                        args={"word": e.word, "k": 12})],
+        steps=[PlanStep(tool="hybrid_search",
+                        args={"query": e.word, "k": 12, "per_retriever": 30})],
         expected_cost="medium",
-        explain=f"word_contexts_global({e.word})",
+        explain=f"hybrid_search({e.word}) — FTS5 + ChromaDB RRF merge",
     )
 
 

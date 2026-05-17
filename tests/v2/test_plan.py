@@ -94,8 +94,9 @@ class PlanWordIntents(unittest.TestCase):
     def test_word_contexts_global(self):
         _, _, p = _full('Покажи примеры использования слова "ajar" у разных авторов')
         self.assertEqual(p.intent, "word_contexts")
-        self.assertEqual(p.steps[0].tool, "word_contexts_global")
-        self.assertEqual(p.steps[0].args["word"], "ajar")
+        # No author scope → routed to hybrid_search (FTS5 + ChromaDB RRF).
+        self.assertEqual(p.steps[0].tool, "hybrid_search")
+        self.assertEqual(p.steps[0].args["query"], "ajar")
 
     def test_word_collocates_victorian_fog(self):
         _, _, p = _full('Слова, которые чаще всего соседствуют со словом "fog" у викторианских авторов')
