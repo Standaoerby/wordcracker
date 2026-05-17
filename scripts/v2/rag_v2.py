@@ -29,7 +29,7 @@ from scripts.v2.planner import entities as ent_mod
 from scripts.v2.planner import intent as int_mod
 from scripts.v2.planner import plan as plan_mod
 from scripts.v2.planner import router as router_mod
-from scripts.v2.types import ToolResult
+from scripts.v2._types import ToolResult
 
 # Register v2 tools (decorator side effects).
 from scripts.v2 import tools as _tools  # noqa: F401

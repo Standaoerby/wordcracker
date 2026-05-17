@@ -28,7 +28,7 @@ from typing import Any, Callable, Iterable, Literal
 
 from scripts.v2.corpus_version import current_source_info
 from scripts.v2.filters import FilterSpec
-from scripts.v2.types import ToolError, ToolResult, now_ms_since
+from scripts.v2._types import ToolError, ToolResult, now_ms_since
 
 log = logging.getLogger("wordcracker.v2.registry")
 

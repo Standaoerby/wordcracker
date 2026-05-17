@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.v2 import tool_registry  # noqa: E402
 from scripts.v2.filters import FilterSpec  # noqa: E402
 from scripts.v2.tool_registry import REGISTRY, build_tools_spec, dispatch  # noqa: E402
-from scripts.v2.types import (  # noqa: E402
+from scripts.v2._types import (  # noqa: E402
     Coverage,
     SourceInfo,
     ToolError,

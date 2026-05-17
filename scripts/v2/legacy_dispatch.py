@@ -21,7 +21,7 @@ from typing import Any
 
 from scripts.v2.corpus_version import current_source_info
 from scripts.v2.tool_registry import REGISTRY, dispatch as v2_dispatch
-from scripts.v2.types import ToolResult, now_ms_since
+from scripts.v2._types import ToolResult, now_ms_since
 
 log = logging.getLogger("wordcracker.v2.legacy_dispatch")
 

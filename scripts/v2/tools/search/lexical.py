@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from scripts.v2.tool_registry import tool
-from scripts.v2.types import Coverage, ToolResult, ToolWarning
+from scripts.v2._types import Coverage, ToolResult, ToolWarning
 
 log = logging.getLogger("wordcracker.v2.tools.search.lexical")
 

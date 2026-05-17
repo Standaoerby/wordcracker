@@ -20,7 +20,7 @@ if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
 from scripts.v2.tool_registry import tool
-from scripts.v2.types import Coverage, ToolResult, ToolWarning
+from scripts.v2._types import Coverage, ToolResult, ToolWarning
 
 log = logging.getLogger("wordcracker.v2.tools.find_book")
 

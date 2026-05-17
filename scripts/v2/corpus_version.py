@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from scripts.v2.__version__ import ANALYTICS_VERSION
-from scripts.v2.types import SourceInfo
+from scripts.v2._types import SourceInfo
 
 _CORPUS_META_PATH = Path(os.environ.get(
     "WC_CORPUS_META", "/workspace/spgc/derived/corpus_meta.json"

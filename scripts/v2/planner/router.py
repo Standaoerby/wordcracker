@@ -14,7 +14,7 @@ from typing import Any, Iterator, Literal
 
 from scripts.v2.legacy_dispatch import dispatch_any
 from scripts.v2.planner.plan import PlanStep, QueryPlan
-from scripts.v2.types import ToolResult
+from scripts.v2._types import ToolResult
 
 
 @dataclass

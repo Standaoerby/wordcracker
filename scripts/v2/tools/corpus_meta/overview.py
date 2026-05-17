@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 from scripts.v2.tool_registry import tool
-from scripts.v2.types import Coverage, ToolResult, ToolWarning
+from scripts.v2._types import Coverage, ToolResult, ToolWarning
 
 CHROMA_PATH = os.environ.get("WC_CHROMA_PATH", "/workspace/chroma_db")
 COLLECTION_NAME = os.environ.get("WC_CHROMA_COLLECTION", "gutenberg-index")

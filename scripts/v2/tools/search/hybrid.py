@@ -19,7 +19,7 @@ from typing import Any
 
 from scripts.v2.legacy_dispatch import dispatch_any
 from scripts.v2.tool_registry import dispatch as v2_dispatch, tool
-from scripts.v2.types import Coverage, ToolResult, ToolWarning
+from scripts.v2._types import Coverage, ToolResult, ToolWarning
 
 log = logging.getLogger("wordcracker.v2.tools.search.hybrid")
 

@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from scripts.v2.corpus_version import current_source_info
-from scripts.v2.types import (
+from scripts.v2._types import (
     Coverage, SourceInfo, ToolError, ToolResult, ToolWarning,
 )
 
