@@ -1335,6 +1335,138 @@ def word_contexts_global(word: str, k: int = 12, snippet_chars: int = 280,
         _log(f"word_contexts_global({word_lc}) done in {time.perf_counter()-t0:.2f}s")
 
 
+# ============================ TOOL: Burrows Delta (stylometric attribution) ============================
+BURROWS_NPZ = DERIVED_DIR / "burrows_vectors.npz"
+_BURROWS_CACHE: dict = {"npz": None, "mtime": 0.0,
+                       "top_words": None, "authors": None,
+                       "book_counts": None, "means": None,
+                       "stds": None, "vectors": None}
+
+
+def _burrows_load():
+    """Lazy-load the pre-computed Burrows-Delta vectors. Mtime-tracked."""
+    if not BURROWS_NPZ.exists():
+        return None
+    m = BURROWS_NPZ.stat().st_mtime
+    if _BURROWS_CACHE["vectors"] is not None and _BURROWS_CACHE["mtime"] == m:
+        return _BURROWS_CACHE
+    try:
+        import numpy as np
+        d = np.load(BURROWS_NPZ, allow_pickle=True)
+        _BURROWS_CACHE.update({
+            "mtime": m,
+            "top_words": list(d["top_words"]),
+            "authors":   list(d["authors"]),
+            "book_counts": d["book_counts"],
+            "means":     d["means"],
+            "stds":      d["stds"],
+            "vectors":   d["vectors"],
+        })
+        return _BURROWS_CACHE
+    except Exception as e:
+        _log(f"burrows vectors load failed: {e}")
+        return None
+
+
+def _burrows_vectorize(text: str, fw: list, means, stds):
+    """Convert a raw text snippet to a z-scored frequency vector aligned with
+    the trained author vectors."""
+    import re as _re
+    import numpy as np
+    toks = [m.group(0).lower() for m in _re.finditer(r"[A-Za-z]+(?:'[A-Za-z]+)?", text)]
+    n = len(toks)
+    if n < 200:
+        return None, n
+    cnts: dict = {}
+    for t in toks:
+        cnts[t] = cnts.get(t, 0) + 1
+    vec = np.zeros(len(fw), dtype=np.float64)
+    for i, w in enumerate(fw):
+        vec[i] = cnts.get(w, 0)
+    vec = vec * (1_000_000.0 / n)
+    z = (vec - means) / stds
+    return z, n
+
+
+def author_attribution(text: str, top: int = 5) -> dict:
+    """Given a chunk of English text, guess the most likely author via
+    Burrows Delta — z-scored top-200 function-word frequencies + Manhattan
+    distance to each pre-trained author vector.
+
+    Returns top-N candidates with delta scores (lower = more similar).
+    Useful for 'кто написал этот отрывок', 'на кого больше похож этот стиль'.
+    Needs at least ~200 tokens for a reliable signal.
+
+    Pre-computed vectors at /data/spgc/derived/burrows_vectors.npz via
+    scripts/build_burrows_vectors.py (~2 min one-time build over 3.7k authors).
+    """
+    t0 = time.perf_counter()
+    cache = _burrows_load()
+    if cache is None:
+        return {"error": "burrows vectors not built — run scripts/build_burrows_vectors.py first"}
+    import numpy as np
+    z, n_tokens = _burrows_vectorize(text, cache["top_words"], cache["means"], cache["stds"])
+    if z is None:
+        return {"error": f"text too short ({n_tokens} tokens); need at least 200"}
+    # Manhattan distance = mean abs diff per word (Burrows Delta)
+    diff = np.abs(cache["vectors"] - z).mean(axis=1)
+    order = np.argsort(diff)
+    out_rows = []
+    for i in order[:top]:
+        out_rows.append({
+            "author":    cache["authors"][i],
+            "delta":     round(float(diff[i]), 4),
+            "books_in_training": int(cache["book_counts"][i]),
+        })
+    return {
+        "tokens_in_text":  n_tokens,
+        "words_in_vector": len(cache["top_words"]),
+        "authors_in_index": len(cache["authors"]),
+        "top": out_rows,
+    }
+
+
+def author_influences(author_regex: str, top: int = 10) -> dict:
+    """Authors stylistically nearest to a given one by Burrows Delta.
+
+    Walks the pre-computed vectors and returns the top-N authors closest
+    to the query author (excluding the author themselves). Use for
+    'на кого похож Гайман по стилю', 'influences on Doyle', 'кто пишет
+    как Wodehouse'.
+    """
+    cache = _burrows_load()
+    if cache is None:
+        return {"error": "burrows vectors not built"}
+    import numpy as np
+    # Match author_regex against trained author list
+    pat = re.compile(author_regex, re.IGNORECASE)
+    matches = [(i, a) for i, a in enumerate(cache["authors"]) if pat.search(a)]
+    if not matches:
+        return {"error": "author not in burrows training set",
+                "author_regex": author_regex,
+                "hint": "the index covers authors with >=3 books and >=20k tokens"}
+    if len(matches) > 1:
+        # Pick the one with the most books in training for stability
+        matches.sort(key=lambda im: -int(cache["book_counts"][im[0]]))
+    pivot_idx, pivot_author = matches[0]
+    pivot_vec = cache["vectors"][pivot_idx]
+    diff = np.abs(cache["vectors"] - pivot_vec).mean(axis=1)
+    diff[pivot_idx] = np.inf  # don't return the author themselves
+    order = np.argsort(diff)
+    rows = []
+    for i in order[:top]:
+        rows.append({
+            "author": cache["authors"][i],
+            "delta":  round(float(diff[i]), 4),
+            "books_in_training": int(cache["book_counts"][i]),
+        })
+    return {
+        "pivot_author": pivot_author,
+        "pivot_books_in_training": int(cache["book_counts"][pivot_idx]),
+        "top": rows,
+    }
+
+
 # ============================ TOOL: NRC sentiment / emotion ============================
 NRC_PATH = DERIVED_DIR / "nrc_emotion_lexicon.json"
 NRC_EMOTIONS = ("anger", "anticipation", "disgust", "fear", "joy",
@@ -2524,6 +2656,32 @@ TOOLS_SPEC += [
         }, "required": ["author_regex"]},
     }},
     {"type": "function", "function": {
+        "name": "author_attribution",
+        "description": (
+            "🆕 Burrows Delta stylometric attribution (Sprint 9.3). Принимает "
+            "фрагмент английского текста и возвращает топ-N наиболее похожих по "
+            "стилю авторов из training set (3.7k авторов, vectors на top-200 "
+            "function words). Нужно >= 200 токенов. "
+            "Используй для «кто написал этот отрывок», «на чей стиль похоже»."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "text": {"type": "string", "description": "English text >= 200 tokens"},
+            "top":  {"type": "integer", "description": "default 5"},
+        }, "required": ["text"]},
+    }},
+    {"type": "function", "function": {
+        "name": "author_influences",
+        "description": (
+            "🆕 Авторы стилистически ближе всех к данному по Burrows Delta. "
+            "Для «на кого похож Doyle», «influences on Гаймана», «кто пишет в "
+            "стиле X»."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "author_regex": {"type": "string", "description": "'^Doyle,' и т.п."},
+            "top":          {"type": "integer", "description": "default 10"},
+        }, "required": ["author_regex"]},
+    }},
+    {"type": "function", "function": {
         "name": "book_emotion_profile",
         "description": (
             "🆕 Эмоциональный профиль книги через NRC Emotion Lexicon (Sprint 9.4). "
@@ -2628,6 +2786,8 @@ TOOL_DISPATCH = {
     "find_book":                find_book,
     "book_emotion_profile":     book_emotion_profile,
     "emotion_collocates":       emotion_collocates,
+    "author_attribution":       author_attribution,
+    "author_influences":        author_influences,
     "word_etymology":           word_etymology,
     "find_words_by_etymology":  find_words_by_etymology,
     "top_authors_by":           top_authors_by,
