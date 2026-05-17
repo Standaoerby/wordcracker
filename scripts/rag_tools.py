@@ -2463,6 +2463,104 @@ def find_words_by_etymology(scope: dict, family: str, top: int = 30,
         return {"error": "find_words_by_etymology failed", "details": str(e)}
 
 
+# ============================ TOOL: author_profile ============================
+def author_profile(author_regex: str, country: str | None = None) -> dict:
+    """One-call snapshot of an author: biography + corpus footprint +
+    stylistic markers + register + readability + emotional skew.
+
+    Combines 7 underlying tools in one call (run in parallel via
+    ThreadPoolExecutor) so the user doesn't pay 5-7 agent loop
+    round-trips for a portrait query like 'расскажи про Doyle'.
+
+    Returns:
+      - metadata: birth/death years, language, book count
+      - stats: total tokens, vocab size, longest/shortest book
+      - top_signature_words: top-15 affinity words (propn-filtered)
+      - top_bigrams: top-10 frequent two-grams
+      - lex_diversity: per-author TTR
+      - dominant_emotions: top-3 NRC emotions by per-million
+      - nearest_authors: top-5 Burrows Delta neighbours (if in index)
+
+    Optional `country` filter narrows the underlying _select_books for
+    "British Christie only" style sub-queries (rare; typically not
+    needed because author_regex already identifies a single person).
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    t0 = time.perf_counter()
+    out: dict = {"author_regex": author_regex}
+
+    def _call(name, fn, *args, **kwargs):
+        try:
+            r = fn(*args, **kwargs)
+            return name, r
+        except Exception as e:
+            return name, {"error": str(e)}
+
+    tasks = [
+        ("metadata",     lambda: author_metadata(author_regex)),
+        ("stats",        lambda: corpus_stats_by_author(author_regex)),
+        # min_corpus_count=200 keeps real lexemes, drops single-author OOV
+        # proper nouns (brackenstall/windibank/bollamore class).
+        ("signature",    lambda: affinity_by_author(author_regex, top=15,
+                                                    min_corpus_count=200)),
+        ("top_bigrams",  lambda: top_ngrams_by_author(author_regex, n=2, top=10,
+                                                     country=country)),
+        ("diversity",    lambda: lexical_diversity({"author": author_regex})),
+        ("influences",   lambda: author_influences(author_regex, top=5)),
+    ]
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        futures = {ex.submit(t[1]): t[0] for t in tasks}
+        for fut in futures:
+            name = futures[fut]
+            try:
+                r = fut.result(timeout=60)
+                out[name] = r
+            except Exception as e:
+                out[name] = {"error": str(e)}
+
+    # Aggregate emotion profile over top-3 books by downloads (cheaper than
+    # per-author and gives a feel for the canonical works).
+    try:
+        sel = _select_books(author_regex, country=country)
+        sel = sel.copy()
+        sel["downloads"] = pd.to_numeric(sel.get("downloads"),
+                                         errors="coerce").fillna(0)
+        sample = sel.sort_values("downloads", ascending=False).head(3)
+        emot_agg: Counter = Counter()
+        books_used = 0
+        sample_titles = []
+        for _, row in sample.iterrows():
+            pg = str(row["id"])
+            sample_titles.append({"pg_id": pg, "title": str(row.get("title", "") or "")[:80]})
+            ep = book_emotion_profile(pg)
+            if "error" in ep:
+                continue
+            pm = ep.get("per_million", {}) or {}
+            for e, v in pm.items():
+                emot_agg[e] += v
+            books_used += 1
+        if books_used:
+            dominant = [
+                {"emotion": e, "avg_per_million": round(v / books_used, 1)}
+                for e, v in sorted(emot_agg.items(), key=lambda kv: -kv[1])
+                if e in NRC_EMOTIONS
+            ][:3]
+            out["dominant_emotions"] = {
+                "books_sampled": sample_titles,
+                "top": dominant,
+            }
+        else:
+            out["dominant_emotions"] = {"warning": "no NRC data for sampled books"}
+    except Exception as e:
+        out["dominant_emotions"] = {"error": str(e)}
+
+    out["_elapsed_s"] = round(time.perf_counter() - t0, 2)
+    _log(f"author_profile({author_regex}) done in {out['_elapsed_s']}s")
+    return out
+
+
 # ============================ TOOL 12: top_authors_by ============================
 # Placeholders/collective authors that pollute "most popular" lists.
 # Check by first-comma-segment (the "Surname" slot in SPGC format), case-insensitive.
@@ -2919,6 +3017,23 @@ TOOLS_SPEC += [
         }, "required": ["metric"]},
     }},
     {"type": "function", "function": {
+        "name": "author_profile",
+        "description": (
+            "🆕 Полный портрет автора одним вызовом (Sprint 12). Параллельно "
+            "вызывает 6 sub-tools: biography (years, downloads, language), "
+            "корпусные stats (книги/токены/словарь), top-15 фирменных слов "
+            "(affinity), top-10 биграмм, лексическую плотность, top-5 "
+            "стилистически близких авторов (Burrows Delta) + агрегирует "
+            "доминантные emotions из 3 sample books. "
+            "Используй для «расскажи про автора X», «дай портрет Y», «что за "
+            "автор Z». Заменяет 5-7 отдельных вызовов в agent loop."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "author_regex": {"type": "string", "description": "'^Doyle,' / '^Wodehouse,' etc."},
+            "country":      {"type": "string", "description": "optional ISO alpha-2 filter"},
+        }, "required": ["author_regex"]},
+    }},
+    {"type": "function", "function": {
         "name": "top_authors_by_country",
         "description": (
             "🆕 Топ-N авторов из одной страны (Sprint 9.2 Wikidata enrichment). "
@@ -3155,6 +3270,7 @@ TOOL_DISPATCH = {
     "find_words_by_etymology":  find_words_by_etymology,
     "top_authors_by":           top_authors_by,
     "top_authors_by_country":   top_authors_by_country,
+    "author_profile":           author_profile,
     "top_books_by_downloads":   top_books_by_downloads,
     "top_books_by_recency":     top_books_by_recency,
     "author_metadata":          author_metadata,
