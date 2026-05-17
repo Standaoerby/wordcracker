@@ -1269,7 +1269,7 @@ def word_freq_timeline(word: str, bucket_years: int = 25,
 # ============================ TOOL: words_disappearing_after ============================
 def words_disappearing_after(year: int = 1920, top: int = 25,
                              min_pre_pm: float = 50.0,
-                             min_post_books: int = 50,
+                             min_post_books: int = 10,
                              min_pre_books: int = 50,
                              basis: str = "auto") -> dict:
     """Words that drop sharply in usage after a given year.
