@@ -18,7 +18,9 @@ Usage:
     --batch     256
 """
 import argparse
+import json
 import re
+import time
 from pathlib import Path
 
 import chromadb
@@ -28,6 +30,41 @@ from tqdm import tqdm
 
 GUTENBERG_HEADER = re.compile(r"\*\*\* START OF (?:THE|THIS) PROJECT GUTENBERG.*?\*\*\*", re.IGNORECASE | re.DOTALL)
 GUTENBERG_FOOTER = re.compile(r"\*\*\* END OF (?:THE|THIS) PROJECT GUTENBERG.*", re.IGNORECASE | re.DOTALL)
+
+
+def _resume_cache_path(metadata_path: Path) -> Path:
+    return metadata_path.parent / "derived" / "build_index_already.json"
+
+
+def _load_resume_cache(metadata_path: Path, current_count: int) -> set | None:
+    """If the cache file matches the current ChromaDB count, return its
+    set of book ids and skip the (slow) coll.get(include=[]) call.
+
+    Returns None if the cache is missing or stale — caller falls back."""
+    cp = _resume_cache_path(metadata_path)
+    if not cp.exists():
+        return None
+    try:
+        with open(cp, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if int(data.get("chroma_count", -1)) != int(current_count):
+            return None
+        books = data.get("books") or []
+        return set(books)
+    except Exception as e:
+        print(f"  [resume-cache] read failed: {e}", flush=True)
+        return None
+
+
+def _save_resume_cache(metadata_path: Path, current_count: int, books: set) -> None:
+    cp = _resume_cache_path(metadata_path)
+    try:
+        cp.parent.mkdir(parents=True, exist_ok=True)
+        with open(cp, "w", encoding="utf-8") as fh:
+            json.dump({"chroma_count": int(current_count),
+                       "books": sorted(books)}, fh)
+    except Exception as e:
+        print(f"  [resume-cache] write failed: {e}", flush=True)
 
 
 def strip_gutenberg(text: str) -> str:
@@ -112,13 +149,29 @@ def main():
         metadata={"creator": "wordcracker", "source": "raw_text"})
     print(f"  starting count: {coll.count()}", flush=True)
 
-    # Resume: skip books whose chunks are already indexed
+    # Resume: skip books whose chunks are already indexed.
+    # Fast path: if /data/.../derived/build_index_already.json matches the
+    # current Chroma count, read the book set from disk (≈10ms). Slow path:
+    # coll.get(include=[]) and parse chunk suffixes — 20-30s on 3.8M chunks.
+    # Saves ~30s on every admin-triggered incremental reindex.
     already_books = set()
     if not args.reset:
-        existing = coll.get(include=[])
-        for eid in existing["ids"]:
-            already_books.add(eid.rsplit("_", 1)[0])
-        print(f"  already indexed books: {len(already_books)}", flush=True)
+        current_count = coll.count()
+        t_rc = time.perf_counter()
+        cached = _load_resume_cache(args.metadata, current_count)
+        if cached is not None:
+            already_books = cached
+            print(f"  [resume-cache] hit ({len(already_books)} books, "
+                  f"{int((time.perf_counter()-t_rc)*1000)} ms)", flush=True)
+        else:
+            print(f"  [resume-cache] miss, scanning collection...", flush=True)
+            existing = coll.get(include=[])
+            for eid in existing["ids"]:
+                already_books.add(eid.rsplit("_", 1)[0])
+            _save_resume_cache(args.metadata, current_count, already_books)
+            print(f"  already indexed books: {len(already_books)} "
+                  f"(took {time.perf_counter()-t_rc:.1f}s, cache rebuilt)",
+                  flush=True)
 
     buf_docs, buf_ids, buf_meta = [], [], []
 
@@ -159,9 +212,15 @@ def main():
                 flush()
     flush()
 
+    final_count = coll.count()
+    new_books = {pid for pid in sel_ids if pid not in already_books}
+    if new_books and not args.reset:
+        already_books |= new_books
+        _save_resume_cache(args.metadata, final_count, already_books)
+        print(f"  [resume-cache] updated with {len(new_books)} new books", flush=True)
     print(f"[done] added {total_chunks:,} chunks across {len(sel_ids) - skipped} new books "
           f"(skipped {skipped} already indexed)", flush=True)
-    print(f"  collection now has: {coll.count():,} documents", flush=True)
+    print(f"  collection now has: {final_count:,} documents", flush=True)
 
 
 if __name__ == "__main__":
