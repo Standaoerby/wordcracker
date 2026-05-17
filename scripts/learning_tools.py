@@ -36,6 +36,7 @@ from rag_tools import (
     DERIVED_DIR, CORPUS_COUNTS, OLLAMA_HOST,
     STOPWORDS, _metadata_df, _select_books, _slug,
     _is_clean_token, _log,
+    _counts_path, _tokens_path,
 )
 
 # Spaced-repetition band-pass presets, anchored to corpus_count quantiles
@@ -187,7 +188,7 @@ def affinity_by_book(pg_id: str, top: int = 50,
     if not pg_id.startswith("PG"):
         pg_id = f"PG{pg_id}"
     try:
-        f = SPGC_COUNTS_DIR / f"{pg_id}_counts.txt"
+        f = _counts_path(pg_id)
         if not f.exists():
             return {"error": "counts file not found for this PG id", "pg_id": pg_id}
 
@@ -342,9 +343,11 @@ def learning_words(
             scope_label = "all_corpus"
         elif isinstance(scope, dict) and scope.get("book"):
             pg_id = scope["book"]
-            if not pg_id.startswith("PG"):
+            if not pg_id.startswith("PG") and not pg_id.startswith("U"):
                 pg_id = f"PG{pg_id}"
-            f = SPGC_COUNTS_DIR / f"{pg_id}_counts.txt"
+            # _counts_path knows about user_counts fallback for post-2018
+            # orphan PG additions (PG68283, PG70652, etc) and U-uploads.
+            f = _counts_path(pg_id)
             if not f.exists():
                 return {"error": "counts file not found", "pg_id": pg_id}
             with open(f, encoding="utf-8") as fh:
@@ -361,7 +364,7 @@ def learning_words(
             if not len(sel):
                 return {"error": "no books matched", "author_regex": scope["author"]}
             for pg in sel["id"]:
-                f = SPGC_COUNTS_DIR / f"{pg}_counts.txt"
+                f = _counts_path(pg)
                 if not f.exists():
                     continue
                 with open(f, encoding="utf-8") as fh:
@@ -484,7 +487,7 @@ def learning_words(
         for pg_id in context_book_ids:
             if not target_words:
                 break
-            f = SPGC_TOKENS_DIR / f"{pg_id}_tokens.txt"
+            f = _tokens_path(pg_id)
             if not f.exists():
                 continue
             with open(f, encoding="utf-8") as fh:
@@ -640,13 +643,7 @@ def book_archaic_words(pg_id: str, top: int = 30,
     pg = pg_id.upper()
     if not (pg.startswith("PG") or pg.startswith("U")):
         pg = f"PG{pg}"
-    f = SPGC_COUNTS_DIR / f"{pg}_counts.txt"
-    if not f.exists():
-        try:
-            from rag_tools import _counts_path as _cp
-            f = _cp(pg)
-        except Exception:
-            pass
+    f = _counts_path(pg)
     if not f.exists():
         return {"error": "counts file not found", "id": pg}
 

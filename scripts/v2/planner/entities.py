@@ -502,12 +502,20 @@ def extract(text: str) -> Entities:
     book_id, book_title = _find_book(text)
     year_from, year_to = _find_year_range(text)
 
+    word = _find_word(text)
+    # When the same token is also part of a resolved book title, drop it as
+    # a "word" — it was just the first noun of the title that the quoted-
+    # word regex hijacked. Q19 «"Alice's Adventures in Wonderland"» used to
+    # yield word="alice"; we want None so the planner picks a default.
+    if word and book_title and word.lower() in book_title.lower():
+        word = None
+
     return Entities(
         author_regex=primary_author[1],
         author_label=primary_author[0],
         book_id=book_id,
         book_title=book_title,
-        word=_find_word(text),
+        word=word,
         year_from=year_from,
         year_to=year_to,
         country=_find_country(text),
