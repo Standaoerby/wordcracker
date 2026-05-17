@@ -194,8 +194,13 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"в\s+книге\s+.{1,40}\bиспользуются\s+намного\s+чаще"), "book_vocab", 0.9),
     (_re(r"в\s+этой\s+книге\b.{0,40}\b(использу\w*|чаще|необычн\w*|характерн\w*)"),
      "book_vocab", 0.78),
-    (_re(r"в\s+книге\s+[«\"][^»\"]+[»\"].{0,80}"
+    (_re(r"в\s+книге\s+[«\"“‘][^»\"”’]+[»\"”’].{0,80}"
          r"(чаще|часто|использу\w*|намного\s+чаще)"), "book_vocab", 0.85),
+    # Q7-style: «в "Crime and Punishment" используются намного чаще» — title
+    # in quotes but no «книге» before it. Stan's updated vault prompts.
+    (_re(r"\s+в\s+[«\"“‘][^»\"”’]{4,80}[»\"”’]"
+         r".{0,40}\b(использу\w*|чаще|часто|намного\s+чаще)"),
+     "book_vocab", 0.9),
 
     # ===== book_readability =====
     (_re(r"уровень\s+сложн\w*|cefr|flesch|reading\s+(level|grade)|"

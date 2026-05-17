@@ -78,16 +78,61 @@ AUTHOR_ALIASES: dict[str, str] = {
 
 
 KNOWN_BOOKS: dict[str, tuple[str, str]] = {
-    # title_query_normalized -> (pg_id, canonical_title)
-    "1984":                       ("PG", "Nineteen Eighty-Four"),  # not in SPGC (copyright)
+    # title_query_normalized -> (pg_id_or_empty, canonical_title)
+    # "PG"  on its own == "not in SPGC, but a real book the user named". The
+    #       planner uses canonical_title to talk back to the user instead of
+    #       hallucinating a chain. Empty PG id = book_title set, book_id None.
+
+    # Russian classics (English translations in SPGC)
     "преступление и наказание":   ("PG2554", "Crime and Punishment"),
     "crime and punishment":       ("PG2554", "Crime and Punishment"),
+    "war and peace":              ("PG2600", "War and Peace"),
+    "война и мир":                ("PG2600", "War and Peace"),
+
+    # English / American canon
     "pride and prejudice":        ("PG1342", "Pride and Prejudice"),
     "гордость и предубеждение":   ("PG1342", "Pride and Prejudice"),
     "dracula":                    ("PG345",  "Dracula"),
     "дракула":                    ("PG345",  "Dracula"),
-    "war and peace":              ("PG2600", "War and Peace"),
-    "война и мир":                ("PG2600", "War and Peace"),
+    "alice's adventures in wonderland": ("PG11", "Alice's Adventures in Wonderland"),
+    "alice in wonderland":        ("PG11",  "Alice's Adventures in Wonderland"),
+    "frankenstein":               ("PG84",   "Frankenstein"),
+    "treasure island":            ("PG120",  "Treasure Island"),
+    "the hound of the baskervilles": ("PG2852", "The Hound of the Baskervilles"),
+    "hound of the baskervilles":  ("PG2852", "The Hound of the Baskervilles"),
+    "jane eyre":                  ("PG1260", "Jane Eyre"),
+    "the picture of dorian gray": ("PG174",  "The Picture of Dorian Gray"),
+    "picture of dorian gray":     ("PG174",  "The Picture of Dorian Gray"),
+    "the raven":                  ("PG1065", "The Raven"),
+    "emma":                       ("PG158",  "Emma"),
+    "david copperfield":          ("PG766",  "David Copperfield"),
+    "bleak house":                ("PG1023", "Bleak House"),
+    "the adventures of sherlock holmes": ("PG1661", "The Adventures of Sherlock Holmes"),
+    "adventures of sherlock holmes": ("PG1661", "The Adventures of Sherlock Holmes"),
+    "lord jim":                   ("PG5658", "Lord Jim"),
+    "the monk":                   ("PG601",  "The Monk"),
+    "huckleberry finn":           ("PG76",   "Adventures of Huckleberry Finn"),
+    "the adventures of huckleberry finn": ("PG76", "Adventures of Huckleberry Finn"),
+    "adventures of huckleberry finn": ("PG76", "Adventures of Huckleberry Finn"),
+
+    # Late-public-domain additions (verified via find_book on the server)
+    "at the mountains of madness": ("PG70652", "At the Mountains of Madness"),
+    "the call of cthulhu":        ("PG68283", "The Call of Cthulhu"),
+    "the murder of roger ackroyd": ("PG69087", "The Murder of Roger Ackroyd"),
+    "the forsyte saga":           ("PG4397",  "The Forsyte Saga"),
+    "the well at the world's end": ("PG169",  "The Well at the World's End"),
+    "the house of the wolfings":  ("PG2885",  "The House of the Wolfings"),
+    "heart of darkness":          ("PG219",   "Heart of Darkness"),
+    "moby dick":                  ("PG2701",  "Moby Dick"),
+    "moby-dick":                  ("PG2701",  "Moby Dick"),   # alias for dashed form
+    "wuthering heights":          ("PG768",   "Wuthering Heights"),
+
+    # Mentioned but absent from SPGC-2018 (copyright)
+    "1984":                       ("",      "Nineteen Eighty-Four"),
+    "nineteen eighty-four":       ("",      "Nineteen Eighty-Four"),
+    "the lord of the rings":      ("",      "The Lord of the Rings"),
+    "the hobbit":                 ("",      "The Hobbit"),
+    "the old man and the sea":    ("",      "The Old Man and the Sea"),
 }
 
 
@@ -229,8 +274,14 @@ def _find_authors(text: str) -> list[tuple[str, str]]:
 
 # ---------- book / title ----------
 
-# Match titles in «...», "...", "..." (curly), and bare «1984», «Dracula»-ish.
-_BOOK_QUOTED = re.compile(r"[«\"]([^«»\"]{1,60})[»\"]")
+# Titles can appear inside any of these quote pairs:
+#   «...»  French / Russian guillemets (Stan's earlier vault style)
+#   "..."  ASCII straight double
+#   "..."  Curly double (Stan's latest update from Obsidian — U+201C/U+201D)
+#   '...'  Curly single — used occasionally for nested titles
+_BOOK_QUOTED = re.compile(
+    "[«\"“‘]([^«»\"“”‘’]{1,80})[»\"”’]"
+)
 _BOOK_PG_ID = re.compile(r"\b(PG\d{1,7}|U\d{1,7})\b", re.IGNORECASE)
 
 
@@ -240,8 +291,11 @@ def _find_book(text: str) -> tuple[str | None, str | None]:
     Resolution order:
       1. Explicit PG/U id (PG1342, U7).
       2. Quoted title → check KNOWN_BOOKS dict, else pass raw to find_book.
-      3. Unquoted substring match against KNOWN_BOOKS — handles "Уровень
-         сложности Pride and Prejudice" without quotes.
+         A quoted single short word like "fog" or "ajar" is *not* a title —
+         that's a target word (Q2/Q9 «слово "fog"»). Skip those unless
+         they're in KNOWN_BOOKS, in which case the dict wins.
+      3. Unquoted substring match against KNOWN_BOOKS — handles
+         "Crime and Punishment used more often" without quotes.
     """
     m = _BOOK_PG_ID.search(text)
     if m:
@@ -254,6 +308,10 @@ def _find_book(text: str) -> tuple[str | None, str | None]:
             if pg.startswith("PG") and pg != "PG":
                 return pg, title
             return None, title
+        # Single short token (no spaces, < 12 chars) is almost certainly a
+        # word, not a book title. Defer to _find_word; book_title stays None.
+        if " " not in title and len(title) < 12:
+            continue
         return None, title
     # Unquoted known-title match — sorted longest-first so "Crime and Punishment"
     # wins over "Crime".
@@ -269,8 +327,10 @@ def _find_book(text: str) -> tuple[str | None, str | None]:
 
 # ---------- word ----------
 
-# Quoted single words like "fog", «ajar», 'blue'. Or "слово X" patterns.
-_WORD_QUOTED = re.compile(r"[\"'«“]([a-zA-Zа-яёА-ЯЁ-]{2,30})[\"'»”]")
+# Quoted single words like "fog", «ajar», 'blue', "fog" (curly).
+_WORD_QUOTED = re.compile(
+    "[\"'«“‘]([a-zA-Zа-яёА-ЯЁ-]{2,30})[\"'»”’]"
+)
 # Match only "слово X" (singular), not "слова X" (plural — usually a question
 # phrasing like "слова чаще всего..."). For an unquoted bare word after the
 # keyword we still require it to dodge the stopword set so a question phrasing
