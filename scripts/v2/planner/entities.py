@@ -442,4 +442,5 @@ def extract(text: str) -> Entities:
         pos_filter=_find_pos(text),
         top_n=_find_top_n(text),
         multi_author_regex=multi,
+        raw_misc={"raw_text": text},
     )

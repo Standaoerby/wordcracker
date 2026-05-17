@@ -85,11 +85,18 @@ def _need_country(e: Entities) -> QueryPlan:
 
 
 def _scope_from(e: Entities) -> dict | str:
-    """Build the legacy `scope` dict that v1 tools accept."""
+    """Build the legacy `scope` dict that v1 tools accept.
+
+    Most v1 tools reject `"all_corpus"` as a scope — they want `{'author': ...}`
+    or `{'book': ...}`. So when the entity has a period/country filter but no
+    explicit author, we widen the scope to `{'author': '.*', ...filters}` which
+    v1's `_select_books` resolves to "all books matching these filters".
+    """
     if e.book_id:
         return {"book": e.book_id}
-    if e.author_regex:
-        scope = {"author": e.author_regex}
+    has_filters = bool(e.country or e.year_from or e.year_to)
+    if e.author_regex or has_filters:
+        scope = {"author": e.author_regex or ".*"}
         if e.country:
             scope["country"] = e.country
         if e.year_from:
@@ -98,6 +105,20 @@ def _scope_from(e: Entities) -> dict | str:
             scope["year_to"] = e.year_to
         return scope
     return "all_corpus"
+
+
+def _scope_dict_or_clarify(e: Entities, *, intent: str, hint: str) -> "QueryPlan | dict":
+    """Helper for tools that strictly require a dict scope. Returns either a
+    valid scope dict or a clarify QueryPlan if no scope was extractable."""
+    scope = _scope_from(e)
+    if scope == "all_corpus":
+        return QueryPlan(
+            intent="clarify", entities=e, steps=[],
+            needs_clarify=True,
+            clarify_question=hint,
+            explain=f"{intent} requires explicit scope (author/book/period)",
+        )
+    return scope
 
 
 def _auto_min_corpus_count(e: Entities) -> int:
@@ -383,14 +404,20 @@ def _plan_word_contexts(e: Entities) -> QueryPlan:
 def _plan_word_collocates(e: Entities) -> QueryPlan:
     if not e.word:
         return _need_word(e)
-    scope = _scope_from(e)
+    scope_or_plan = _scope_dict_or_clarify(
+        e, intent="word_collocates",
+        hint=("Уточни — у какого автора или книги ищем соседей слова? "
+              "Или укажи период (например «викторианский»)."),
+    )
+    if isinstance(scope_or_plan, QueryPlan):
+        return scope_or_plan
     return QueryPlan(
         intent="word_collocates", entities=e,
         steps=[PlanStep(tool="word_collocates",
-                        args={"scope": scope, "word": e.word,
+                        args={"scope": scope_or_plan, "word": e.word,
                               "window": 4, "top": e.top_n or 20})],
         expected_cost="medium",
-        explain=f"word_collocates({scope}, {e.word})",
+        explain=f"word_collocates({scope_or_plan}, {e.word})",
     )
 
 
@@ -442,13 +469,17 @@ def _plan_word_pos(e: Entities) -> QueryPlan:
 def _plan_word_etymology(e: Entities) -> QueryPlan:
     if e.author_regex and e.etymology_family:
         scope = {"author": e.author_regex}
+        # Heavy tool — each candidate word triggers a Wiktionary HTTP call.
+        # Cap top at 20 and bump min_corpus_count to 1000 so the candidate
+        # pool stays small enough to finish under the 90s chat timeout.
         return QueryPlan(
             intent="word_etymology", entities=e,
             steps=[PlanStep(tool="find_words_by_etymology",
                             args={"scope": scope, "family": e.etymology_family,
-                                  "top": e.top_n or 30})],
+                                  "top": min(e.top_n or 15, 20),
+                                  "min_corpus_count": 1000})],
             expected_cost="heavy",
-            explain=f"find_words_by_etymology({scope}, family={e.etymology_family})",
+            explain=f"find_words_by_etymology({scope}, family={e.etymology_family}, top≤20)",
         )
     if e.word:
         return QueryPlan(
@@ -466,15 +497,22 @@ def _plan_word_etymology(e: Entities) -> QueryPlan:
 
 
 def _plan_word_emotion(e: Entities) -> QueryPlan:
-    scope = _scope_from(e)
+    scope_or_plan = _scope_dict_or_clarify(
+        e, intent="word_emotion",
+        hint=("Уточни scope: у какого автора/книги/в какой эпохе искать "
+              "эмоциональный контекст? Пример: «слова страха у По» или "
+              "«мрачные слова у викторианцев»."),
+    )
+    if isinstance(scope_or_plan, QueryPlan):
+        return scope_or_plan
     emotion = e.emotion or "fear"
     return QueryPlan(
         intent="word_emotion", entities=e,
         steps=[PlanStep(tool="emotion_collocates",
-                        args={"scope": scope, "emotion": emotion,
+                        args={"scope": scope_or_plan, "emotion": emotion,
                               "window": 4, "top": e.top_n or 25})],
         expected_cost="medium",
-        explain=f"emotion_collocates({scope}, {emotion})",
+        explain=f"emotion_collocates({scope_or_plan}, {emotion})",
     )
 
 
@@ -490,13 +528,19 @@ def _plan_learning(e: Entities) -> QueryPlan:
             ),
             explain="learning_words needs scope",
         )
+    # Cap top — anything over ~30 triggers per-word enrich loops that don't
+    # finish under the 90s chat timeout. The renderer should offer the user
+    # an "ещё 30" follow-up once the first batch lands.
+    requested = e.top_n or 30
+    eff_top = min(requested, 30)
     return QueryPlan(
         intent="learning", entities=e,
         steps=[PlanStep(tool="learning_words",
                         args={"scope": scope, "level": e.level or "intermediate",
-                              "top": e.top_n or 30, "lemmatize": True})],
+                              "top": eff_top, "lemmatize": True})],
         expected_cost="medium",
-        explain=f"learning_words({scope}, level={e.level or 'intermediate'})",
+        explain=(f"learning_words({scope}, level={e.level or 'intermediate'}, "
+                 f"top={eff_top}{f' [capped from {requested}]' if requested > 30 else ''})"),
     )
 
 
@@ -544,15 +588,21 @@ def _plan_period_vocab(e: Entities) -> QueryPlan:
     yf, yt = e.year_from, e.year_to
     if not yf and not yt:
         yf, yt = 1837, 1901  # default to Victorian
+    # author_regex='.*' over a 60-year window scans 20k+ books — easily blows
+    # past 90s. Cap top and add country if any, to keep the candidate pool
+    # tighter. If even with caps this is too slow, the renderer will say so
+    # in the warning.
     return QueryPlan(
         intent="period_vocab", entities=e,
         steps=[PlanStep(tool="top_ngrams_by_author",
-                        args={"author_regex": ".*",
-                              "n": 1, "top": e.top_n or 30,
+                        args={"author_regex": e.author_regex or ".*",
+                              "n": 1, "top": min(e.top_n or 25, 30),
                               "pos_filter": e.pos_filter,
-                              "year_from": yf, "year_to": yt})],
+                              "year_from": yf, "year_to": yt,
+                              "country": e.country})],
         expected_cost="heavy",
-        explain=f"top_ngrams_by_author over {yf}-{yt}",
+        explain=(f"top_ngrams_by_author over {yf}-{yt}"
+                 f"{f', country={e.country}' if e.country else ''}, top≤30"),
     )
 
 
@@ -570,12 +620,25 @@ def _plan_genre_compare(e: Entities) -> QueryPlan:
 
 
 def _plan_topic_words(e: Entities) -> QueryPlan:
+    # Q33: «слова в описаниях тумана/дождя/сырой погоды» — no quoted anchor,
+    # but the user's intent is clear: pick a representative weather word.
     if e.word:
         return _plan_word_collocates(e)
+    text_lower = (e.raw_misc.get("raw_text") or "").lower()
+    # Heuristic anchor extraction — caller can override by quoting a word.
+    for candidate, en in (("туман", "fog"), ("дожд", "rain"),
+                          ("сыр", "damp"), ("мор", "sea"),
+                          ("fog", "fog"), ("rain", "rain"),
+                          ("sea", "sea")):
+        if candidate in text_lower:
+            e.word = en
+            return _plan_word_collocates(e)
+    # No anchor → fall through to clarify.
     return QueryPlan(
         intent="clarify", entities=e, steps=[],
         needs_clarify=True,
-        clarify_question="Уточни топик. Пример: «слова рядом с fog», «collocates слова rain».",
+        clarify_question=("Уточни ключевое слово в кавычках, например "
+                          "«collocates слова \"fog\"», «слова рядом с \"rain\"»."),
         explain="topic_words needs anchor word",
     )
 
@@ -598,12 +661,13 @@ def _plan_word_movement(e: Entities) -> QueryPlan:
     return QueryPlan(
         intent="word_movement", entities=e,
         steps=[PlanStep(tool="top_ngrams_by_author",
-                        args={"author_regex": ".*",
-                              "n": 1, "top": e.top_n or 30,
+                        args={"author_regex": e.author_regex or ".*",
+                              "n": 1, "top": min(e.top_n or 25, 30),
                               "pos_filter": ["VERB"],
-                              "year_from": yf, "year_to": yt})],
+                              "year_from": yf, "year_to": yt,
+                              "country": e.country})],
         expected_cost="heavy",
-        explain=f"top_ngrams_by_author over {yf}-{yt}, POS=VERB",
+        explain=f"top_ngrams_by_author over {yf}-{yt}, POS=VERB, top≤30",
     )
 
 

@@ -147,7 +147,10 @@ class PlanLearningIntent(unittest.TestCase):
     def test_learning_top_300_galsworthy(self):
         _, _, p = _full("Если бы я хотел читать Голсуорси свободно, какие 300 слов мне нужно выучить?")
         self.assertEqual(p.intent, "learning")
-        self.assertEqual(p.steps[0].args["top"], 300)
+        # Plan caps to 30 per call — anything larger blows past chat timeout
+        # with the per-word enrich loop. Renderer offers "ещё" follow-up.
+        self.assertEqual(p.steps[0].args["top"], 30)
+        self.assertIn("capped from 300", p.explain)
         self.assertEqual(p.steps[0].args["scope"]["author"], "^Galsworthy,")
 
 
