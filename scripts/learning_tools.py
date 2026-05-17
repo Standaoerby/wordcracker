@@ -289,6 +289,61 @@ def _score(book_count: int, corpus_count: int, scope_tokens: int) -> float:
     return math.log10(corpus_count) * math.log10(1 + affinity)
 
 
+def _learning_priority_score(*, scope_count: int, corpus_count: int,
+                              scope_tokens: int, level: str,
+                              has_context: bool, is_proper_noun: bool) -> float:
+    """Sprint 8.1 learning_score from the v2 roadmap.
+
+    Formula:
+        0.30 * author_affinity
+      + 0.20 * book_frequency
+      + 0.20 * rarity
+      + 0.15 * CEFR_relevance
+      + 0.10 * context_quality
+      + 0.05 * non_proper_noun_confidence
+
+    Each component is normalized to [0, 1] before weighting so the final
+    score sits in [0, 1] regardless of corpus size. The weights stay tuned
+    to the original roadmap §8.2 spec.
+    """
+    if corpus_count <= 0 or scope_tokens <= 0:
+        return 0.0
+    corpus_total = _corpus_total_tokens() or 1
+
+    # 1. author_affinity — log10-compressed so giant affinity outliers don't
+    # dominate. affinity 100 → 1.0; affinity 1 → 0.0; affinity <1 → 0.0
+    affinity = (scope_count / scope_tokens) / (corpus_count / corpus_total)
+    affinity_norm = max(0.0, min(1.0, math.log10(max(1.0, affinity)) / 2.0))
+
+    # 2. book_frequency — normalized in-scope rate. 1/1000 typical
+    freq = scope_count / scope_tokens
+    freq_norm = max(0.0, min(1.0, math.log10(1 + freq * 100_000) / 3.0))
+
+    # 3. rarity — log-flip of corpus_count.
+    rarity = max(0.0, min(1.0, 1.0 - math.log10(max(1, corpus_count)) / 8.0))
+
+    # 4. CEFR relevance — boost when corpus_count band matches user level.
+    # Level cmin / cmax from LEVELS — we evaluate whether the corpus_count
+    # sits inside the requested level's window.
+    band = LEVELS.get(level, LEVELS["intermediate"])
+    cmin = band["min_corpus"]
+    cmax = band["max_corpus"] or 10**12
+    cefr_norm = 1.0 if cmin <= corpus_count <= cmax else 0.4
+
+    # 5. context_quality — flat boost if we managed to fetch an example.
+    ctx_norm = 1.0 if has_context else 0.5
+
+    # 6. non_proper_noun_confidence — proper noun → 0, else 1.
+    propn_norm = 0.0 if is_proper_noun else 1.0
+
+    return (0.30 * affinity_norm
+            + 0.20 * freq_norm
+            + 0.20 * rarity
+            + 0.15 * cefr_norm
+            + 0.10 * ctx_norm
+            + 0.05 * propn_norm)
+
+
 def _lemmatize_words(words: list[str]) -> dict:
     """Word -> (lemma, pos). spaCy is loaded once per call."""
     try:
@@ -724,11 +779,18 @@ def book_archaic_words(pg_id: str, top: int = 30,
 # ============================ TOOL: export_word_list ============================
 def export_word_list(words: list[dict] | list[str], format: str = "anki_csv",
                      out_path: str | None = None,
-                     target_lang: str = "ru") -> dict:
-    """Export words to Anki CSV / markdown / plain JSON. Auto-enriches missing entries from cache."""
+                     target_lang: str = "ru",
+                     deck_name: str = "wordcracker") -> dict:
+    """Export words to Anki CSV / Anki .apkg / markdown / plain JSON.
+
+    Auto-enriches missing entries from cache. The .apkg path uses genanki
+    when available — it produces a one-shot importable deck that Anki opens
+    without any field-mapping dialog (vs CSV which requires manual import
+    + field selection). genanki is optional: if it's not installed, the
+    apkg request falls back to anki_csv with a warning."""
     t0 = time.perf_counter()
-    if format not in ("anki_csv", "markdown", "json"):
-        return {"error": "format must be anki_csv / markdown / json"}
+    if format not in ("anki_csv", "anki_apkg", "markdown", "json"):
+        return {"error": "format must be anki_csv / anki_apkg / markdown / json"}
 
     # accept either list of strings or list of dicts (from learning_words.results)
     normalized = []
@@ -750,7 +812,57 @@ def export_word_list(words: list[dict] | list[str], format: str = "anki_csv",
             continue
         enriched.append({**w, **info})
 
-    out_path = out_path or str(DERIVED_DIR / f"export_{int(time.time())}.{('csv' if format=='anki_csv' else format[:2])}")
+    _ext = {"anki_csv": "csv", "anki_apkg": "apkg",
+            "markdown": "md", "json": "json"}[format]
+    out_path = out_path or str(DERIVED_DIR / f"export_{int(time.time())}.{_ext}")
+
+    if format == "anki_apkg":
+        try:
+            import genanki
+        except ImportError:
+            _log("genanki not installed — falling back to anki_csv")
+            format = "anki_csv"
+            out_path = out_path.replace(".apkg", ".csv")
+        else:
+            # Stable IDs so re-imports update the same deck instead of creating
+            # a duplicate. Hash from deck_name + a project-wide constant.
+            import hashlib
+            seed = int(hashlib.md5(f"wordcracker:{deck_name}".encode()).hexdigest()[:9], 16)
+            model = genanki.Model(
+                seed + 1,
+                "wordcracker basic",
+                fields=[{"name": "Front"}, {"name": "Back"}, {"name": "Tags"}],
+                templates=[{
+                    "name": "Card 1",
+                    "qfmt": "{{Front}}",
+                    "afmt": "{{FrontSide}}<hr id=answer>{{Back}}",
+                }],
+            )
+            deck = genanki.Deck(seed, deck_name)
+            for r in enriched:
+                front = r.get("word", "")
+                back_lines = [
+                    f"<b>{r.get('translation_'+target_lang,'')}</b>",
+                    f"<i>{r.get('pos','')}</i> · {r.get('cefr_estimate','')}",
+                    f"{r.get('definition_en','')}",
+                    f"<small>{r.get('example_sentence','')}</small>",
+                    f"<small>etym: {r.get('etymology','')}</small>",
+                ]
+                back = "<br>".join(s for s in back_lines if s.strip("<>/biemall, "))
+                tags_list = [t for t in ("wordcracker",
+                                         r.get("pos", "").lower(),
+                                         r.get("cefr_estimate", "").lower())
+                             if t]
+                deck.add_note(genanki.Note(
+                    model=model, fields=[front, back, " ".join(tags_list)],
+                    tags=tags_list,
+                ))
+            genanki.Package(deck).write_to_file(out_path)
+            _log(f"export_word_list (apkg) -> {out_path} ({len(enriched)} entries) "
+                 f"in {time.perf_counter()-t0:.2f}s")
+            return {"out_path": out_path, "format": "anki_apkg",
+                    "entries": len(enriched),
+                    "skipped_proper_nouns": len(normalized) - len(enriched)}
 
     if format == "anki_csv":
         with open(out_path, "w", encoding="utf-8", newline="") as fh:
@@ -870,7 +982,8 @@ LEARNING_TOOLS_SPEC = [
         ),
         "parameters": {"type": "object", "properties": {
             "words": {"type": "array", "items": {"type": "object"}, "description": "список слов (можно результат learning_words.results напрямую)"},
-            "format": {"type": "string", "enum": ["anki_csv","markdown","json"]},
+            "format": {"type": "string",
+                       "enum": ["anki_csv", "anki_apkg", "markdown", "json"]},
             "out_path": {"type": "string"},
             "target_lang": {"type": "string", "description": "default 'ru'"},
         }, "required": ["words"]},
