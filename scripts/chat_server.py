@@ -23,8 +23,62 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rag_query import ask, ask_stream, SYSTEM_PROMPT, ASSISTANT_NAME
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root for scripts.v2.*
+from rag_query import ask as ask_v1, ask_stream as ask_stream_v1, SYSTEM_PROMPT, ASSISTANT_NAME
 from rag_query import TOOLS_SPEC  # combined rag_tools + learning_tools
+
+# v2 engine — lazy-imported on first request that asks for it. Avoids slow
+# import cost for users on the v1 path and keeps v1 deployable even if v2 has
+# a bug.
+_V2_ENGINE = {"ask": None, "ask_stream": None, "loaded": False}
+
+
+def _v2_engine():
+    if _V2_ENGINE["loaded"]:
+        return _V2_ENGINE
+    try:
+        from scripts.v2.rag_v2 import ask as v2_ask, ask_stream as v2_ask_stream
+        _V2_ENGINE["ask"] = v2_ask
+        _V2_ENGINE["ask_stream"] = v2_ask_stream
+    except Exception as e:
+        print(f"[chat] v2 engine unavailable: {e}", file=sys.stderr, flush=True)
+        _V2_ENGINE["ask"] = None
+        _V2_ENGINE["ask_stream"] = None
+    _V2_ENGINE["loaded"] = True
+    return _V2_ENGINE
+
+
+def _pick_engine(path: str, headers, payload: dict) -> str:
+    """Return 'v1' or 'v2' based on (in order): query string ?engine=, header
+    X-WC-Engine:, payload['engine'], env WC_DEFAULT_ENGINE, fallback 'v1'."""
+    import urllib.parse as up
+    qs = up.urlparse(path).query
+    q = up.parse_qs(qs)
+    eng = (q.get("engine", [None])[0]
+           or headers.get("X-WC-Engine")
+           or payload.get("engine")
+           or os.environ.get("WC_DEFAULT_ENGINE", "v1")).lower()
+    return "v2" if eng == "v2" else "v1"
+
+
+def ask(question, history=None, *, engine="v1", **kw):
+    if engine == "v2":
+        v2 = _v2_engine()
+        if v2["ask"] is not None:
+            return v2["ask"](question, history=history, **kw)
+    return ask_v1(question, history=history, **kw)
+
+
+def ask_stream(question, history=None, *, engine="v1", **kw):
+    if engine == "v2":
+        v2 = _v2_engine()
+        if v2["ask_stream"] is not None:
+            yield from v2["ask_stream"](question, history=history, **kw)
+            return
+    yield from ask_stream_v1(question, history=history, **kw)
+
+
+import os  # noqa: E402 — must follow the import block above
 
 PAGE = r"""<!doctype html>
 <html lang=ru>
@@ -360,8 +414,9 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 pass
             return
+        engine = _pick_engine(self.path, self.headers, payload)
         try:
-            for ev in ask_stream(question, history=history):
+            for ev in ask_stream(question, history=history, engine=engine):
                 line = "data: " + json.dumps(ev, ensure_ascii=False, default=str) + "\n\n"
                 try:
                     self.wfile.write(line.encode("utf-8"))
@@ -385,7 +440,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 return self._send(400, b'{"error":"bad json"}', "application/json")
             return self._stream_chat(payload)
-        if self.path != "/api/chat":
+        if not (self.path == "/api/chat" or self.path.startswith("/api/chat?")):
             return self._send(404, b"not found", "text/plain")
         length = int(self.headers.get("Content-Length", "0"))
         try:
@@ -399,13 +454,14 @@ class Handler(BaseHTTPRequestHandler):
         history = payload.get("history") or []
         if not isinstance(history, list):
             history = []
+        engine = _pick_engine(self.path, self.headers, payload)
         t0 = time.time()
         try:
-            res = ask(question, history=history)
+            res = ask(question, history=history, engine=engine)
         except Exception as e:
             return self._send(500, json.dumps({"error": f"ask() raised: {e}"}),
                               "application/json")
-        print(f"[chat] {question[:60]!r} → {res['iterations']} iter, "
+        print(f"[chat:{engine}] {question[:60]!r} → {res['iterations']} iter, "
               f"{len(res['tool_calls'])} call(s), {res['elapsed_sec']}s "
               f"(wall {time.time()-t0:.1f}s)", file=sys.stderr)
         return self._send(200, json.dumps(res, ensure_ascii=False, default=str),

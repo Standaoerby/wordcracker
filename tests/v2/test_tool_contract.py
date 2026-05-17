@@ -222,9 +222,15 @@ class CorpusOverviewPilot(unittest.TestCase):
     we expect ok=True with warnings about missing dirs."""
 
     def test_runs_without_container_paths(self):
-        # Repopulate registry by importing the tools package.
-        from scripts.v2 import tools  # noqa: F401
+        # Force re-registration: other tests may have snapshot-cleared REGISTRY
+        # while leaving scripts.v2.tools modules already imported, so a plain
+        # `import` here wouldn't re-run the decorators.
         from scripts.v2.tool_registry import REGISTRY, dispatch
+        if "corpus_overview" not in REGISTRY:
+            for mod in list(sys.modules):
+                if mod.startswith("scripts.v2.tools"):
+                    del sys.modules[mod]
+            import scripts.v2.tools  # noqa: F401
 
         self.assertIn("corpus_overview", REGISTRY)
         r = dispatch("corpus_overview", {})
