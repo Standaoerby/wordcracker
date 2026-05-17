@@ -585,13 +585,26 @@ def _plan_country_vocab(e: Entities) -> QueryPlan:
 
 
 def _plan_period_vocab(e: Entities) -> QueryPlan:
+    text_lower = (e.raw_misc.get("raw_text") or "").lower()
+    # Q38-style: «женских персонажей викторианской литературы» — gender of
+    # speaking characters isn't annotated in our corpus. Refuse politely
+    # rather than burn 120s on a top_ngrams scan that can't answer the real
+    # question anyway.
+    if any(k in text_lower for k in ("женск", "мужск", "female character",
+                                     "male character", "gender")):
+        return QueryPlan(
+            intent="period_vocab", entities=e, steps=[],
+            out_of_scope_reason=(
+                "Гендер персонажей не размечен в корпусе SPGC — нет тегирования "
+                "диалогов и speaker'ов. Могу показать общую лексику периода "
+                "(`top_ngrams_by_author` с year_from/year_to) или фирменные слова "
+                "конкретных авториц (Austen, Eliot, Gaskell, Bronte)."
+            ),
+            explain="period_vocab + gender → no annotation",
+        )
     yf, yt = e.year_from, e.year_to
     if not yf and not yt:
-        yf, yt = 1837, 1901  # default to Victorian
-    # author_regex='.*' over a 60-year window scans 20k+ books — easily blows
-    # past 90s. Cap top and add country if any, to keep the candidate pool
-    # tighter. If even with caps this is too slow, the renderer will say so
-    # in the warning.
+        yf, yt = 1837, 1901
     return QueryPlan(
         intent="period_vocab", entities=e,
         steps=[PlanStep(tool="top_ngrams_by_author",
@@ -620,20 +633,32 @@ def _plan_genre_compare(e: Entities) -> QueryPlan:
 
 
 def _plan_topic_words(e: Entities) -> QueryPlan:
-    # Q33: «слова в описаниях тумана/дождя/сырой погоды» — no quoted anchor,
-    # but the user's intent is clear: pick a representative weather word.
+    """Q33-style topic queries: «слова в описаниях тумана/дождя/моря».
+
+    Two-step heuristic:
+      1. If user quoted a word — straight to word_collocates with their scope.
+      2. Otherwise extract an English anchor from Russian topic stem
+         (тумана→fog, дождя→rain). Default scope to 19th century when none
+         given — these queries are usually about classical literature, not
+         the entire 75k-book corpus, and a default keeps wall time under 90s
+         (word_collocates already caps at max_books=8000).
+    """
     if e.word:
         return _plan_word_collocates(e)
     text_lower = (e.raw_misc.get("raw_text") or "").lower()
-    # Heuristic anchor extraction — caller can override by quoting a word.
     for candidate, en in (("туман", "fog"), ("дожд", "rain"),
                           ("сыр", "damp"), ("мор", "sea"),
                           ("fog", "fog"), ("rain", "rain"),
                           ("sea", "sea")):
         if candidate in text_lower:
             e.word = en
+            # If user didn't specify a period, default to the 19th century —
+            # otherwise scope_from would return "all_corpus" and the tool
+            # would clarify-out unhelpfully.
+            if not (e.author_regex or e.book_id or e.year_from or e.year_to):
+                e.year_from = 1800
+                e.year_to = 1900
             return _plan_word_collocates(e)
-    # No anchor → fall through to clarify.
     return QueryPlan(
         intent="clarify", entities=e, steps=[],
         needs_clarify=True,
@@ -655,6 +680,23 @@ def _plan_word_dialogue(e: Entities) -> QueryPlan:
 
 
 def _plan_word_movement(e: Entities) -> QueryPlan:
+    # Top-ngrams with author_regex='.*' over a 100-year window scans
+    # ~20k books per token (5GB+ of token files). Even with top≤30 cap
+    # and POS filter it consistently blows past the 120s chat budget.
+    # Without an author or smaller scope we can't satisfy this query
+    # in chat — be honest about that. Suggest a narrower scope.
+    if not e.author_regex and not e.country and not e.book_id:
+        return QueryPlan(
+            intent="word_movement", entities=e, steps=[],
+            out_of_scope_reason=(
+                "Запрос «глаголы движения в XIX веке» требует сканирования "
+                "20k+ книг — это превышает бюджет чата (90-120с). Сузь "
+                "scope: укажи автора («у Диккенса»), страну («британские»), "
+                "или конкретную книгу. Можно также спросить про глаголы "
+                "у конкретного автора через `affinity_by_author(pos_filter=['VERB'])`."
+            ),
+            explain="word_movement без scope → too expensive for chat",
+        )
     yf, yt = e.year_from, e.year_to
     if not yf and not yt:
         yf, yt = 1800, 1899
