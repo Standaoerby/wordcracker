@@ -202,7 +202,32 @@ class HybridIntegration(unittest.TestCase):
             cacheable=False,
         )
 
-        # Mock semantic via legacy_dispatch
+        # Mock semantic_search too. After native migration semantic_search is
+        # in REGISTRY (not legacy_dispatch), so we replace its ToolSpec here
+        # and the rag_query stub is kept as a backstop in case any old
+        # legacy_dispatch call sneaks through.
+        def _mock_sem(query, k=8, author_filter=None):
+            return ToolResult.success(
+                tool="semantic_search",
+                data={"results": [
+                    {"metadata": {"pg_id": "PG2", "title": "T2", "author": "A2"},
+                     "text": "near"},
+                    {"metadata": {"pg_id": "PG4", "title": "T4", "author": "A4"},
+                     "text": "haze"},
+                ]},
+                coverage=Coverage(books_matched=2, books_total=-1),
+            )
+        REGISTRY["semantic_search"] = ToolSpec(
+            name="semantic_search",
+            fn=_mock_sem,
+            category="search",
+            description="mock",
+            input_schema={"type": "object"},
+            cost="medium",
+            cacheable=False,
+        )
+
+        # Backstop for legacy_dispatch (unlikely to fire now, but defensive).
         m = types.ModuleType("scripts.rag_query")
         m.TOOL_DISPATCH = {
             "semantic_search": lambda **kw: {
