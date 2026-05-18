@@ -66,31 +66,73 @@ def _need_book(e: Entities) -> QueryPlan:
     )
 
 
+# Targeted analog suggestions per copyright author — better UX than a
+# generic «вот несколько имён». Keys are substrings of KNOWN_BOOKS
+# canonical names; first match wins.
+_COPYRIGHT_ANALOGS = {
+    "lord of the rings": ("Tolkien", "Уильям Моррис «The Well at the World's End» (PG169) — тот же архаичный fantasy-стиль, прямо влиял на Толкина"),
+    "hobbit":            ("Tolkien", "Уильям Моррис «The House of the Wolfings» (PG2885) — древнегерманские/норвежские корни, как у Толкина"),
+    "1984":              ("Orwell", "Джозеф Конрад «Heart of Darkness» (PG219) — тёмная дистопическая тональность, B2+"),
+    "nineteen eighty":   ("Orwell", "Джозеф Конрад «Heart of Darkness» (PG219) — тёмная дистопическая тональность"),
+    "old man and the sea": ("Hemingway", "Mark Twain «Adventures of Huckleberry Finn» (PG76) — ближайший американский лаконичный стиль из public-domain"),
+}
+
+
 def _copyright_refusal_if_book_under_copyright(e: Entities) -> QueryPlan | None:
     """If the user named a known but unavailable book (Tolkien / Hemingway /
     Orwell / etc. — recorded in KNOWN_BOOKS with empty PG id), return an
-    `out_of_scope` plan with a friendly explanation instead of letting the
-    chain run and silently fail with a confusing tool error.
+    `out_of_scope` plan with a structured explanation:
+    1. WHAT we have for this book (metadata only — title, downloads,
+       author bio, year — via Gutendex if the PG entry exists)
+    2. WHY we don't have the full text (copyright window)
+    3. WHICH public-domain analog we'd recommend instead
+
+    Stan's 2026-05-18 feedback was that the old refusal felt curt — just
+    «отсутствует в корпусе». Users want to know what they CAN ask about
+    even when full-text analysis is off the table.
 
     Returns None when this isn't the situation."""
     if e.book_title and not e.book_id:
         from scripts.v2.planner.entities import KNOWN_BOOKS
         key = e.book_title.lower().replace("’", "'").replace("‘", "'")
-        if key in KNOWN_BOOKS:
-            _pg, canonical = KNOWN_BOOKS[key]
+        # «Old Man and the Sea» without leading «the» misses
+        # «the old man and the sea» in KNOWN_BOOKS. Try both variants —
+        # users routinely drop the leading article when typing.
+        candidates = [key]
+        if not key.startswith("the "):
+            candidates.append("the " + key)
+        elif key.startswith("the "):
+            candidates.append(key[4:])
+        match_key = next((c for c in candidates if c in KNOWN_BOOKS), None)
+        if match_key:
+            _pg, canonical = KNOWN_BOOKS[match_key]
+            key = match_key  # so the analog lookup below uses the canonical form
             if not _pg:
+                analog_hint = ""
+                for sub, (_author, hint) in _COPYRIGHT_ANALOGS.items():
+                    if sub in key:
+                        analog_hint = f"\n\n**Ближайший аналог в public-domain:** {hint}."
+                        break
+                if not analog_hint:
+                    analog_hint = (
+                        "\n\n**Ближайший аналог в public-domain:** для "
+                        "Tolkien-стиля — Уильям Моррис «The Well at the "
+                        "World's End», для Hemingway — Mark Twain, для "
+                        "Orwell — Джозеф Конрад «Heart of Darkness»."
+                    )
                 return QueryPlan(
                     intent="out_of_scope", entities=e, steps=[],
                     out_of_scope_reason=(
-                        f"«{canonical}» отсутствует в нашем корпусе — "
-                        f"книга всё ещё под защитой copyright и недоступна "
-                        f"в Project Gutenberg. Корпус покрывает только "
-                        f"public-domain тексты (в основном до 1929 года US "
-                        f"и часть UK до ~1973). "
-                        f"Могу предложить ближайший аналог из тех, что есть: "
-                        f"например, для Tolkien — Уильям Моррис «The Well at "
-                        f"the World's End», для Hemingway — Mark Twain, для "
-                        f"Orwell — Джозеф Конрад «Heart of Darkness»."
+                        f"«{canonical}» — книга всё ещё под защитой "
+                        f"copyright, **полнотекстовый анализ невозможен**: "
+                        f"в Project Gutenberg доступны только public-domain "
+                        f"тексты (US до ~1929, UK до ~1973).\n\n"
+                        f"**Что доступно по этой книге:** только мета-"
+                        f"информация (название, автор, year, downloads из "
+                        f"Gutendex API, если книга вообще зарегистрирована). "
+                        f"Стилометрию / частоты / affinity / контексты "
+                        f"посчитать не на чем — токенизированного текста нет."
+                        f"{analog_hint}"
                     ),
                     explain=f"book under copyright: {canonical}",
                 )
@@ -170,12 +212,31 @@ def _scope_dict_or_clarify(e: Entities, *, intent: str, hint: str) -> "QueryPlan
     return scope
 
 
+# Authors whose English translations leak transliterated character /
+# place names that look like real lexemes to spaCy POS (Gavril, Lisaveta,
+# Korsakoff, kibitka, mossoo, beaupre — all appeared in the affinity for
+# Pushkin at min_corpus_count=100). For these we bump the floor so the
+# `corpus_count` filter aggressively drops transliterations even when
+# spaCy mistags them as NOUN/ADJ instead of PROPN.
+_HIGH_TRANSLIT_AUTHORS = frozenset({
+    "^Pushkin,", "^Tolstoy,", "^Dostoyevsky,", "^Chekhov,",
+    "^Turgenev,", "^Gogol,", "^Lermontov,", "^Bulgakov,",
+})
+
+
 def _auto_min_corpus_count(e: Entities) -> int:
-    """Heuristic: when filtering by POS or asking for 'характерные', bump
-    min_corpus_count to drop OOV proper nouns. Matches v1 prompt rule 7."""
+    """Heuristic: bump min_corpus_count to drop OOV proper nouns.
+
+    Floor was 100 — too soft, let through Pushkin character names
+    (Gavril/Korsakoff/etc) at corpus_count 200-800. Raised default to 500
+    (matches POS / country case) and an aggressive 1500 for Russian
+    authors where transliterated names are systemically noisier.
+    """
+    if e.author_regex in _HIGH_TRANSLIT_AUTHORS:
+        return 1500
     if e.pos_filter or e.country:
         return 500
-    return 100
+    return 500
 
 
 # ===== plan templates =====

@@ -101,5 +101,89 @@ class MergeBackfill(unittest.TestCase):
         self.assertEqual(merged.book_id, "PG345")
 
 
+class ReRankFollowup(unittest.TestCase):
+    """Stan 2026-05-18 round 2: after «дай фирменные слова пушкина» returns
+    a table, «отсортируй их по количеству упоминаний» used to clarify-out.
+    The trigger now feeds infer_followup_intent through the history to
+    pick up the prior intent and re-run the plan (cache hit → LLM
+    re-renders sorted)."""
+
+    def test_otsortiruy_returns_prior_intent(self):
+        from scripts.v2.planner.history import infer_followup_intent
+        history = [
+            {"role": "user", "content": "дай фирменные слова пушкина"},
+            {"role": "assistant", "content": "gavril 5445 | lisaveta 4022 ..."},
+        ]
+        self.assertEqual(
+            infer_followup_intent("отсортируй их по количеству упоминаний",
+                                   history),
+            "author_vocab",
+        )
+
+    def test_rerank_synonyms(self):
+        from scripts.v2.planner.history import infer_followup_intent
+        history = [
+            {"role": "user", "content": "сравни By и Lovecraft"},
+            {"role": "assistant", "content": "..."},
+        ]
+        for q in ("переразложи в другом порядке",
+                  "по убыванию",
+                  "sort them by frequency"):
+            with self.subTest(q=q):
+                self.assertEqual(
+                    infer_followup_intent(q, history), "author_compare",
+                )
+
+    def test_rerank_without_history_returns_none(self):
+        from scripts.v2.planner.history import infer_followup_intent
+        self.assertIsNone(infer_followup_intent("отсортируй", history=None))
+
+
+class CopyrightRefusal(unittest.TestCase):
+    """Stan 2026-05-18 round 2: copyright refusal used to be «отсутствует
+    в корпусе». Now structured: metadata-only + analog hint, with
+    leading-the fuzzy match for «Old Man and the Sea»."""
+
+    def test_lotr_returns_oos_with_analog(self):
+        from scripts.v2.planner.entities import extract
+        from scripts.v2.planner.plan import _copyright_refusal_if_book_under_copyright
+        e = extract('слова из "The Lord of the Rings"')
+        plan = _copyright_refusal_if_book_under_copyright(e)
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.intent, "out_of_scope")
+        self.assertIn("полнотекстовый анализ невозможен", plan.out_of_scope_reason)
+        self.assertIn("public-domain", plan.out_of_scope_reason)
+        self.assertIn("Моррис", plan.out_of_scope_reason)
+
+    def test_old_man_without_the_prefix_still_matches(self):
+        from scripts.v2.planner.entities import extract
+        from scripts.v2.planner.plan import _copyright_refusal_if_book_under_copyright
+        e = extract('фирменные слова из "Old Man and the Sea"')
+        plan = _copyright_refusal_if_book_under_copyright(e)
+        self.assertIsNotNone(plan, msg="leading-the fuzzy match should catch this")
+        self.assertIn("Twain", plan.out_of_scope_reason)
+
+
+class HighTranslitCorpusFloor(unittest.TestCase):
+    """Stan 2026-05-18: «фирменные слова пушкина» used to return character
+    names (Gavril/Lisaveta/Korsakoff/Pushkin himself, kibitka, mossoo,
+    beaupre) because min_corpus_count=100 was too soft for transliterated
+    proper nouns. Russian authors now get min_corpus_count=1500."""
+
+    def test_pushkin_high_floor(self):
+        from scripts.v2.planner.plan import _auto_min_corpus_count
+        e = extract("дай фирменные слова пушкина")
+        self.assertEqual(_auto_min_corpus_count(e), 1500)
+
+    def test_tolstoy_high_floor(self):
+        from scripts.v2.planner.plan import _auto_min_corpus_count
+        self.assertEqual(_auto_min_corpus_count(extract("слова Толстого")), 1500)
+
+    def test_english_author_normal_floor(self):
+        from scripts.v2.planner.plan import _auto_min_corpus_count
+        # English author with no special filtering — uses default 500
+        self.assertEqual(_auto_min_corpus_count(extract("слова Wodehouse")), 500)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

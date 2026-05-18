@@ -31,8 +31,29 @@ _REF_TRIGGERS = re.compile(
     r"предыдущ\w*|"
     r"еще|ещё|"
     r"приведи (примеры|три|пример)|"
+    # «отсортируй / переразложи / в другом виде / по убыванию» — user is
+    # asking us to re-format the data the assistant just returned, not
+    # start a new query. Caught from Stan's 2026-05-18 round («дай
+    # фирменные слова пушкина» → table → «отсортируй их по количеству
+    # упоминаний» used to clarify-out).
+    r"отсортируй|сортируй|пересортируй|перегруппируй|перестрой|"
+    r"в другом (виде|формате|порядке)|"
+    r"по убывани\w+|по возрастани\w+|"
+    r"sort (them|by)|re-?rank|"
     r"of (this|these|those|that)|"
     r"more (examples|of these))\b",
+    re.IGNORECASE,
+)
+
+# Re-rank / re-format follow-ups: same data, different ordering. Re-run the
+# previous intent so the LLM gets the same tool result back from cache and
+# can render it sorted. Caught separately from «more examples» / «расскажи
+# подробнее» which legitimately fire word_contexts.
+_RERANK_PATTERNS = re.compile(
+    r"отсортируй|сортируй|пересортируй|перегруппируй|перестрой|"
+    r"в другом (виде|формате|порядке)|"
+    r"по убывани\w+|по возрастани\w+|"
+    r"sort (them|by)|re-?rank",
     re.IGNORECASE,
 )
 
@@ -130,11 +151,30 @@ _FOLLOWUP_INTENT_RULES = [
 ]
 
 
-def infer_followup_intent(text: str) -> str | None:
+def infer_followup_intent(text: str,
+                          history: list[dict] | None = None) -> str | None:
     """If `text` looks like a follow-up with implicit intent, return it.
-    Otherwise None — caller falls back to the regular intent classifier."""
+    Otherwise None — caller falls back to the regular intent classifier.
+
+    When the follow-up is a re-rank / re-format request («отсортируй»,
+    «по убыванию», «sort by»), look back at the last user message and
+    re-classify it; we want to re-run the same plan so the LLM gets the
+    same data back and can re-render it sorted. Without this, «отсортируй
+    их по количеству упоминаний» after a fresh `affinity_by_author` table
+    used to clarify-out.
+    """
     if not _looks_like_followup(text):
         return None
+    if _RERANK_PATTERNS.search(text) and history:
+        # Re-classify the most recent user message that had a non-clarify
+        # intent — that's the data we want re-rendered.
+        from scripts.v2.planner.intent import classify as _classify
+        for msg in reversed(history):
+            if msg.get("role") != "user":
+                continue
+            prior_intent = _classify(msg.get("content") or "")
+            if prior_intent.label not in ("clarify", ""):
+                return prior_intent.label
     for pat, intent in _FOLLOWUP_INTENT_RULES:
         if pat.search(text):
             return intent

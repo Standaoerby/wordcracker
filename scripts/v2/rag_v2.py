@@ -151,7 +151,7 @@ def ask(
     # the planner can route to a real tool. Only kicks in for clarify-class
     # responses so explicit intents still win.
     if intent.label == "clarify":
-        inferred = history_mod.infer_followup_intent(question)
+        inferred = history_mod.infer_followup_intent(question, history)
         if inferred:
             intent = int_mod.IntentMatch(label=inferred, confidence=0.75,
                                          matched_pattern="followup-inferred")
@@ -270,7 +270,7 @@ def ask_stream(
     entities = ent_mod.extract(question)
     entities = history_mod.merge_with_history(entities, history, question)
     if intent.label == "clarify":
-        inferred = history_mod.infer_followup_intent(question)
+        inferred = history_mod.infer_followup_intent(question, history)
         if inferred:
             intent = int_mod.IntentMatch(label=inferred, confidence=0.75,
                                          matched_pattern="followup-inferred")
