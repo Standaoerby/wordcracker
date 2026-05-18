@@ -10,60 +10,78 @@ dashboard), <https://admin.slovoeb.net> (upload новых книг).
 
 ---
 
-## v2.0 (2026-05-17) — текущая версия
+## v2.3.1 (2026-05-18) — текущая версия
 
 Архитектура переписана на детерминированный планировщик. LLM больше не
 выбирает tools на каждой итерации — это делают rules-based intent classifier
-+ entity extractor + plan templates. LLM остаётся только для финального
-рендера и второго critic-прохода.
+(80+ правил) + entity extractor + plan templates. LLM остаётся только для
+финального рендера и второго critic-прохода. Sprint 11 принёс speed wins
+(60s→21ms на tokens aggregates) и Q40 composite_compare. v2.3 — adversarial
+hardening + 5 routing fixes. v2.3.1 — Pushkin character-name leak +
+re-rank followup + structured copyright OOS.
 
 ```
-user → intent classifier (33 правила)
-     → entity extractor (90+ aliases, 30 KNOWN_BOOKS, paired-quote regex)
-     → history.merge (multi-turn entity backfill + intent inference)
-     → plan builder (deterministic chain per intent)
-     → tool router (no LLM in loop)
+user → input caps (64KB / 4K chars / 50 turns) + control-char strip
+     → intent classifier (35 intents, 80+ rules + injection guards)
+     → entity extractor (90+ aliases, KNOWN_BOOKS, paired-quote regex)
+     → history.merge (multi-turn entity backfill + intent inference,
+                      now handles re-rank followups)
+     → plan builder (33 templates, @_with_copyright_check decorator)
+     → tool router (no LLM in loop; supports pg_id/scope/author_regex
+                    inject for fan-out chains)
      → renderer (single LLM call, low temp, sees structured data only)
-     → critic (second low-temp LLM pass, flags unsupported claims)
-     → answer + UI badges (engine / intent / critic / copy)
+     → critic (second low-temp LLM pass; MAX_FLAGS=2 + per-intent skip)
+     → answer + UI badges (engine / intent / critic / copy) + retry-with-scope
+     → sticky stats footer (queries / avg / cache hit rate / critic flags)
 ```
 
 ### Что изменилось vs v1.1.7
 
-| Аспект | v1.1.7 | v2.0 |
+| Аспект | v1.1.7 | v2.3.1 |
 |---|---|---|
 | Tool selection | LLM выбирает на каждой итерации (до 5 раз) | Детерминированный planner |
 | Hallucination | Иногда выдумывал PG id (см. v1.0e issue) | Mandatory `find_book` chain + critic verify |
-| Multi-turn | История терялась | `history.py` backfill last author/book/word |
-| Copyright books | Тула фейлила | Friendly out_of_scope с альтернативой |
+| Multi-turn | История терялась | `history.py` backfill + re-rank inheritance |
+| Copyright books | Тула фейлила | Structured OOS: metadata-only + analog |
 | Median latency | 30-50s (agentic loop) | **10-18s** (single render call) |
-| Functional 40/40 | 13 pass / 3 partial / 3 fail | **31 pass / 3 clarify / 6 OOS / 0 fail** |
+| Functional 40-question | 13 pass / 3 partial / 3 fail | **40/40 pass-like, 33 tool-driven** |
 | Tools native v2 | — | **35/35** (full Coverage/Warnings envelope) |
-| Tests | 57 functional | 184 unit + 6 e2e + 25 all-tools audit |
+| Tests | 57 functional | **206 unit + 18 caught-bug probes** |
+| Heavy aggregate latency | `top_authors_by(tokens)` 60s+ | **21ms via pre-built JSON cache** |
+| Adversarial input | unbounded | 64KB payload cap, 10× prompt-injection guards |
 
 ### Components
 
-- **scripts/v2/types.py** — `ToolResult` envelope (ok, data, coverage,
+- **scripts/v2/_types.py** — `ToolResult` envelope (ok, data, coverage,
   warnings, source_info, runtime_ms)
 - **scripts/v2/tool_registry.py** — `@tool` декоратор, `dispatch()`,
   cache wiring
-- **scripts/v2/planner/intent.py** — 33-intent taxonomy, rules + priority
-- **scripts/v2/planner/entities.py** — 90+ author aliases, 30 KNOWN_BOOKS,
-  paired-quote regex для curly apostrophes
-- **scripts/v2/planner/plan.py** — chain templates на каждый intent
-- **scripts/v2/planner/router.py** — детерминированный executor
-- **scripts/v2/planner/history.py** — multi-turn entity backfill + intent
-  inference для follow-up phrases
-- **scripts/v2/critic.py** — second-LLM fact-check pass
+- **scripts/v2/planner/intent.py** — 35-intent taxonomy, 80+ rules with
+  priority/confidence + 10 prompt-injection guards
+- **scripts/v2/planner/entities.py** — 90+ author aliases, KNOWN_BOOKS,
+  paired-quote regex, `_NAME_AFTER_KEY` for «имени Анна»-style probes
+- **scripts/v2/planner/plan.py** — 33 plan templates, `_with_copyright_check`
+  decorator, `_HIGH_TRANSLIT_AUTHORS` allowlist for Russian PROPN floor
+- **scripts/v2/planner/router.py** — детерминированный executor +
+  `_inject` modes (pg_id / scope / author_regex)
+- **scripts/v2/planner/history.py** — multi-turn entity backfill,
+  intent inference, re-rank inheritance
+- **scripts/v2/critic.py** — second-LLM fact-check pass (MAX_FLAGS=2,
+  per-intent skip list for table-heavy intents)
 - **scripts/v2/cache.py** — disk + LRU cache, corpus_version-tagged
 - **scripts/v2/observability.py** — JSONL request logs + aggregate rollup
 - **scripts/v2/profiles/{author,book,lemma}.py** — SQLite profile cache
 - **scripts/v2/tools/** — 35 native tool wrappers
 - **scripts/v2/rag_v2.py** — ask() + ask_stream() entry
 - **scripts/v2/build_fts_index.py** — one-time FTS5 builder
+- **scripts/v2/build_author_tokens.py** — pre-built JSON cache builder
+  for `top_authors_by(metric=tokens)` (60s → 21ms)
+- **scripts/chat_server.py** — HTTP entry, input caps, `/api/stats`,
+  stats footer, retry-with-scope button
 - **Modelfile.v2** — pinned Qwen3:14b с baked-in SYSTEM
-- **systemd/wordcracker-chat.service.d/v2-engine.conf** — production
-  deployment drop-in
+- **systemd/wordcracker-chat.service** — production unit with
+  `ExecStartPost` wait-for-/health (60s cap) so chained tooling
+  doesn't fire requests during the ~12s ChromaDB warmup
 
 ### Live deployment
 
@@ -136,10 +154,13 @@ python tests/v2/bench_v2.py --runs 1 --out bench.md
 
 См. [wordcracker/wordcracker_v2_roadmap_next.md](https://github.com/Standaoerby/wordcracker) (Obsidian).
 
-Текущий статус: **v2.0 stable**. Open items:
-- Multi-model setup (separate planner / answer / reranker)
+Текущий статус: **v2.3.1 stable**. Open items:
+- `build_country_affinity.py` — настоящий per-corpus lemma diff для Q40-стиля (сейчас approximation через top-leader-per-country)
+- `find_words_by_etymology` family caches (Wiktionary top-50 words per family)
+- Cache warm-up на restart (pre-load top-10 author profiles)
 - Reranker (BGE-reranker-base) для hybrid_search top-30 → top-10
-- Improved CEFR via POS/etymology heuristics
+- Multi-model setup (separate planner / answer / reranker) — ROI unclear
+- Rate limiting per-IP + cost throttling на heavy tools (nginx layer)
 
 ---
 
@@ -147,15 +168,14 @@ python tests/v2/bench_v2.py --runs 1 --out bench.md
 
 | Tag | Дата | Что |
 |---|---|---|
-| **v2.0** | 2026-05-17 | Production release: planner+router pipeline, 40/40 functional |
-| v2.0.6 | 2026-05-17 | Critic over-flag guard + RELEASE_NOTES |
-| v2.0.5 | 2026-05-17 | Sprint 10 — UI badges (engine/intent/critic/copy) |
-| v2.0.4 | 2026-05-17 | Sprint 9 — book_compare composite intent (Q24 closed, 40/40) |
-| v2.0.3 | 2026-05-17 | Sprint 8 — learning_priority_score + Anki .apkg (genanki) |
-| v2.0.2 | 2026-05-17 | Sprint 7 — LemmaProfile + AuthorProfile SQLite cache + observability |
-| v2.0.1 | 2026-05-17 | Sprint 6 — critic pass + wordcracker:v2 Modelfile + conversation context |
-| v1.1.7 | 2026-05-17 | (legacy) author_profile combo tool + bulk_enrich_propn |
-| v1.0 | 2026-05-15 | Первый публичный релиз на slovoeb.net |
+| **v2.3.1** | **2026-05-18** | Stan round 2: Pushkin PROPN floor 1500, «отсортируй» re-rank followup, structured copyright OOS |
+| v2.3 | 2026-05-18 | Adversarial hardening (input caps, 10× injection guards) + 5 routing fixes (Q10/Q15/Q21/Q30/meta-copyright) + decorator refactor |
+| v2.2.2 | 2026-05-18 | systemd ExecStartPost wait-for-/health + runner self-wait (race fix) |
+| v2.2.1 | 2026-05-18 | `_NAME_AFTER_KEY` hotfix (re.IGNORECASE disabled the proper-noun guard) |
+| v2.2 | 2026-05-18 | Sprint 11.4 composite_compare (Q40) + 11.5 stats footer + retry-with-scope + 2 caught bugs |
+| v2.1 | 2026-05-17 | Sprint 11.1+11.2+11.3 — critic precision (23→9 flags), author_tokens cache (60s→21ms), multi-author parallel |
+| v2.0 → v2.0.7 | 2026-05-17 | Production v2 release + Sprint 6-10 + 3 caught bugs |
+| v1.0 → v1.1.7 | 2026-05-15..17 | (legacy) v1 agentic loop releases |
 
 ---
 
