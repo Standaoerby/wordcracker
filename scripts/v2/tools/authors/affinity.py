@@ -178,6 +178,28 @@ def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
                             f"check if author exists in SPGC corpus",
                 ))
 
+        # Stan's 2026-05-18 demon: cosine=0.0 between Poe and Lovecraft
+        # looked suspicious. It's structurally near-zero because top-N
+        # affinity vectors for distinct authors barely overlap by design.
+        # Add a direct integer the LLM can quote — number of shared
+        # high-affinity words between the two — and an explicit flag so
+        # the render explains the zero rather than treating it as a real
+        # distance metric.
+        cosine = raw.get("cosine_similarity", 0.0)
+        if isinstance(cosine, (int, float)) and cosine < 0.05:
+            raw["cosine_is_structural_zero"] = True
+            shared = raw.get("shared_high_affinity") or []
+            raw["shared_top_words_count"] = len(shared)
+            raw["_render_note"] = (
+                "cosine_similarity ниже 0.05 — это СТРУКТУРНОЕ свойство "
+                "метрики (top-N фирменных слов у разных авторов почти не "
+                "пересекаются), а НЕ показатель стилистической дистанции. "
+                "Не говори пользователю «авторы совершенно разные» из-за "
+                "cosine=0. Расскажи про shared_high_affinity (общие "
+                "стилистические маркеры) и про top_unique_a / "
+                "top_unique_b — это содержательная часть ответа."
+            )
+
     return ToolResult.success(
         tool="compare_authors", data=raw,
         coverage=Coverage(

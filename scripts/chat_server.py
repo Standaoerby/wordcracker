@@ -182,6 +182,18 @@ PAGE = r"""<!doctype html>
                      font-weight:normal; padding:0 12px; }
   a { color:#7ed321; }
   .hint { color:#666; font-size:12px; padding:0 18px 8px 18px; }
+  /* v2.5 demo polish: clickable suggestion chips on empty chat */
+  #suggestions { padding:14px 18px 10px 18px; display:flex; flex-wrap:wrap;
+                 gap:8px; }
+  #suggestions .chip { background:#262a31; color:#a0c4ff;
+                       border:1px solid #2f343c; padding:6px 12px;
+                       border-radius:14px; font-size:13px;
+                       cursor:pointer; transition:all 0.15s; }
+  #suggestions .chip:hover { background:#2d3a4d; border-color:#a0c4ff;
+                              color:#eaeaea; }
+  #suggestions h3 { margin:0 0 8px 0; width:100%; font-size:12px;
+                    color:#888; font-weight:normal; text-transform:uppercase;
+                    letter-spacing:0.5px; }
 </style>
 </head>
 <body>
@@ -192,7 +204,7 @@ PAGE = r"""<!doctype html>
   <button class=secondary type=button onclick="clearHistory()">clear</button>
 </header>
 <div id=log></div>
-<div class=hint>Примеры: «дай статистику по Wodehouse», «топ-15 биграмм Достоевского», «фирменные слова Doyle», «найди упоминания битой посуды», «сравни Wodehouse и Twain»</div>
+<div id=suggestions></div>
 <form id=f>
   <textarea id=q placeholder="Ctrl+Enter — отправить" autofocus></textarea>
   <button id=send>send</button>
@@ -221,6 +233,7 @@ function clearHistory() {
   if (confirm('Очистить историю?')) {
     localStorage.removeItem(HKEY);
     log.innerHTML = '';
+    renderSuggestions();
   }
 }
 
@@ -262,6 +275,7 @@ function renderError(msg) {
 }
 
 async function submit(text) {
+  hideSuggestionsOnSubmit();
   const history = loadHistory();
   history.push({role: 'user', content: text});
   saveHistory(history);
@@ -457,6 +471,58 @@ async function submit(text) {
   }
 }
 
+// v2.5 demo polish: render clickable suggestion chips so a first-time
+// user sees what they CAN ask, not «здесь была подсказка тонким серым».
+// Hidden as soon as the conversation starts (first message in log).
+const SUGGESTIONS = [
+  { cat: 'Стиль автора', items: [
+    'фирменные слова Оскара Уайльда',
+    'сравни По и Лавкрафта по стилю',
+    'на кого по стилю похож Doyle',
+  ]},
+  { cat: 'Книги', items: [
+    'уровень сложности Pride and Prejudice',
+    'архаизмы в Dracula',
+    'характерные прилагательные в "The Picture of Dorian Gray"',
+  ]},
+  { cat: 'Слова', items: [
+    'этимология слова sword',
+    'что соседствует со словом fog у викторианцев',
+    'примеры использования слова "ajar"',
+  ]},
+  { cat: 'Корпус', items: [
+    'сколько книг в базе',
+    'что у тебя с копирайтом',
+    'топ-5 британских авторов по скачиваниям',
+  ]},
+];
+function renderSuggestions() {
+  const host = document.getElementById('suggestions');
+  if (loadHistory().length > 0) { host.innerHTML = ''; return; }
+  host.innerHTML = '';
+  for (const group of SUGGESTIONS) {
+    const wrapper = document.createElement('div');
+    wrapper.style.cssText = 'width:100%; display:flex; flex-wrap:wrap; gap:8px; align-items:baseline;';
+    const h = document.createElement('h3'); h.textContent = group.cat;
+    wrapper.appendChild(h);
+    for (const item of group.items) {
+      const chip = document.createElement('span');
+      chip.className = 'chip';
+      chip.textContent = item;
+      chip.onclick = () => {
+        q.value = item;
+        q.focus();
+        document.getElementById('f').requestSubmit();
+      };
+      wrapper.appendChild(chip);
+    }
+    host.appendChild(wrapper);
+  }
+}
+function hideSuggestionsOnSubmit() {
+  document.getElementById('suggestions').innerHTML = '';
+}
+
 // Sprint 11.5: poll /api/stats every 30s so the sticky footer shows live
 // counters from the in-process ring buffer (queries today, avg latency,
 // cache hit rate, critic flags). Failures are silent — footer just keeps
@@ -492,6 +558,7 @@ setInterval(refreshStats, 30000);
 for (const m of loadHistory()) {
   render(m.role, m.content);
 }
+renderSuggestions();
 
 document.getElementById('f').addEventListener('submit', e => {
   e.preventDefault();
@@ -720,6 +787,26 @@ def _warmup():
     except Exception as e:
         print(f"[chat] warmup failed (non-fatal): {type(e).__name__}: {e}",
               file=_sys.stderr, flush=True)
+    # v2.5 demo polish: pre-run the cheap meta queries so the first user
+    # query that hits them isn't paying cold-cache latency. These all use
+    # WC_DEFAULT_ENGINE=v2 path and warm the dispatch + cache layers.
+    try:
+        from scripts.v2.tool_registry import dispatch
+        t = _time.perf_counter()
+        # corpus_overview is the typical first-time-user opener
+        dispatch("corpus_overview", {})
+        # top authors (books / downloads / tokens — all three cached separately)
+        dispatch("top_authors_by", {"metric": "books", "top": 10})
+        dispatch("top_authors_by", {"metric": "downloads", "top": 10})
+        dispatch("top_authors_by", {"metric": "tokens", "top": 10})
+        # one popular author_metadata to warm the parquet read + geo lookup
+        dispatch("author_metadata", {"author_regex": "^Doyle,"})
+        print(f"[chat] v2 dispatch warmed in {_time.perf_counter()-t:.1f}s "
+              f"(corpus_overview + 3 top_authors variants + Doyle metadata)",
+              file=_sys.stderr, flush=True)
+    except Exception as e:
+        print(f"[chat] v2 dispatch warmup failed (non-fatal): "
+              f"{type(e).__name__}: {e}", file=_sys.stderr, flush=True)
 
 
 def main():

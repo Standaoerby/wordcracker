@@ -107,6 +107,24 @@ def corpus_overview() -> ToolResult:
     if isinstance(chunks, int) and isinstance(data.get("raw_books_available"), int):
         approx_indexed = max(1, chunks // 125)
         data["index_gap_approx"] = max(0, data["raw_books_available"] - approx_indexed)
+        # Explicit summary fields the LLM can quote directly without doing
+        # math itself. Q1 from Stan's 2026-05-18 demon round caught the
+        # render saying «100% покрытие индекса» right next to «не вошло
+        # 24 206 книг» — LLM was conflating FTS5 (covers all 55k) with
+        # ChromaDB (English only). Spelling it out keeps the answer
+        # truthful.
+        data["semantic_index_books_approx"] = approx_indexed
+        data["semantic_index_coverage_pct"] = round(
+            100 * approx_indexed / data["raw_books_available"], 1)
+        # Hint for the LLM renderer — explicit instruction in data form so
+        # the Modelfile prompt doesn't have to know about the two indexes.
+        data["_render_note"] = (
+            "Корпус имеет два независимых индекса: ChromaDB semantic "
+            "(только English, ~50% книг) и SQLite FTS5 lexical (вся "
+            "коллекция). Не объединяй покрытие двух индексов в один "
+            "процент — это разные кадры. Если пользователь спросил про "
+            "конкретный индекс, отвечай только про него."
+        )
 
     # SPGC baseline (frozen 2018-07 dump)
     meta_path = DERIVED_DIR / "corpus_meta.json"

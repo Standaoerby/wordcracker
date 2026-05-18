@@ -61,6 +61,35 @@ def author_metadata(author_regex: str) -> ToolResult:
         )
 
     book_count = raw.get("books_total") or raw.get("book_count") or len(raw.get("sample_titles", []))
+
+    # Q12 from Stan's 2026-05-18 demon round: Poe came back as «1809–1964».
+    # 1964 isn't a death year; Gutenberg metadata sometimes confuses
+    # `authoryearofdeath` with the publication year of a specific edition.
+    # Filter implausible spans (>120 yrs span = wrong) so the LLM doesn't
+    # render fiction as life dates.
+    if isinstance(raw, dict):
+        yob = raw.get("year_of_birth_min")
+        yod = raw.get("year_of_death_max")
+        if (isinstance(yob, int) and isinstance(yod, int)
+                and (yod - yob > 120 or yod < yob)):
+            raw["year_of_death_max_unreliable"] = yod
+            raw["year_of_death_max"] = None
+            raw.setdefault("warnings", []).append(
+                f"death year {yod} dropped — implausible span "
+                f"(birth={yob}); Gutenberg metadata likely confused "
+                f"author death with edition publication year"
+            )
+        # Hint for the LLM render so it doesn't call this «годы жизни»
+        # when only birth is reliable, and doesn't conflate the corpus
+        # publication window with biographical dates.
+        raw["_render_note"] = (
+            "Поля year_of_birth_min / year_of_death_max — биографические "
+            "(из Gutendex metadata, могут быть неточными). НЕ называй "
+            "это «диапазон книг в корпусе» — это годы жизни. Если "
+            "year_of_death_max_unreliable выставлен, скажи что год смерти "
+            "не подтверждён и сошлись только на год рождения."
+        )
+
     return ToolResult.success(
         tool="author_metadata", data=raw,
         coverage=Coverage(books_matched=int(book_count or 0), books_total=-1),
