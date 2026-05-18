@@ -83,6 +83,14 @@ class WordExtraction(unittest.TestCase):
         self.assertEqual(extract("примеры имени Anna").word, "anna")
         self.assertEqual(extract("под именем John в романе").word, "john")
 
+    def test_name_after_imya_filler_negative(self):
+        """Regression: the proper-noun guard (capital first letter on the
+        captured word, no re.IGNORECASE) must reject filler phrasing — we
+        only want real names. Caught during the v2.2 regression audit."""
+        self.assertIsNone(extract("имя автора").word)
+        self.assertIsNone(extract("от моего имени напиши письмо").word)
+        self.assertIsNone(extract("по имени никого нет").word)
+
 
 class YearExtraction(unittest.TestCase):
     def test_after_year(self):

@@ -394,9 +394,13 @@ _WORD_AFTER_KEY = re.compile(
 # personal name in literature. We capture the bare proper noun after the
 # keyword and pass it through to word_contexts / hybrid_search; the search
 # layer's `_maybe_translate` handles Russian→English on the way to ChromaDB.
+#
+# Important: this regex is *not* `re.IGNORECASE`. The proper-noun guard
+# (`[A-ZА-ЯЁ]` lead letter on the captured word) is the only thing that
+# blocks fillers like «имя автора» / «от моего имени напиши» from
+# bleeding through — flipping case-insensitive would defeat it.
 _NAME_AFTER_KEY = re.compile(
-    r"\b(?:им(?:я|ени|енем))\s+[\"'«“]?([A-ZА-ЯЁ][a-zA-Zа-яё-]{1,29})[\"'»”]?",
-    re.IGNORECASE,
+    r"\b[Ии]м(?:я|ени|енем)\s+[\"'«“]?([A-ZА-ЯЁ][a-zA-Zа-яё-]{1,29})[\"'»”]?"
 )
 
 # Common Russian/English fillers that the legacy regex used to mis-match.
