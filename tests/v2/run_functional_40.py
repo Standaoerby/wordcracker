@@ -209,6 +209,27 @@ def main():
     else:
         qs = QUESTIONS_40
 
+    # ChromaDB + embedder warmup on cold start is ~12s; if the runner gets
+    # fired right after `systemctl restart` (sleep 5 isn't enough), every
+    # request gets ConnectionReset and we silently burn the whole report on
+    # the void. Poll /health for up to 60s before starting the actual run.
+    health = f"{args.base_url}/health"
+    print(f"waiting for {health} ...", flush=True)
+    ready = False
+    for _ in range(30):
+        try:
+            with urllib.request.urlopen(health, timeout=2) as r:
+                if r.status == 200:
+                    ready = True
+                    break
+        except (urllib.error.URLError, urllib.error.HTTPError, ConnectionError, OSError):
+            pass
+        time.sleep(2)
+    if not ready:
+        print(f"  chat /health never came up — aborting", flush=True)
+        sys.exit(2)
+    print(f"  chat up, starting run", flush=True)
+
     rows = run(args.base_url, args.engine, args.timeout, qs)
 
     out = (Path(args.out) if args.out

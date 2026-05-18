@@ -26,6 +26,11 @@ ExecStartPre=-/usr/bin/docker compose exec -T gutenberg-lab find /workspace/scri
 # Run the chat server in the foreground, attached to systemd. SIGTERM from
 # `systemctl stop` propagates to the python process via docker exec.
 ExecStart=/usr/bin/docker compose exec -T -e ASSISTANT_NAME=Словоёб gutenberg-lab python -u /workspace/scripts/chat_server.py --port 8890
+# Block `systemctl start` until /health returns 200 so anything chained after
+# (functional test runner, deploy hooks) doesn't fire requests into the void
+# during the ~12s ChromaDB+embedder warmup. 60s cap is comfortably above the
+# observed cold-start (~14s p95).
+ExecStartPost=/bin/sh -c 'for i in $(seq 1 30); do sleep 2; curl -sf http://127.0.0.1:8890/health >/dev/null && exit 0; done; echo "chat /health never became ready" >&2; exit 1'
 Restart=on-failure
 RestartSec=15
 StandardOutput=journal
