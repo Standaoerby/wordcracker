@@ -49,15 +49,28 @@ def _v2_engine():
 
 
 def _pick_engine(path: str, headers, payload: dict) -> str:
-    """Return 'v1' or 'v2' based on (in order): query string ?engine=, header
-    X-WC-Engine:, payload['engine'], env WC_DEFAULT_ENGINE, fallback 'v1'."""
+    """Return 'v1' or 'v2'.
+
+    By default the engine is locked to `WC_DEFAULT_ENGINE` (= v2 in prod).
+    Client-supplied hints (`?engine=v1`, `X-WC-Engine` header,
+    `payload['engine']`) are IGNORED unless `WC_ALLOW_ENGINE_OVERRIDE=1`
+    is set — they used to be honored, which gave anyone with the chat URL
+    a free path around the v2 planner's input caps + prompt-injection
+    guards by appending `?engine=v1`. Strict locking is the safer default.
+
+    Set `WC_ALLOW_ENGINE_OVERRIDE=1` to bring back the legacy behavior
+    (useful for A/B testing or for the v1 fallback flag the runner uses).
+    """
+    default = (os.environ.get("WC_DEFAULT_ENGINE", "v1")).lower()
+    if os.environ.get("WC_ALLOW_ENGINE_OVERRIDE", "0") != "1":
+        return "v2" if default == "v2" else "v1"
     import urllib.parse as up
     qs = up.urlparse(path).query
     q = up.parse_qs(qs)
     eng = (q.get("engine", [None])[0]
            or headers.get("X-WC-Engine")
            or payload.get("engine")
-           or os.environ.get("WC_DEFAULT_ENGINE", "v1")).lower()
+           or default).lower()
     return "v2" if eng == "v2" else "v1"
 
 
@@ -527,9 +540,24 @@ class Handler(BaseHTTPRequestHandler):
             # Sprint 11.5: stats footer polls this every 30s. Aggregates the
             # in-process ring buffer of the last 256 v2 requests. Empty when
             # the engine is v1 or the ring buffer is fresh after restart.
+            #
+            # Hardening (v2.3.2): emit ONLY the counters the footer needs.
+            # `aggregate_recent()` also returns an `intents` histogram and a
+            # `slow_tools` list — both useful for the status dashboard but
+            # they leak user query patterns and which tools are heavy enough
+            # to DoS, which is reconnaissance for an attacker who slipped
+            # past nginx Basic Auth.
             try:
                 from scripts.v2.observability import aggregate_recent
-                payload = aggregate_recent()
+                full = aggregate_recent()
+                payload = {
+                    "total":           full.get("total", 0),
+                    "avg_elapsed_ms":  full.get("avg_elapsed_ms", 0),
+                    "cache_hit_rate":  full.get("cache_hit_rate", 0.0),
+                    "cache_hits":      full.get("cache_hits", 0),
+                    "cache_calls":     full.get("cache_calls", 0),
+                    "critic_flagged":  full.get("critic_flagged", 0),
+                }
             except ImportError:
                 payload = {"total": 0, "engine": "v1"}
             return self._send(200, json.dumps(payload, ensure_ascii=False, default=str),
