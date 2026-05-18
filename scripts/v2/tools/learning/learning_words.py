@@ -39,7 +39,8 @@ from scripts.v2._types import Coverage, ToolResult, ToolWarning
 )
 def learning_words(scope, level: str = "intermediate", top: int = 30,
                    lemmatize: bool = True,
-                   pos_filter: list[str] | None = None) -> ToolResult:
+                   pos_filter: list[str] | None = None,
+                   _capped_from: int | None = None) -> ToolResult:
     try:
         from scripts.learning_tools import learning_words as _v1
     except ImportError as e:
@@ -57,13 +58,25 @@ def learning_words(scope, level: str = "intermediate", top: int = 30,
             message=str(raw["error"]), query=query,
         )
     rows = (raw.get("words") if isinstance(raw, dict) else None) or []
+    warnings: list[ToolWarning] = []
+    if not rows:
+        warnings.append(ToolWarning(
+            "empty_top",
+            "no words at this level — try different scope or level"))
+    # Q21 visibility fix: if the planner capped the user's requested top, tell
+    # the LLM so it can mention «по запросу 300 слов вернул 30 за один проход;
+    # хочешь следующие 30?» instead of silently returning fewer than asked.
+    if _capped_from and _capped_from > top:
+        warnings.append(ToolWarning(
+            "top_capped",
+            f"user asked for top={_capped_from}; per-call cap is {top} "
+            f"(LLM enrichment cost). Tell the user and offer a follow-up.",
+        ))
     return ToolResult.success(
         tool="learning_words", data=raw,
         coverage=Coverage(
             books_matched=raw.get("n_books", -1) if isinstance(raw, dict) else -1,
             books_total=-1,
         ),
-        warnings=[ToolWarning("empty_top", "no words at this level — try different scope or level")]
-                 if not rows else [],
-        query=query,
+        warnings=warnings, query=query,
     )

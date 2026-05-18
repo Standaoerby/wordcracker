@@ -357,6 +357,19 @@ def _find_book(text: str) -> tuple[str | None, str | None]:
         # word, not a book title. Defer to _find_word; book_title stays None.
         if " " not in title and len(title) < 12:
             continue
+        # Q10-style: «второго уровня» / «третьего уровня» / «второй» — these
+        # are scope keywords in Russian, not book titles. Cyrillic-only
+        # phrases shorter than ~25 chars almost never name a book (real
+        # Russian-translated titles like «Преступление и наказание» go
+        # via KNOWN_BOOKS above; rare untranslated Russian titles would
+        # exceed the length threshold). Skip and let other quoted strings
+        # (or the unquoted KNOWN_BOOKS scan) take over.
+        is_cyrillic_only = all(
+            (not ch.isalpha()) or ('а' <= ch.lower() <= 'я') or ch.lower() == 'ё'
+            for ch in title
+        )
+        if is_cyrillic_only and len(title) < 25:
+            continue
         return None, title
     # Unquoted known-title match — sorted longest-first so "Crime and Punishment"
     # wins over "Crime".

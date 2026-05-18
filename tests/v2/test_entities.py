@@ -92,6 +92,29 @@ class WordExtraction(unittest.TestCase):
         self.assertIsNone(extract("по имени никого нет").word)
 
 
+class Q10CyrillicScopePhrase(unittest.TestCase):
+    """Q10 «лексику "второго уровня" из "Pride and Prejudice"» — the Russian
+    quoted scope keyword used to win over the English book title. Skip
+    Cyrillic-only quoted phrases shorter than 25 chars unless they're in
+    KNOWN_BOOKS."""
+
+    def test_q10_picks_english_title(self):
+        e = extract('Покажи мне лексику "второго уровня" из "Pride and Prejudice" — не базовые слова')
+        self.assertEqual(e.book_id, "PG1342")
+        self.assertEqual(e.book_title, "Pride and Prejudice")
+
+    def test_russian_known_title_still_works(self):
+        e = extract('Покажи слова из "Преступление и наказание"')
+        self.assertEqual(e.book_id, "PG2554")
+
+    def test_long_russian_title_passes_through(self):
+        """A long Russian-only phrase (≥25 chars) still goes through as
+        title — it's plausibly a real book name we don't have in
+        KNOWN_BOOKS yet, let find_book try to resolve it."""
+        e = extract('из "какого-то очень длинного русского названия книги"')
+        self.assertIsNotNone(e.book_title)
+
+
 class YearExtraction(unittest.TestCase):
     def test_after_year(self):
         e = extract("слова вышли из употребления после 1920 года")

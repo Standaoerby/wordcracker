@@ -80,6 +80,15 @@ def ask_stream(question, history=None, *, engine="v1", **kw):
 
 import os  # noqa: E402 — must follow the import block above
 
+# Adversarial-input caps. Normal chat traffic doesn't come anywhere near
+# these — they exist to bound damage from malicious / mistaken clients
+# (multi-MB payloads, 1000-message histories, recursive JSON, prompt
+# injection via giant context bombs).
+MAX_PAYLOAD_BYTES   = 64 * 1024     # ~64 KB request body
+MAX_QUESTION_CHARS  = 4_000         # ~5× the longest Q40 from the vault
+MAX_HISTORY_TURNS   = 50            # past 50 turns = ~1 hour conversation
+MAX_HISTORY_BYTES   = 64 * 1024     # 64 KB clipped from tail
+
 PAGE = r"""<!doctype html>
 <html lang=ru>
 <head>
@@ -539,13 +548,12 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             return  # client already gone before we wrote a byte
 
-        question = (payload.get("question") or "").strip()
-        history = payload.get("history") or []
-        if not isinstance(history, list):
-            history = []
-        if not question:
+        question, history, err = self._sanitize_chat_payload(payload)
+        if err:
             try:
-                self.wfile.write(b'data: {"event":"error","message":"empty question"}\n\n')
+                msg = json.dumps({"event": "error", "message": err},
+                                 ensure_ascii=False)
+                self.wfile.write(f"data: {msg}\n\n".encode("utf-8"))
             except (BrokenPipeError, ConnectionResetError):
                 pass
             return
@@ -567,28 +575,88 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-    def do_POST(self):
-        if self.path == "/api/chat/stream":
-            length = int(self.headers.get("Content-Length", "0"))
-            try:
-                payload = json.loads(self.rfile.read(length))
-            except Exception:
-                return self._send(400, b'{"error":"bad json"}', "application/json")
-            return self._stream_chat(payload)
-        if not (self.path == "/api/chat" or self.path.startswith("/api/chat?")):
-            return self._send(404, b"not found", "text/plain")
-        length = int(self.headers.get("Content-Length", "0"))
+    def _read_payload_capped(self) -> tuple[dict, str | None]:
+        """Read POST body with a hard cap and return parsed JSON or an error.
+
+        Caps:
+          * Content-Length ≤ MAX_PAYLOAD_BYTES (64 KB) — normal chat payloads
+            are < 1 KB; 64 KB tolerates a hand-pasted Q40 with a 100-item
+            history. Anything larger is almost certainly an attempt to DoS
+            the LLM or the JSON parser with a giant blob.
+          * Body is read in one shot from rfile but capped, so we never burn
+            unbounded memory on a malicious Content-Length: 1000000000 header.
+        """
         try:
-            payload = json.loads(self.rfile.read(length))
-        except Exception:
-            return self._send(400, json.dumps({"error": "bad json"}), "application/json")
-        question = (payload.get("question") or "").strip()
+            length = int(self.headers.get("Content-Length", "0"))
+        except (TypeError, ValueError):
+            return {}, "bad content-length"
+        if length > MAX_PAYLOAD_BYTES:
+            return {}, (f"payload too large ({length} > {MAX_PAYLOAD_BYTES} bytes); "
+                        f"trim history or split into multiple queries")
+        if length < 0:
+            return {}, "negative content-length"
+        raw = self.rfile.read(min(length, MAX_PAYLOAD_BYTES))
+        try:
+            payload = json.loads(raw or b"{}")
+        except json.JSONDecodeError:
+            return {}, "bad json"
+        if not isinstance(payload, dict):
+            return {}, "payload must be a JSON object"
+        return payload, None
+
+    def _sanitize_chat_payload(self, payload: dict) -> tuple[str, list, str | None]:
+        """Validate + clip question/history. Returns (question, history, err)."""
+        question = (payload.get("question") or "")
+        if not isinstance(question, str):
+            return "", [], "question must be a string"
+        question = question.strip()
         if not question:
-            return self._send(400, json.dumps({"error": "empty question"}), "application/json")
+            return "", [], "empty question"
+        if len(question) > MAX_QUESTION_CHARS:
+            return "", [], (f"question too long ({len(question)} > "
+                            f"{MAX_QUESTION_CHARS} chars); split into smaller asks")
+        # Drop control chars except newline / tab — they have no business
+        # in a chat prompt and screw up downstream regex matching.
+        question = "".join(ch for ch in question
+                           if ch in "\n\t" or ord(ch) >= 32)
 
         history = payload.get("history") or []
         if not isinstance(history, list):
             history = []
+        # Cap depth (50 turns is way past any reasonable convo) and total
+        # size (64 KB stops attacker from threading a 10 MB context bomb).
+        if len(history) > MAX_HISTORY_TURNS:
+            history = history[-MAX_HISTORY_TURNS:]
+        total = 0
+        clipped: list = []
+        for item in reversed(history):
+            if not isinstance(item, dict):
+                continue
+            size = len(json.dumps(item, ensure_ascii=False, default=str))
+            if total + size > MAX_HISTORY_BYTES:
+                break
+            clipped.append(item)
+            total += size
+        history = list(reversed(clipped))
+        return question, history, None
+
+    def do_POST(self):
+        if self.path == "/api/chat/stream":
+            payload, err = self._read_payload_capped()
+            if err:
+                return self._send(400, json.dumps({"error": err}).encode("utf-8"),
+                                  "application/json")
+            return self._stream_chat(payload)
+        if not (self.path == "/api/chat" or self.path.startswith("/api/chat?")):
+            return self._send(404, b"not found", "text/plain")
+        payload, err = self._read_payload_capped()
+        if err:
+            return self._send(400, json.dumps({"error": err}).encode("utf-8"),
+                              "application/json")
+        question, history, err = self._sanitize_chat_payload(payload)
+        if err:
+            return self._send(400, json.dumps({"error": err}).encode("utf-8"),
+                              "application/json")
         engine = _pick_engine(self.path, self.headers, payload)
         t0 = time.time()
         try:

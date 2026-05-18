@@ -119,6 +119,21 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"^\s*(привет|hi|hello)\b"), "introduction", 0.7),
 
     # ===== out_of_scope =====
+    # Prompt-injection guards. These would normally bounce off the
+    # wordcracker:v2 Modelfile SYSTEM prompt, but it's cheaper + safer to
+    # refuse at the planner level before the LLM ever sees them.
+    (_re(r"забудь\s+.{0,20}(предыдущ\w*\s+)?инструкци|"
+         r"игнорируй\s+.{0,20}(предыдущ\w*\s+)?инструкци|"
+         r"ignore\s+.{0,20}(previous\s+)?instructions|"
+         r"forget\s+.{0,20}(previous\s+)?instructions|"
+         r"system\s+prompt|"
+         r"(reveal|раскрой|покажи)\s+(твой|your)\s+(system|prompt|инструкц)|"
+         r"act\s+as\s+a?\s*(different|другой|new)"),
+     "out_of_scope", 0.97),
+    # Persona / role override attempts
+    (_re(r"\b(you are now|ты теперь|ты больше не|pretend to be|"
+         r"твоя новая роль|new role:|role\s*:\s*[a-zа-я]+)"),
+     "out_of_scope", 0.95),
     (_re(r"(напиши|сочини|допиши|сгенерируй)\s.{0,40}"
          r"(рассказ\w*|стих\w*|поэм\w*|глав\w*|стат\w*)"), "out_of_scope", 0.95),
     (_re(r"(write|compose)\s.{0,40}(story|poem|chapter|novel|article)"),
@@ -145,6 +160,22 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"\bпрогресс\b"), "corpus_meta", 0.6),
     (_re(r"что у тебя за корпус|размер корпуса|corpus (size|stats)"),
      "corpus_meta", 0.9),
+    # Meta-questions about coverage / copyright / language scope. Used to
+    # fall through to clarify («не уверен что ты имеешь в виду») which is
+    # rude when the user is just asking what's in the corpus. Caught by
+    # Stan's adversarial round 2026-05-18.
+    (_re(r"(что|как)\s+у\s+тебя\s+с\s+"
+         r"(копирайт\w*|copyright|охват\w*|coverage|корпус\w*|"
+         r"книг\w*|данн\w*|язык\w*|русск\w*|английск\w*)"),
+     "corpus_meta", 0.92),
+    (_re(r"расскажи\s+(про|о)\s+(корпус\w*|coverage|copyright|охват\w*|"
+         r"покрыти\w*|содержим\w*)"),
+     "corpus_meta", 0.9),
+    (_re(r"(какие|какой)\s+(книги|книг|охват|coverage|период\w*|"
+         r"диапазон|years|range)\s+(в|у)\s+(корпус|тебя|базе|libra)"),
+     "corpus_meta", 0.88),
+    (_re(r"\bcopyright\b.{0,40}(coverage|корпус|books?|книг)"),
+     "corpus_meta", 0.85),
 
     # ===== author_metadata =====
     (_re(r"когда\s+(родил\w*|умер\w*|жил\w*)"), "author_metadata", 0.9),
@@ -255,8 +286,16 @@ RULES: list[tuple[Pattern[str], str, float]] = [
      "book_readability", 0.92),
 
     # ===== book_archaic =====
-    (_re(r"архаизм\w*|устаревш\w*|архаичн\w*|"
-         r"archaic|old[- ]fashioned|outdated\s+words"), "book_archaic", 0.92),
+    # Bare «архаизм*» used to fire here for any mention — including the
+    # negation «чтобы не было слишком много архаизмов» (Q30), which is a
+    # book_recommendation query, not a request to list archaisms. Anchor
+    # the rule to a positive context: «слова … архаичн», «архаизмы в X»,
+    # «список архаизмов», etc.
+    (_re(r"\b(?:слов\w*\s+|какие\s+\w*\s*)?\s*(?:архаизм\w*|"
+         r"устаревш\w*|архаичн\w*)\b"
+         r"(?!\w*\s*(?:не|нет|без))"), "book_archaic", 0.92),
+    (_re(r"\bархаизм\w*\s+(?:в|из)\s+"), "book_archaic", 0.95),
+    (_re(r"archaic|old[- ]fashioned|outdated\s+words"), "book_archaic", 0.92),
 
     # ===== book_recommendation =====
     (_re(r"подойд[уё]т\w*|recommend|посоветуй|что\s+почитать|what\s+to\s+read"),
@@ -265,6 +304,17 @@ RULES: list[tuple[Pattern[str], str, float]] = [
          r".{0,80}\b(b1|b2|c1|c2|уровень|level)"), "book_recommendation", 0.92),
     (_re(r"произведени\w*\b.{0,60}\bдля\b.{0,30}(читател\w*|уровн\w*|level)"),
      "book_recommendation", 0.88),
+    # Q30: «какие произведения … можно читать … чтобы не было … архаизмов».
+    # The «архаизмов» token used to lock into book_archaic at priority 115
+    # (above book_rec's 118 only in pattern strictness, not numerically) and
+    # the recommendation rule didn't catch «можно читать» as a trigger. Add
+    # a high-confidence rule that pairs «произведения … можно/стоит читать»
+    # with a level marker so book_recommendation wins for negation-style
+    # phrasings.
+    (_re(r"произведени\w*\b.{0,60}\b(можно|стоит)\s+(читать|изучать|освоить)"),
+     "book_recommendation", 0.93),
+    (_re(r"что\s+(почитать|читать)\b.{0,60}\b(после|подобн|похож|типа)"),
+     "book_recommendation", 0.9),
 
     # ===== word_etymology =====
     (_re(r"этимолог\w*|origin of the word"), "word_etymology", 0.95),
@@ -281,10 +331,16 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"имеют\s+больше\s+всего\s+разных\s+значений"), "word_pos", 0.95),
 
     # ===== word_emotion =====
-    (_re(r"слова\s+страх\w*|слова\s+гнев\w*|слова\s+ужас\w*|"
+    # Bare `terror|madness` used to live in this pattern but it false-matched
+    # ANY mention of those words — including book titles like «At the
+    # Mountains of Madness» (Q15) which broke author/book stylistic compare
+    # queries into emotion routing. Require «слова/words» anchor or the
+    # explicit «рядом со словами …» phrasing (Q35) so only real emotion
+    # queries land here.
+    (_re(r"слов\w*\s+страх\w*|слов\w*\s+гнев\w*|слов\w*\s+ужас\w*|"
          r"fear words|words of (fear|anger|sadness)|"
-         r"тревожн\w+\s+контекст|мрачн\w+\s+контекст|зловещ\w*|"
-         r"terror|madness"), "word_emotion", 0.9),
+         r"тревожн\w+\s+контекст|мрачн\w+\s+контекст|зловещ\w*"),
+     "word_emotion", 0.9),
     (_re(r"рядом\s+со?\s+словами\s+\W?(fear|terror|madness|страх|тревог|"
          r"ужас|гнев|радост)"), "word_emotion", 0.95),
     (_re(r"в\s+мрачн\w+\s+или\s+тревожн\w+\s+контекст"), "word_emotion", 0.95),

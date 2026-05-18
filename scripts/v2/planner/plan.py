@@ -97,6 +97,24 @@ def _copyright_refusal_if_book_under_copyright(e: Entities) -> QueryPlan | None:
     return None
 
 
+def _with_copyright_check(builder):
+    """Decorator: short-circuit any book-touching plan builder with the
+    copyright OOS refusal when the user named an unavailable title. The
+    explicit `refusal = _copyright_refusal_if_book_under_copyright(e); if
+    refusal: return refusal` was repeated 8 times across builders; this
+    keeps the single check in one place and the builder bodies focused on
+    the happy path.
+    """
+    def wrapped(e: Entities) -> QueryPlan:
+        refusal = _copyright_refusal_if_book_under_copyright(e)
+        if refusal:
+            return refusal
+        return builder(e)
+    wrapped.__name__ = builder.__name__
+    wrapped.__doc__ = builder.__doc__
+    return wrapped
+
+
 def _need_word(e: Entities) -> QueryPlan:
     return QueryPlan(
         intent="clarify", entities=e, steps=[],
@@ -231,10 +249,8 @@ def _plan_author_top_words(e: Entities) -> QueryPlan:
     )
 
 
+@_with_copyright_check
 def _plan_author_vocab(e: Entities) -> QueryPlan:
-    refusal = _copyright_refusal_if_book_under_copyright(e)
-    if refusal:
-        return refusal
     if not e.author_regex:
         return _need_author(e)
     # Sprint 11.3: when several authors are named (Q27 «морские авторы —
@@ -264,6 +280,7 @@ def _plan_author_vocab(e: Entities) -> QueryPlan:
     )
 
 
+@_with_copyright_check
 def _plan_book_compare(e: Entities) -> QueryPlan:
     """Q24-style: «слова в Treasure Island и Moby Dick, но редко в David
     Copperfield». Strategy: find_book each title (cached), then run
@@ -274,9 +291,6 @@ def _plan_book_compare(e: Entities) -> QueryPlan:
     only and let the renderer say «here's signature for X — compare with
     Y/Z by re-asking». Full set-intersection is Sprint 9.x deferred.
     """
-    refusal = _copyright_refusal_if_book_under_copyright(e)
-    if refusal:
-        return refusal
     # Need at least the primary book.
     if not e.book_id and not e.book_title:
         return _need_book(e)
@@ -394,10 +408,8 @@ def _plan_author_influences(e: Entities) -> QueryPlan:
     )
 
 
+@_with_copyright_check
 def _plan_book_vocab(e: Entities) -> QueryPlan:
-    refusal = _copyright_refusal_if_book_under_copyright(e)
-    if refusal:
-        return refusal
     if e.book_id:
         return QueryPlan(
             intent="book_vocab", entities=e,
@@ -430,10 +442,8 @@ def _plan_book_vocab(e: Entities) -> QueryPlan:
     return _need_book(e)
 
 
+@_with_copyright_check
 def _plan_book_readability(e: Entities) -> QueryPlan:
-    refusal = _copyright_refusal_if_book_under_copyright(e)
-    if refusal:
-        return refusal
     if e.book_id:
         return QueryPlan(
             intent="book_readability", entities=e,
@@ -457,10 +467,8 @@ def _plan_book_readability(e: Entities) -> QueryPlan:
     return _need_book(e)
 
 
+@_with_copyright_check
 def _plan_book_archaic(e: Entities) -> QueryPlan:
-    refusal = _copyright_refusal_if_book_under_copyright(e)
-    if refusal:
-        return refusal
     if e.book_id:
         return QueryPlan(
             intent="book_archaic", entities=e,
@@ -484,10 +492,8 @@ def _plan_book_archaic(e: Entities) -> QueryPlan:
     return _need_book(e)
 
 
+@_with_copyright_check
 def _plan_book_emotion(e: Entities) -> QueryPlan:
-    refusal = _copyright_refusal_if_book_under_copyright(e)
-    if refusal:
-        return refusal
     if e.book_id:
         return QueryPlan(
             intent="book_emotion", entities=e,
@@ -615,10 +621,8 @@ def _plan_word_pos(e: Entities) -> QueryPlan:
     )
 
 
+@_with_copyright_check
 def _plan_word_etymology(e: Entities) -> QueryPlan:
-    refusal = _copyright_refusal_if_book_under_copyright(e)
-    if refusal:
-        return refusal
     if e.author_regex and e.etymology_family:
         scope = {"author": e.author_regex}
         # Heavy tool — each candidate word triggers a Wiktionary HTTP call.
@@ -668,10 +672,8 @@ def _plan_word_emotion(e: Entities) -> QueryPlan:
     )
 
 
+@_with_copyright_check
 def _plan_learning(e: Entities) -> QueryPlan:
-    refusal = _copyright_refusal_if_book_under_copyright(e)
-    if refusal:
-        return refusal
     scope = _scope_from(e)
     if scope == "all_corpus":
         return QueryPlan(
@@ -688,11 +690,17 @@ def _plan_learning(e: Entities) -> QueryPlan:
     # an "ещё 30" follow-up once the first batch lands.
     requested = e.top_n or 30
     eff_top = min(requested, 30)
+    # When user explicitly asked for more than the cap, smuggle the original
+    # request in via `_capped_from` so the wrapper can emit a ToolWarning the
+    # LLM sees and mentions in the answer. Without this, Q21-style «300 слов»
+    # silently returns 30 without acknowledging the user's number.
+    args = {"scope": scope, "level": e.level or "intermediate",
+            "top": eff_top, "lemmatize": True}
+    if requested > eff_top:
+        args["_capped_from"] = requested
     return QueryPlan(
         intent="learning", entities=e,
-        steps=[PlanStep(tool="learning_words",
-                        args={"scope": scope, "level": e.level or "intermediate",
-                              "top": eff_top, "lemmatize": True})],
+        steps=[PlanStep(tool="learning_words", args=args)],
         expected_cost="medium",
         explain=(f"learning_words({scope}, level={e.level or 'intermediate'}, "
                  f"top={eff_top}{f' [capped from {requested}]' if requested > 30 else ''})"),
