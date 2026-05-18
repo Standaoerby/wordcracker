@@ -67,10 +67,17 @@ def author_metadata(author_regex: str) -> ToolResult:
     # `authoryearofdeath` with the publication year of a specific edition.
     # Filter implausible spans (>120 yrs span = wrong) so the LLM doesn't
     # render fiction as life dates.
+    #
+    # Stan round 2 follow-up: the v2.5 version had `isinstance(yob, int)`
+    # which silently failed because v1 returns numpy.int64 (NOT a real
+    # int via isinstance). Coerce explicitly before the comparison so the
+    # filter actually fires.
     if isinstance(raw, dict):
-        yob = raw.get("year_of_birth_min")
-        yod = raw.get("year_of_death_max")
-        if (isinstance(yob, int) and isinstance(yod, int)
+        yob_raw = raw.get("year_of_birth_min")
+        yod_raw = raw.get("year_of_death_max")
+        yob = int(yob_raw) if yob_raw is not None and yob_raw is not False else None
+        yod = int(yod_raw) if yod_raw is not None and yod_raw is not False else None
+        if (yob is not None and yod is not None
                 and (yod - yob > 120 or yod < yob)):
             raw["year_of_death_max_unreliable"] = yod
             raw["year_of_death_max"] = None

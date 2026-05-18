@@ -86,6 +86,7 @@ PRIORITY = {
     "word_collocates": 118,
     "book_recommendation": 118,
     "book_archaic": 115,
+    "book_emotion": 115,
     "book_readability": 115,
     "author_closest": 113,
     "author_attribution": 112,
@@ -197,6 +198,15 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"когда\s+(родил\w*|умер\w*|жил\w*)"), "author_metadata", 0.9),
     (_re(r"year of (birth|death)"), "author_metadata", 0.9),
     (_re(r"сколько у\s+.{1,40}\s*книг"), "author_metadata", 0.85),
+    # Stan round 2 Q12: «годы жизни эдгара по?» — биографический интент,
+    # старые правила его не ловили (требовали «когда родился»). Plus
+    # обычные синонимы для биографии.
+    (_re(r"\bгоды\s+жизни\b|\bдаты\s+жизни\b|"
+         r"\bbirth\s+and\s+death|\blife\s+(years|dates|span)"),
+     "author_metadata", 0.95),
+    (_re(r"\bбиография\b|\bbiograph\w*|"
+         r"\bчто\s+(ты\s+)?знаешь\s+(о|про)\s+[A-ZА-Я]"),
+     "author_metadata", 0.85),
 
     # ===== book_lookup (Q2 from demon round) =====
     # «найди книгу X», «есть ли у тебя X», «где книга X», «is X in the
@@ -287,6 +297,15 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"сам[оы]е\s+част[оы]тн\w+\s+слов"), "author_top_words", 0.95),
     (_re(r"топ\s+\d*\s*(част[оы]тн|самых?\s+част)\s+слов"), "author_top_words", 0.9),
     (_re(r"most\s+frequent\s+words?"), "author_top_words", 0.9),
+    # Stan round 2 Q18: «топ-15 биграмм Достоевского» / «топ-15 биграмм у
+    # Конан Дойла» — пример из README + clickable chips, должен работать.
+    # Биграммы routes through author_top_words → top_ngrams_by_author(n=2)
+    # via the planner. Triggers: «биграмм*», «bigram*», «n-грамм*».
+    (_re(r"\b(топ\s*-?\s*\d*\s*)?\bбиграмм\w*|"
+         r"\b(топ\s*-?\s*\d*\s*)?\bтриграмм\w*|"
+         r"top\s*-?\s*\d*\s*bigrams?|"
+         r"top\s*-?\s*\d*\s*trigrams?|"
+         r"\bn-?грамм\w*"), "author_top_words", 0.95),
 
     # ===== author_vocab =====
     (_re(r"фирменн\w+\s+слов\w*|характерн\w+\s+(слов\w*|прилаг\w*|глагол\w*)|"
@@ -323,6 +342,16 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"уровень\s+сложн\w*|cefr|flesch|reading\s+(level|grade)|"
          r"насколько\s+сложн\w*|сложн\w+\s+(для\s+чтения|для\s+понимани)"),
      "book_readability", 0.92),
+
+    # ===== book_emotion =====
+    # Stan round 2 Q19: «эмоциональный профиль Dracula» — точная фраза из
+    # README'а fell to clarify. Add explicit pattern (это distinct от
+    # word_emotion который про «слова страха», тут — про NRC profile книги).
+    (_re(r"эмоциональн\w*\s+профил\w*|"
+         r"emotional\s+profile|"
+         r"эмоции?\s+(в|of)\s+[\"'«“]?[A-ZА-Яa-zа-я]"),
+     "book_emotion", 0.93),
+    (_re(r"\bsentiment\s+(of|in)\s+"), "book_emotion", 0.9),
 
     # ===== book_archaic =====
     # Bare «архаизм*» used to fire here for any mention — including the

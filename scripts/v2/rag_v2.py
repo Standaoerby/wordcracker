@@ -176,6 +176,18 @@ def ask(
         if inferred:
             intent = int_mod.IntentMatch(label=inferred, confidence=0.75,
                                          matched_pattern="followup-inferred")
+    # LLM fallback (Sprint 13). Stan's 2026-05-18 demon round 2 hit 50%
+    # clarify on free-form Russian; rule-based regex can never close the
+    # gap with human phrasing breadth. Ask the local LLM to classify into
+    # the 35-label taxonomy when rules + history both miss.
+    if intent.label == "clarify":
+        try:
+            from scripts.v2.planner import llm_intent
+            llm_match = llm_intent.classify_with_llm(question, history)
+            if llm_match is not None:
+                intent = llm_match
+        except Exception:
+            pass
     plan = plan_mod.build(intent.label, entities)
 
     if plan.needs_clarify:
@@ -295,6 +307,15 @@ def ask_stream(
         if inferred:
             intent = int_mod.IntentMatch(label=inferred, confidence=0.75,
                                          matched_pattern="followup-inferred")
+    # LLM fallback for free-form phrasings (Sprint 13).
+    if intent.label == "clarify":
+        try:
+            from scripts.v2.planner import llm_intent
+            llm_match = llm_intent.classify_with_llm(question, history)
+            if llm_match is not None:
+                intent = llm_match
+        except Exception:
+            pass
     plan = plan_mod.build(intent.label, entities)
 
     yield {"event": "intent", "label": intent.label,

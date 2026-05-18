@@ -482,7 +482,17 @@ _BEFORE_YEAR = re.compile(r"\b(до|before)\s+(1[5-9]\d{2}|20\d{2})\b", re.IGNOR
 _YEAR_RANGE = re.compile(
     r"\b(1[5-9]\d{2}|20\d{2})\s*[–—\-]\s*(1[5-9]\d{2}|20\d{2})\b"
 )
-_VICTORIAN = re.compile(r"виктори[аяь]нск\w*", re.IGNORECASE)
+# «викторианский / викторианцев / викторианки / викторианская эпоха» —
+# match the stem before «-ск/-нц/-нка» so all case forms land. Stan round
+# 2 Q5: «у викторианцев» (instrumental of «викторианец») used to miss
+# because the old pattern required «-нск-» which the plural-genitive
+# form doesn't have.
+_VICTORIAN = re.compile(r"виктори[аяь]н(?:ск\w*|ц\w*|к\w*)", re.IGNORECASE)
+_EDWARDIAN = re.compile(r"эдвард(?:иан|овск)\w*", re.IGNORECASE)
+_ROMANTICISM = re.compile(r"\bроманти[зч]\w*\s+эпох|эпох\w*\s+романти",
+                          re.IGNORECASE)
+_NINETEENTH = re.compile(r"\b(?:19|XIX|девятнадцат\w*)\s*(?:век|century)",
+                         re.IGNORECASE)
 
 
 def _find_year_range(text: str) -> tuple[int | None, int | None]:
@@ -498,6 +508,10 @@ def _find_year_range(text: str) -> tuple[int | None, int | None]:
         return None, int(m.group(2)) - 1
     if _VICTORIAN.search(text):
         return 1837, 1901
+    if _EDWARDIAN.search(text):
+        return 1901, 1914
+    if _NINETEENTH.search(text):
+        return 1800, 1899
     return None, None
 
 

@@ -12,6 +12,26 @@ from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
 
 
+# Stan round 2 Q9: learning_words на P&P вернул `Lambton`, `Shire` — это
+# locations. spaCy NER in v1 не всегда отлавливает места, и они утекают
+# в учебный список. Hard blacklist для известных литературных топонимов
+# часто-цитируемых книг. Extend pragmatically.
+_LITERARY_LOCATION_BLACKLIST = frozenset({
+    # Pride and Prejudice + Sense and Sensibility
+    "lambton", "shire", "pemberley", "longbourn", "netherfield",
+    "rosings", "hunsford", "meryton", "derbyshire", "kent",
+    "hertfordshire", "norland", "barton", "delaford", "cleveland",
+    # Wuthering Heights
+    "gimmerton", "yorkshire", "thrushcross",
+    # Frankenstein / Dracula
+    "ingolstadt", "geneva", "transylvania", "carfax", "whitby",
+    # Treasure Island / Moby Dick / Hound of the Baskervilles
+    "hispaniola", "nantucket", "dartmoor",
+    # Mythology / classical
+    "hades", "olympus", "valhalla", "asgard",
+})
+
+
 @tool(
     name="learning_words",
     category="learning",
@@ -58,6 +78,16 @@ def learning_words(scope, level: str = "intermediate", top: int = 30,
             message=str(raw["error"]), query=query,
         )
     rows = (raw.get("words") if isinstance(raw, dict) else None) or []
+    # Drop literary locations (Stan round 2 Q9: Lambton/Shire in P&P
+    # learning list). The v1 NER misses some place names; this hardcoded
+    # backstop keeps the user-facing study list clean.
+    if rows:
+        before = len(rows)
+        rows = [r for r in rows
+                if (r.get("lemma") or r.get("word") or "").lower()
+                not in _LITERARY_LOCATION_BLACKLIST]
+        if len(rows) < before and isinstance(raw, dict):
+            raw["words"] = rows
     warnings: list[ToolWarning] = []
     if not rows:
         warnings.append(ToolWarning(

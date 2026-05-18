@@ -343,17 +343,28 @@ def _plan_author_top_words(e: Entities) -> QueryPlan:
     not affinity. Routes to top_ngrams_by_author(n=1) so the user gets the
     actual zipf head (mostly stopwords filtered) for a quick stylistic
     fingerprint that doesn't require comparison to the rest of the corpus.
+
+    Stan round 2 Q18: «топ-15 биграмм у Конан Дойла» — same intent but
+    n=2. Detect bigram/trigram triggers in raw text and bump `n`.
     """
     if not e.author_regex:
         return _need_author(e)
+    text_lower = (e.raw_misc.get("raw_text") or "").lower()
+    import re
+    if re.search(r"\bтриграмм|trigram", text_lower):
+        n = 3
+    elif re.search(r"\bбиграмм|bigram", text_lower):
+        n = 2
+    else:
+        n = 1
     return QueryPlan(
         intent="author_top_words", entities=e,
         steps=[PlanStep(tool="top_ngrams_by_author",
                         args={"author_regex": e.author_regex,
-                              "n": 1, "top": e.top_n or 20,
+                              "n": n, "top": e.top_n or 20,
                               "pos_filter": e.pos_filter})],
         expected_cost="medium",
-        explain=f"top_ngrams_by_author({e.author_regex}, n=1) — raw frequency",
+        explain=f"top_ngrams_by_author({e.author_regex}, n={n}) — raw frequency",
     )
 
 

@@ -19,8 +19,11 @@ from scripts.v2._types import Coverage, ToolResult, ToolWarning
 # mythological figures / classical place names that bleed through the
 # regular PROPN filter. Extend pragmatically.
 _LITERARY_PROPN_BLACKLIST = frozenset({
-    # «The Importance of Being Earnest» (Wilde) — character name
+    # Wilde characters & associates (Salome, Importance of Being Earnest,
+    # Dorian Gray, Lady Windermere's Fan, Vera, A Woman of No Importance)
     "ernest", "algernon", "bunbury", "cecily", "gwendolen", "lady bracknell",
+    "tetrarch", "cardew", "daubeny", "phipps", "simone", "symonds", "otis",
+    "raff", "yeats", "topazes", "salome", "herodias", "lord goring",
     # «The Tempest» (Shakespeare) — Caliban, Prospero
     "caliban", "prospero", "ariel", "miranda",
     # Religious / classical proper nouns mis-tagged as ADJ
@@ -32,7 +35,31 @@ _LITERARY_PROPN_BLACKLIST = frozenset({
     # Misc historical figures often used as adjectives but proper-nouny
     "dorian",  # «Dorian Gray» — character name in Wilde's most famous book
     "byronic", "miltonic",  # too author-coupled for genuine ADJ usage
+    # Russian translit character names from Pushkin, Tolstoy, etc.
+    "gavril", "lisaveta", "korsakoff", "tomsky", "andreitch", "vassilissa",
+    "alexei", "simbirsk", "kibitka", "petr", "dounia", "lenski", "lensky",
+    "izaveta", "bashkirs", "marya", "polacca", "ivan", "petrovitch",
+    "boyars", "desforges", "mossoo", "aleko", "beaupre", "onegin",
+    "petrovich", "vladimir", "andrei", "tsarevich",
 })
+
+
+def _drop_author_self_name(author_regex: str, words: list[dict]) -> list[dict]:
+    """Stan round 2 Q3: «фирменные слова Уайльда» returned **wilde** as a
+    signature word. An author's own name shouldn't be in their signature
+    vocabulary — that's their *attribution* leaking through the text, not
+    their style. Extract the surname from `^Surname,` regex and drop it
+    if it shows up in the result list.
+    """
+    if not author_regex:
+        return words
+    # «^Wodehouse,» → "wodehouse"
+    import re
+    m = re.match(r"\^([A-Za-zЀ-ӿ'-]+)", author_regex)
+    if not m:
+        return words
+    surname = m.group(1).lower()
+    return [w for w in words if (w.get("word") or "").lower() != surname]
 
 
 @tool(
@@ -92,21 +119,24 @@ def affinity_by_author(author_regex: str, top: int = 50,
     # blacklist beats redoing NER per request. Stan's demon: «характерные
     # прилагательные Уайльда» came back with «ernest, caliban, nazarene,
     # parnassus» — all character / classical names.
+    # Also drop the author's own surname if it leaks through (round-2 Q3:
+    # Wilde signature words included «wilde»).
     if rows:
+        rows = _drop_author_self_name(author_regex, rows)
         filtered = [r for r in rows
                     if (r.get("word") or "").lower()
                     not in _LITERARY_PROPN_BLACKLIST]
         dropped = len(rows) - len(filtered)
         if dropped:
             rows = filtered
-            # Propagate the filtered list back so the LLM renders only
-            # the clean list, not the raw one. Mutate `raw` in place
-            # (top_words / top, whichever was the source).
-            if isinstance(raw, dict):
-                if "top_words" in raw:
-                    raw["top_words"] = filtered
-                elif "top" in raw:
-                    raw["top"] = filtered
+        # Propagate the filtered list back so the LLM renders only
+        # the clean list, not the raw one. Mutate `raw` in place
+        # (top_words / top, whichever was the source).
+        if isinstance(raw, dict):
+            if "top_words" in raw:
+                raw["top_words"] = rows
+            elif "top" in raw:
+                raw["top"] = rows
 
     warnings: list[ToolWarning] = []
     if not rows:

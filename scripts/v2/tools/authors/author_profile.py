@@ -94,11 +94,41 @@ def author_influences(author_regex: str, top: int = 10) -> ToolResult:
     if isinstance(raw, dict) and raw.get("error"):
         return ToolResult.fail(tool="author_influences", err_type="not_found",
                                message=str(raw["error"]), query=query)
+    # Stan round 2 Q10: «Various» (aggregate placeholder for multi-author
+    # collections, ~3634 books) topped the «closest authors» list when
+    # asking «на кого похож Conan Doyle». Drop it + similar collection
+    # bucket names before rendering.
+    if isinstance(raw, dict):
+        for key in ("closest", "neighbours", "top", "authors"):
+            lst = raw.get(key)
+            if isinstance(lst, list):
+                filtered = [r for r in lst
+                            if not _is_collection_bucket(r)]
+                if len(filtered) < len(lst):
+                    raw[key] = filtered
     return ToolResult.success(
         tool="author_influences", data=raw,
         coverage=Coverage(),
         query=query,
     )
+
+
+_COLLECTION_BUCKETS = frozenset({
+    "various", "anonymous", "unknown", "n/a", "encyclop",
+    "catholic church", "multiple", "collection", "compilation",
+})
+
+
+def _is_collection_bucket(row) -> bool:
+    """Multi-author aggregate placeholders that pollute «closest by
+    style» rankings. They show up because they have thousands of books
+    pooled together with mean stylistic profile near everyone's center."""
+    if not isinstance(row, dict):
+        return False
+    name = (row.get("author") or row.get("name") or "").lower().strip()
+    if not name:
+        return False
+    return any(b in name for b in _COLLECTION_BUCKETS)
 
 
 @tool(
