@@ -194,9 +194,45 @@ PAGE = r"""<!doctype html>
   #suggestions h3 { margin:0 0 8px 0; width:100%; font-size:12px;
                     color:#888; font-weight:normal; text-transform:uppercase;
                     letter-spacing:0.5px; }
+  /* v2.5 onboarding overlay (first-visit only) */
+  #onboarding-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.8);
+                        z-index:100; display:flex; align-items:center;
+                        justify-content:center; }
+  #onboarding-card { background:#1c1f24; border:1px solid #2f343c;
+                     border-radius:8px; padding:28px 32px; max-width:560px;
+                     box-shadow:0 8px 32px rgba(0,0,0,0.5); }
+  #onboarding-card h2 { margin:0 0 16px 0; color:#50e3c2; font-size:18px; }
+  #onboarding-card p { margin:8px 0; color:#d0d0d0; font-size:14px;
+                       line-height:1.5; }
+  #onboarding-card .feat { margin:10px 0; padding-left:0; color:#a0c4ff;
+                           font-size:13px; }
+  #onboarding-card .feat::before { content:"✓ "; color:#7ed321;
+                                    margin-right:4px; }
+  #onboarding-card .actions { margin-top:20px; display:flex; gap:10px;
+                              justify-content:flex-end; }
+  #onboarding-card button { background:#50e3c2; color:#0a0c10;
+                            font-weight:600; padding:8px 20px;
+                            border:0; border-radius:4px; cursor:pointer; }
+  #onboarding-card button:hover { background:#7ee3c8; }
 </style>
 </head>
 <body>
+<div id=onboarding-overlay style="display:none;">
+  <div id=onboarding-card>
+    <h2>Привет, я Словоёб</h2>
+    <p>Литературный аналитик корпуса Project Gutenberg — <b>~55 000 английских книг</b>, проиндексированных семантически (ChromaDB) и лексически (FTS5).</p>
+    <p>Что умею:</p>
+    <div class=feat>Стилометрия: фирменные слова автора, сравнение, кто на кого похож</div>
+    <div class=feat>Книги: уровень сложности, архаизмы, эмоциональный профиль</div>
+    <div class=feat>Слова: контексты, collocates, этимология (Wiktionary), эпохи</div>
+    <div class=feat>Лексика для изучения: B1/B2/C1, экспорт в Anki</div>
+    <div class=feat>Топ-листы: по странам, скачиваниям, токенам</div>
+    <p style="margin-top:14px;">Спрашивай по-русски или по-английски. Можно начать с подсказок ниже — они кликабельны.</p>
+    <div class=actions>
+      <button onclick="dismissOnboarding()">поехали</button>
+    </div>
+  </div>
+</div>
 <header>
   <h1>__ASSISTANT_NAME__ · wordcracker</h1>
   <span class=meta>v2 engine · wordcracker:v2 · planner→router→renderer→critic</span>
@@ -266,10 +302,21 @@ function render(role, text, extras) {
   log.scrollTop = log.scrollHeight;
 }
 
-function renderError(msg) {
+function renderError(msg, retryText) {
   const div = document.createElement('div');
   div.className = 'msg error';
-  div.textContent = msg;
+  const txt = document.createElement('div');
+  txt.textContent = msg;
+  div.appendChild(txt);
+  // v2.5 demo polish: errors get a retry button. Same query, fresh request.
+  if (retryText) {
+    const retry = document.createElement('button');
+    retry.className = 'retry-scope';
+    retry.type = 'button';
+    retry.textContent = '↻ повторить';
+    retry.onclick = () => { submit(retryText); };
+    div.appendChild(retry);
+  }
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
 }
@@ -380,7 +427,7 @@ async function submit(text) {
             final = ev;
             break;
           case 'error':
-            renderError(ev.message);
+            renderError(ev.message, text);
             return;
         }
       }
@@ -460,10 +507,13 @@ async function submit(text) {
     history.push({role: 'assistant', content: answerText});
     saveHistory(history);
     log.scrollTop = log.scrollHeight;
+    // v2.5: refresh the footer immediately so user sees the new
+    // count/avg without waiting for the next 10s tick.
+    refreshStats();
   } catch (e) {
     clearInterval(timer);
     live.remove();
-    renderError('Stream error: ' + e.message);
+    renderError('Stream error: ' + e.message, text);
   } finally {
     send.disabled = false;
     send.textContent = 'send';
@@ -523,13 +573,15 @@ function hideSuggestionsOnSubmit() {
   document.getElementById('suggestions').innerHTML = '';
 }
 
-// Sprint 11.5: poll /api/stats every 30s so the sticky footer shows live
-// counters from the in-process ring buffer (queries today, avg latency,
-// cache hit rate, critic flags). Failures are silent — footer just keeps
+// Sprint 11.5 / v2.5: poll /api/stats every 10s so the sticky footer shows
+// live counters from the in-process ring buffer. v2.5 cut the interval
+// from 30s → 10s + added an explicit refresh after each user submit,
+// since Stan's 2026-05-18 demon round noticed the counters looked frozen
+// during fast-paced sessions. Failures are silent — footer just keeps
 // the last successful values.
 async function refreshStats() {
   try {
-    const r = await fetch('/api/stats');
+    const r = await fetch('/api/stats', {cache: 'no-store'});
     if (!r.ok) return;
     const s = await r.json();
     const total = s.total || 0;
@@ -552,7 +604,19 @@ async function refreshStats() {
   } catch (e) { /* silent */ }
 }
 refreshStats();
-setInterval(refreshStats, 30000);
+setInterval(refreshStats, 10000);
+
+// v2.5 onboarding: show first-visit splash. Suppress on returning users
+// (localStorage flag set on dismiss).
+const ONB_KEY = 'wordcracker_onboarded_v1';
+function dismissOnboarding() {
+  document.getElementById('onboarding-overlay').style.display = 'none';
+  localStorage.setItem(ONB_KEY, '1');
+  q.focus();
+}
+if (!localStorage.getItem(ONB_KEY) && loadHistory().length === 0) {
+  document.getElementById('onboarding-overlay').style.display = 'flex';
+}
 
 // restore history
 for (const m of loadHistory()) {
