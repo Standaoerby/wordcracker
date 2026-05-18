@@ -56,10 +56,28 @@ pre-fills the input with the original query so the missing scope
 (author / book / period) can be appended in place instead of retyping a
 long question from the vault.
 
+### Two caught bugs
+
+Stan caught two more issues while flexing v2.1, both fixed in the same
+release window:
+
+- **«похожи на ИИ» false-matched `author_closest`** — 4 rephrasings of
+  «почему тексты Азимова так похожи на написанные ИИ» all landed in
+  `author_closest` then clarified «нужен автор». The bare
+  `похож\w*\s+на` rule was too permissive. Tightened to require an
+  author/style anchor after «похож…на». Honest clarify on free-form
+  «похож на правду / на сказку / на ИИ» queries now.
+- **«имени Анна»** didn't surface as `e.word`. `_find_word` only knew
+  `"X"` and «слово X». Added `им(я|ени|енем)\s+X` regex with a
+  proper-noun guard (capital first letter), so name probes thread
+  through `word_contexts` → `hybrid_search` → `_maybe_translate` and
+  resolve Russian names to English mentions in the corpus.
+
 ## Tests
 
-- Unit: 188/188 (+2 over v2.1: `composite_compare` plan structure
-  + `author_regex` router injection)
+- Unit: 190/190 (+4 over v2.1: `composite_compare` plan structure,
+  `author_regex` router injection, `pohozhi_na_AI` regression,
+  `name_after_imya` extraction)
 - Functional 40/40 verified after deploy — Q40 now routes correctly to
   `composite_compare` with the 4-step plan
 - No regressions in the 39 other queries
