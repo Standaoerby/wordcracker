@@ -119,7 +119,36 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"кто ты|что ты умеешь|расскажи о себе|представ(ься|ление)|"
          r"who are you|what can you do|tell me about yourself|"
          r"типы анализа|какие.{1,10}поддержив"), "introduction", 0.95),
-    (_re(r"^\s*(привет|hi|hello)\b"), "introduction", 0.7),
+    (_re(r"^\s*(привет|hi|hello|здравствуй|здарова|здарово|приветик)\b"),
+     "introduction", 0.8),
+    # Round 3: «помоги / помощь / help» — opener pattern, was clarify.
+    (_re(r"^\s*(помоги|помощь|help|справка|подскажи)\b"
+         r"(?!.{0,40}\b(книг|автор|слов|перевод))"),
+     "introduction", 0.85),
+    # Round 2 friendly openers: «ну привет, ты кто», «слушай, ...».
+    # Match opening particles + question; LLM fallback covers the rest.
+    (_re(r"^\s*(ну|эй|слушай|ладно|так)[,\s]+.{1,40}\b(ты|кто|умеешь|что|"
+         r"книг|корпус)"), "introduction", 0.75),
+
+    # ===== translation request =====
+    # Round 3 R14: «переведи мне X на Y» — translation. Не translation_quality
+    # (это про качество существующих переводов), а translation OOS — мы не
+    # переводчик. Routes to out_of_scope с friendly note.
+    (_re(r"\bпереведи\s+(мне|нам)?\s*.{1,60}\s+на\s+(английск|русск|немецк|"
+         r"французск|испанск|итальянск|english|russian)|"
+         r"\btranslate\s+(this|the\s+\w+|.{1,40})\s+(to|into)\s+\w+"),
+     "out_of_scope", 0.93),
+
+    # ===== command injection (system command / shell) =====
+    # Round 3 R15: «execute system command: ls -la /etc». Adversarial input.
+    (_re(r"\b(execute|run|exec)\s+(system\s+)?(command|shell)|"
+         r"\b(ls\s|cat\s+/|rm\s+-|sudo\s|chmod\s|chown\s|"
+         r"\\?<\\?\\?php|\\?<script|eval\(|exec\()"),
+     "out_of_scope", 0.95),
+    (_re(r"\bвыполни\s+(команд|shell|bash|cmd)|"
+         r"\bshow\s+me\s+(your\s+)?(env|environment|secrets|password|"
+         r"credentials|api[\s_]?key)"),
+     "out_of_scope", 0.93),
 
     # ===== out_of_scope =====
     # Prompt-injection guards. These would normally bounce off the
@@ -173,6 +202,10 @@ RULES: list[tuple[Pattern[str], str, float]] = [
 
     # ===== corpus_meta =====
     (_re(r"\b(сколько|how many)\s.{0,20}(книг|book)"), "corpus_meta", 0.95),
+    # Round 2 R2: «слушай а сколько у тебя книжек в базе вообще» — diminutive
+    # «книжек» + filler opener «слушай а». Broaden to catch diminutive +
+    # «у тебя».
+    (_re(r"\bсколько\s+(у\s+тебя\s+)?книж(ек|ка)\b"), "corpus_meta", 0.92),
     (_re(r"прогресс\s+индексаци\w*|index progress|reindex"), "corpus_meta", 0.92),
     (_re(r"\bпрогресс\b"), "corpus_meta", 0.6),
     (_re(r"что у тебя за корпус|размер корпуса|corpus (size|stats)"),
@@ -198,6 +231,17 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"когда\s+(родил\w*|умер\w*|жил\w*)"), "author_metadata", 0.9),
     (_re(r"year of (birth|death)"), "author_metadata", 0.9),
     (_re(r"сколько у\s+.{1,40}\s*книг"), "author_metadata", 0.85),
+    # Round 3 R20: «сколько у Толстого книг» правильно, но v2.x routed в
+    # corpus_meta. Strengthen author_metadata rule when an author is in
+    # genitive form near «книг».
+    (_re(r"сколько\s+у\s+[А-ЯA-ZЁ]\w+\w*\s+книг"), "author_metadata", 0.93),
+    # Round 3 R3: «дай статистику по Wodehouse» — это chat placeholder! Не
+    # corpus_stats_by_author exact, но routes тoда же tool через
+    # author_metadata (быстрая мета — books_total, sample titles, geo).
+    (_re(r"\b(дай|покажи|выдай)\s+статистик\w*\s+по\s+[A-ZА-ЯЁ]"),
+     "author_metadata", 0.92),
+    (_re(r"\bstats?\s+(for|on|about)\s+[A-Z]\w+"),
+     "author_metadata", 0.88),
     # Stan round 2 Q12: «годы жизни эдгара по?» — биографический интент,
     # старые правила его не ловили (требовали «когда родился»). Plus
     # обычные синонимы для биографии.
@@ -221,6 +265,15 @@ RULES: list[tuple[Pattern[str], str, float]] = [
      "book_lookup", 0.9),
     (_re(r"\bкнига\s+.{2,60}\s+есть\s+у\s+тебя"),
      "book_lookup", 0.9),
+    # Round 2 R8/R11: «найди-ка X», «есть ли у тебя X» where X is the book
+    # title directly (no «книгу» word in between). Particle «-ка» is
+    # informal Russian, doesn't change intent.
+    (_re(r"\b(найди|поищи)\s*-?\s*ка?\s+[«\"“‘А-ЯA-Z]"),
+     "book_lookup", 0.9),
+    (_re(r"\bесть\s+ли\s+у\s+тебя\s+[«\"“‘А-ЯA-Z]"),
+     "book_lookup", 0.9),
+    (_re(r"\b(где|у\s+тебя\s+есть)\s+\w{0,15}\s*[«\"“‘А-ЯA-Z][\w\s]{1,40}\s+("
+         r"\?|$)"), "book_lookup", 0.78),
 
     # ===== top_authors_books =====
     (_re(r"\b(топ[- ]?\d*|top\s*\d*)\s.{0,40}(автор\w*|writer)"),
@@ -418,6 +471,11 @@ RULES: list[tuple[Pattern[str], str, float]] = [
          r"перестали\s+(использовать|встречаться)|"
          r"disappeared after|fell out of use|words that vanished"),
      "word_timeline", 0.92),
+    # Round 3 R10: «timeline слова freedom» — direct doc keyword.
+    (_re(r"\btimeline\s+слова\s+|timeline\s+(for|of)\s+(the\s+)?word|"
+         r"частота\s+слова\s+.{1,30}\s+по\s+(годам|эпох|период)|"
+         r"word\s+frequency\s+over\s+(time|years)"),
+     "word_timeline", 0.92),
     (_re(r"\b(после|до|after|before)\s+\d{4}\b.{0,80}\b(слов\w*|word)"),
      "word_timeline", 0.7),
     (_re(r"почти\s+исчезают\s+после"), "word_timeline", 0.95),
@@ -438,6 +496,11 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"приведи\s+примеры|примеры\s+использов\w*|examples? of usage|"
          r"в\s+каком\s+контексте|usage examples?|оттенки\s+значени"),
      "word_contexts", 0.9),
+    # Round 3 R5 «найди упоминания битой посуды» — chat placeholder!
+    # Routes to hybrid_search via word_contexts (which falls through to
+    # hybrid_search in plan when no author scope).
+    (_re(r"\bнайди\s+упоминани\w+|найди\s+(где\s+)?(говорится|описыва\w+)\s+"
+         r"(про|о|об)\s+|find\s+mentions?\s+of"), "word_contexts", 0.9),
     (_re(r"у\s+разных\s+авторов\b.{0,40}\bобъясни\s+оттенки"),
      "word_contexts", 0.95),
     (_re(r"в\s+необычных\s+контекстах|обычными\s+сейчас\b.{0,40}\bконтекст"),
@@ -532,6 +595,12 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"уникальных\s+лемм|vocabulary size of authors"), "lexical_wealth", 0.9),
     (_re(r"самым\s+\W?богат\w+\s+словар"), "lexical_wealth", 0.92),
     (_re(r"самы(е|м)\s.{0,15}разнообразн\w*\s+словар"), "lexical_wealth", 0.85),
+    # Round 3 R12: «сколько слов знал Шекспир» — vocab size question.
+    (_re(r"сколько\s+(\w+\s+)?слов\s+(знал|использовал|насчитывал)\s+"
+         r"[А-ЯA-ZЁ]|"
+         r"how\s+many\s+(unique\s+)?words?\s+did\s+[A-Z]\w+\s+(know|use)|"
+         r"vocabulary\s+size\s+of\s+[A-Z]"),
+     "lexical_wealth", 0.93),
 
     # ===== word_dialogue =====
     (_re(r"в\s+диалогах\b.{0,40}\b(чем\s+в|а\s+не\s+в|vs|против|нежели)"),

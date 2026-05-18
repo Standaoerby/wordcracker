@@ -60,6 +60,136 @@ RENDER_PROMPT = """Тебя зовут {name}. Ты — литературный
 Tool trace тебе передан как JSON. Каждая запись — {{tool, query, data, warnings, coverage}}. Возьми оттуда factual content."""
 
 
+# ---------- Sprint 14: LLM-fallback entity merge ----------
+
+
+# Intents whose plan-builder needs at least one of these entities. When the
+# rule fires the right intent but regex missed the entity, escalate to
+# `classify_and_extract` for entity-only LLM help.
+_INTENTS_REQUIRING_ENTITIES = {
+    "author_vocab":      ("author_regex",),
+    "author_top_words":  ("author_regex",),
+    "author_compare":    ("author_regex",),
+    "author_closest":    ("author_regex",),
+    "author_influences": ("author_regex",),
+    "author_metadata":   ("author_regex",),
+    "country_vocab":     ("author_regex",),
+    "vocab_passport":    ("author_regex",),
+    "lexical_wealth":    (),  # global query, no entity required
+    "book_vocab":        ("book_id", "book_title"),
+    "book_readability":  ("book_id", "book_title"),
+    "book_archaic":      ("book_id", "book_title"),
+    "book_emotion":      ("book_id", "book_title"),
+    "book_compare":      ("book_id", "book_title"),
+    "book_lookup":       ("book_title", "book_id"),
+    "word_contexts":     ("word",),
+    "word_collocates":   ("word",),
+    "word_timeline":     ("word",),
+    "word_pos":          ("word",),
+    "word_etymology":    ("word", "etymology_family"),
+}
+
+
+def _needs_entity_help(intent_label: str, entities) -> bool:
+    """True iff this intent requires entities and regex extractor missed
+    them all. Used to gate the entity-only LLM fallback."""
+    required = _INTENTS_REQUIRING_ENTITIES.get(intent_label)
+    if not required:
+        return False
+    for field in required:
+        if getattr(entities, field, None):
+            return False
+    return True
+
+
+# Canonical surname → AUTHOR_ALIASES regex. Built lazily once.
+_SURNAME_LOOKUP: dict[str, str] | None = None
+
+
+def _surname_to_regex(name: str) -> str | None:
+    """Convert an LLM-suggested author surname («Doyle», «Tolstoy») to the
+    `^Surname,` regex shape AUTHOR_ALIASES uses. Returns None when we
+    don't recognize the surname."""
+    if not name:
+        return None
+    global _SURNAME_LOOKUP
+    if _SURNAME_LOOKUP is None:
+        from scripts.v2.planner.entities import AUTHOR_ALIASES
+        # AUTHOR_ALIASES values look like "^Doyle," — extract the surname
+        # part as a lookup key.
+        _SURNAME_LOOKUP = {}
+        for regex in set(AUTHOR_ALIASES.values()):
+            # regex shape: ^Surname,  (or ^Bront for prefix matches)
+            import re
+            m = re.match(r"\^([A-Za-zЀ-ӿ'-]+)", regex)
+            if m:
+                _SURNAME_LOOKUP[m.group(1).lower()] = regex
+    return _SURNAME_LOOKUP.get(name.strip().lower())
+
+
+# Canonical title lookups for LLM-suggested book titles. Reuses
+# KNOWN_BOOKS so we get the same PG ids the rule extractor uses.
+def _title_to_book(title: str) -> tuple[str | None, str | None]:
+    """Given an LLM-suggested title, look up (pg_id, canonical_title) via
+    KNOWN_BOOKS. Falls back to (None, raw_title) so the find_book tool
+    can resolve it dynamically."""
+    if not title:
+        return None, None
+    from scripts.v2.planner.entities import KNOWN_BOOKS
+    key = title.lower().strip().strip("\"'«»“”")
+    if key in KNOWN_BOOKS:
+        pg, canonical = KNOWN_BOOKS[key]
+        return (pg if pg else None), canonical
+    # Try leading-«the» fuzzy match (same trick as in plan.py).
+    if not key.startswith("the "):
+        alt = "the " + key
+        if alt in KNOWN_BOOKS:
+            pg, canonical = KNOWN_BOOKS[alt]
+            return (pg if pg else None), canonical
+    return None, title.strip()
+
+
+def _merge_llm_entities(entities, llm_full: dict) -> None:
+    """Mutate `entities` in place: fill missing fields from LLM-suggested
+    extraction. Regex wins where it found something — LLM only fills
+    gaps. Keeps the dataclass shape and types intact so downstream
+    plan-builder doesn't need any awareness of where the entity came
+    from."""
+    if not isinstance(llm_full, dict):
+        return
+    if entities.author_regex is None:
+        author = llm_full.get("author")
+        if author:
+            regex = _surname_to_regex(author)
+            if regex:
+                entities.author_regex = regex
+                entities.author_label = author
+    if entities.book_title is None and entities.book_id is None:
+        title = llm_full.get("book_title")
+        if title:
+            pg, canonical = _title_to_book(title)
+            if pg:
+                entities.book_id = pg
+            if canonical:
+                entities.book_title = canonical
+    if entities.word is None:
+        word = llm_full.get("word")
+        if word and isinstance(word, str) and 2 <= len(word) <= 30:
+            entities.word = word.strip().lower()
+    if entities.year_from is None:
+        yf = llm_full.get("year_from")
+        if isinstance(yf, int) and 1500 <= yf <= 2100:
+            entities.year_from = yf
+    if entities.year_to is None:
+        yt = llm_full.get("year_to")
+        if isinstance(yt, int) and 1500 <= yt <= 2100:
+            entities.year_to = yt
+    if entities.country is None:
+        country = llm_full.get("country")
+        if country and isinstance(country, str) and len(country) == 2:
+            entities.country = country.upper()
+
+
 # ---------- LLM call (renderer only) ----------
 
 
@@ -180,12 +310,35 @@ def ask(
     # clarify on free-form Russian; rule-based regex can never close the
     # gap with human phrasing breadth. Ask the local LLM to classify into
     # the 35-label taxonomy when rules + history both miss.
+    #
+    # Sprint 14 round 2 escalation: not just intent, also entities. The
+    # planner often classifies correctly but plan-builder clarifies on
+    # missing author / book / word that regex didn't extract («у Шекспира»,
+    # «а у пушкина», «теперь у Диккенса»). One LLM call now returns both,
+    # and we merge the LLM-extracted entities INTO the regex-extracted
+    # ones (regex wins where it found something — LLM only fills gaps).
+    llm_used_for = None
     if intent.label == "clarify":
         try:
             from scripts.v2.planner import llm_intent
-            llm_match = llm_intent.classify_with_llm(question, history)
-            if llm_match is not None:
-                intent = llm_match
+            full = llm_intent.classify_and_extract(question, history)
+            if full is not None:
+                intent = int_mod.IntentMatch(label=full["intent"],
+                                              confidence=0.7,
+                                              matched_pattern="llm-fallback-full")
+                _merge_llm_entities(entities, full)
+                llm_used_for = "intent+entities"
+        except Exception:
+            pass
+    elif _needs_entity_help(intent.label, entities):
+        # Intent classified by rules but entities missing — ask LLM only
+        # for entities, keep the rule's intent.
+        try:
+            from scripts.v2.planner import llm_intent
+            full = llm_intent.classify_and_extract(question, history)
+            if full is not None:
+                _merge_llm_entities(entities, full)
+                llm_used_for = "entities-only"
         except Exception:
             pass
     plan = plan_mod.build(intent.label, entities)
@@ -340,13 +493,24 @@ def ask_stream(
         if inferred:
             intent = int_mod.IntentMatch(label=inferred, confidence=0.75,
                                          matched_pattern="followup-inferred")
-    # LLM fallback for free-form phrasings (Sprint 13).
+    # LLM fallback for free-form phrasings (Sprint 13/14).
     if intent.label == "clarify":
         try:
             from scripts.v2.planner import llm_intent
-            llm_match = llm_intent.classify_with_llm(question, history)
-            if llm_match is not None:
-                intent = llm_match
+            full = llm_intent.classify_and_extract(question, history)
+            if full is not None:
+                intent = int_mod.IntentMatch(label=full["intent"],
+                                              confidence=0.7,
+                                              matched_pattern="llm-fallback-full")
+                _merge_llm_entities(entities, full)
+        except Exception:
+            pass
+    elif _needs_entity_help(intent.label, entities):
+        try:
+            from scripts.v2.planner import llm_intent
+            full = llm_intent.classify_and_extract(question, history)
+            if full is not None:
+                _merge_llm_entities(entities, full)
         except Exception:
             pass
     plan = plan_mod.build(intent.label, entities)

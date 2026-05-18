@@ -690,6 +690,20 @@ _FAILED_PAGE = r"""<!doctype html>
   <a href="/api/failed">JSON</a>
 </div>
 
+<h3 style="margin-top:24px; margin-bottom:8px; color:#888; font-size:12px; text-transform:uppercase; letter-spacing:0.5px; font-weight:normal;">Top repeated failed phrases (regex-rule candidates)</h3>
+<table id=top-phrases style="margin-bottom:24px;">
+  <thead>
+    <tr>
+      <th>count</th>
+      <th>phrase</th>
+      <th>latest intent</th>
+      <th>kinds</th>
+    </tr>
+  </thead>
+  <tbody id=top-body><tr><td colspan=4 class=empty>загрузка…</td></tr></tbody>
+</table>
+
+<h3 style="margin-bottom:8px; color:#888; font-size:12px; text-transform:uppercase; letter-spacing:0.5px; font-weight:normal;">Recent fails (newest first)</h3>
 <div class=filter>
   <label>kind:</label>
   <select id=kind>
@@ -717,18 +731,38 @@ _FAILED_PAGE = r"""<!doctype html>
 
 <script>
 let RAW = [];
+let TOP = [];
 async function load() {
   try {
     const r = await fetch('/api/failed');
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
     RAW = d.failed || [];
+    TOP = d.top_phrases || [];
   } catch (e) {
     document.getElementById('body').innerHTML =
       '<tr><td colspan=6 class=empty>ошибка загрузки: ' + e.message + '</td></tr>';
     return;
   }
+  renderTop();
   render();
+}
+function renderTop() {
+  if (!TOP.length) {
+    document.getElementById('top-body').innerHTML =
+      '<tr><td colspan=4 class=empty>пусто</td></tr>';
+    return;
+  }
+  document.getElementById('top-body').innerHTML = TOP.map(r => {
+    const kinds = Object.entries(r.kinds || {})
+      .map(([k, v]) => k + '×' + v).join(', ');
+    return `<tr>
+      <td style="font-weight:600; color:#e0a04e;">${r.count}</td>
+      <td class=q>${escapeHtml(r.phrase || '')}</td>
+      <td class=intent>${escapeHtml(r.latest_intent || '?')}</td>
+      <td class=intent>${escapeHtml(kinds)}</td>
+    </tr>`;
+  }).join('');
 }
 function render() {
   const kind = document.getElementById('kind').value;
@@ -816,8 +850,11 @@ class Handler(BaseHTTPRequestHandler):
         # eyeballs.
         if self.path in ("/api/failed", "/api/failed_queries"):
             try:
-                from scripts.v2.observability import recent_failures
-                return self._json(200, {"failed": recent_failures(limit=100)})
+                from scripts.v2.observability import recent_failures, top_failed_phrases
+                return self._json(200, {
+                    "failed": recent_failures(limit=100),
+                    "top_phrases": top_failed_phrases(top_n=15),
+                })
             except Exception as e:
                 return self._json(500, {"error": str(e)})
         if self.path == "/failed":

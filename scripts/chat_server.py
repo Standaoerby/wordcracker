@@ -183,6 +183,7 @@ PAGE = r"""<!doctype html>
   a { color:#7ed321; }
   .hint { color:#666; font-size:12px; padding:0 18px 8px 18px; }
   /* v2.5 demo polish: clickable suggestion chips on empty chat */
+  /* v2.8 — chips stay visible после первого submit (collapsed by default) */
   #suggestions { padding:14px 18px 10px 18px; display:flex; flex-wrap:wrap;
                  gap:8px; }
   #suggestions .chip { background:#262a31; color:#a0c4ff;
@@ -194,6 +195,25 @@ PAGE = r"""<!doctype html>
   #suggestions h3 { margin:0 0 8px 0; width:100%; font-size:12px;
                     color:#888; font-weight:normal; text-transform:uppercase;
                     letter-spacing:0.5px; }
+  #suggestions.collapsed { padding:6px 18px 0 18px; }
+  #suggestions.collapsed > div { display:none; }
+  #suggestions.collapsed::before { content:"💡 примеры запросов"; color:#666;
+                                    font-size:12px; cursor:pointer; }
+  #suggestions.collapsed:hover::before { color:#a0c4ff; }
+  /* v2.8 progressive help overlay — appears after 3 consecutive clarify */
+  #help-overlay { position:fixed; bottom:80px; right:24px; max-width:340px;
+                  background:#262a31; border:1px solid #50e3c2;
+                  border-left-width:3px; border-radius:6px;
+                  padding:14px 16px; color:#eaeaea; font-size:13px;
+                  box-shadow:0 4px 16px rgba(0,0,0,0.4); z-index:50;
+                  display:none; }
+  #help-overlay h4 { margin:0 0 8px 0; color:#50e3c2; font-size:14px; }
+  #help-overlay .ex { color:#a0c4ff; font-family:ui-monospace,monospace;
+                       font-size:12px; padding:2px 0; cursor:pointer; }
+  #help-overlay .ex:hover { color:#eaeaea; }
+  #help-overlay .close { position:absolute; top:6px; right:10px;
+                         color:#666; cursor:pointer; font-size:18px; }
+  #help-overlay .close:hover { color:#eaeaea; }
   /* v2.5 onboarding overlay (first-visit only) */
   #onboarding-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.8);
                         z-index:100; display:flex; align-items:center;
@@ -241,6 +261,14 @@ PAGE = r"""<!doctype html>
 </header>
 <div id=log></div>
 <div id=suggestions></div>
+<div id=help-overlay>
+  <span class=close onclick="dismissHelp()">×</span>
+  <h4>Не понимаю. Попробуй так:</h4>
+  <div class=ex onclick="useExample('фирменные слова Doyle')">фирменные слова Doyle</div>
+  <div class=ex onclick="useExample('уровень сложности Pride and Prejudice')">уровень сложности Pride and Prejudice</div>
+  <div class=ex onclick="useExample('что у тебя с копирайтом')">что у тебя с копирайтом</div>
+  <div class=ex onclick="useExample('этимология слова sword')">этимология слова sword</div>
+</div>
 <form id=f>
   <textarea id=q placeholder="Ctrl+Enter — отправить" autofocus></textarea>
   <button id=send>send</button>
@@ -485,6 +513,11 @@ async function submit(text) {
         q.setSelectionRange(text.length, text.length);
       };
       live.appendChild(retryBtn);
+      // v2.8: count consecutive clarifies; show help overlay after 3.
+      bumpClarify();
+    } else {
+      // Successful response — reset the clarify streak counter.
+      resetClarifyStreak();
     }
 
     if (final) {
@@ -570,7 +603,41 @@ function renderSuggestions() {
   }
 }
 function hideSuggestionsOnSubmit() {
-  document.getElementById('suggestions').innerHTML = '';
+  // v2.8 — keep chips visible but collapse them so they don't crowd the
+  // log. Click on the «💡 примеры запросов» label to expand again.
+  const host = document.getElementById('suggestions');
+  if (!host.classList.contains('collapsed') && host.children.length > 0) {
+    host.classList.add('collapsed');
+    host.onclick = (ev) => {
+      // Only toggle when clicking the empty label area, not a chip
+      if (ev.target === host) {
+        host.classList.toggle('collapsed');
+      }
+    };
+  }
+}
+
+// v2.8: progressive help overlay after N consecutive clarify responses.
+const CLARIFY_KEY = 'wordcracker_clarify_streak';
+function bumpClarify() {
+  const n = (parseInt(localStorage.getItem(CLARIFY_KEY) || '0', 10) + 1);
+  localStorage.setItem(CLARIFY_KEY, String(n));
+  if (n >= 3) {
+    document.getElementById('help-overlay').style.display = 'block';
+  }
+}
+function resetClarifyStreak() {
+  localStorage.setItem(CLARIFY_KEY, '0');
+  document.getElementById('help-overlay').style.display = 'none';
+}
+function dismissHelp() {
+  document.getElementById('help-overlay').style.display = 'none';
+  localStorage.setItem(CLARIFY_KEY, '0');
+}
+function useExample(text) {
+  dismissHelp();
+  q.value = text;
+  document.getElementById('f').requestSubmit();
 }
 
 // Sprint 11.5 / v2.5: poll /api/stats every 10s so the sticky footer shows

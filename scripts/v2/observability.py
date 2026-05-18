@@ -132,6 +132,51 @@ def recent_failures(limit: int = 50) -> list[dict]:
     return list(reversed(fails))[:limit]
 
 
+def top_failed_phrases(top_n: int = 10) -> list[dict]:
+    """Sprint 14: aggregate failed queries by normalized text. Returns
+    [{phrase, count, kinds, latest_intent}] sorted by count desc.
+
+    Normalization: lowercase + collapse whitespace. Same phrasing typed
+    in different cases / whitespaces collapses into one bucket. This is
+    the «top 10 things to fix» list for Stan's regex synthesis pass."""
+    import re
+    with _ring_lock:
+        records = list(_ring)
+    fails = [r for r in records if r.get("is_failure")]
+    if not fails:
+        return []
+    buckets: dict[str, dict] = {}
+    for r in fails:
+        raw = (r.get("question_truncated") or "").strip()
+        if not raw:
+            continue
+        key = re.sub(r"\s+", " ", raw.lower())[:200]
+        b = buckets.setdefault(key, {
+            "phrase": raw, "count": 0,
+            "kinds": Counter(), "latest_intent": None,
+            "latest_ts": None,
+        })
+        b["count"] += 1
+        kind = r.get("failure_kind") or "?"
+        b["kinds"][kind] += 1
+        intent = r.get("intent") or "?"
+        ts = r.get("ts") or ""
+        if not b["latest_ts"] or ts > b["latest_ts"]:
+            b["latest_ts"] = ts
+            b["latest_intent"] = intent
+    rows = []
+    for b in buckets.values():
+        rows.append({
+            "phrase": b["phrase"],
+            "count": b["count"],
+            "kinds": dict(b["kinds"]),
+            "latest_intent": b["latest_intent"],
+            "latest_ts": b["latest_ts"],
+        })
+    rows.sort(key=lambda r: (-r["count"], r["latest_ts"] or ""))
+    return rows[:top_n]
+
+
 def _reset() -> None:
     """For tests."""
     with _ring_lock:

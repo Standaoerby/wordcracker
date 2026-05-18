@@ -142,5 +142,99 @@ class ClassifyDispatch(unittest.TestCase):
             self.assertIn("пушкина", user_content.lower())
 
 
+class ParseFullJson(unittest.TestCase):
+    def test_clean_json(self):
+        out = llm_intent._parse_full_json(
+            '{"intent": "author_vocab", "author": "Doyle"}')
+        self.assertEqual(out["intent"], "author_vocab")
+        self.assertEqual(out["author"], "Doyle")
+
+    def test_markdown_fenced(self):
+        out = llm_intent._parse_full_json(
+            '```json\n{"intent": "corpus_meta", "author": null}\n```')
+        self.assertEqual(out["intent"], "corpus_meta")
+
+    def test_with_preamble(self):
+        out = llm_intent._parse_full_json(
+            'Ответ: {"intent": "book_lookup", "book_title": "Anna Karenina"}')
+        self.assertEqual(out["intent"], "book_lookup")
+        self.assertEqual(out["book_title"], "Anna Karenina")
+
+    def test_bad_json_returns_none(self):
+        self.assertIsNone(llm_intent._parse_full_json("not json at all"))
+
+    def test_empty(self):
+        self.assertIsNone(llm_intent._parse_full_json(""))
+
+
+class ClassifyAndExtract(unittest.TestCase):
+    def setUp(self):
+        llm_intent._reset_cache_for_tests()
+
+    def test_disabled_returns_none(self):
+        with mock.patch.object(llm_intent, "LLM_INTENT_ENABLED", False):
+            self.assertIsNone(llm_intent.classify_and_extract("test"))
+
+    def test_happy_path_full(self):
+        with mock.patch.object(llm_intent, "LLM_INTENT_ENABLED", True), \
+             mock.patch("scripts.v2.planner.llm_intent.requests.post") as mp:
+            mp.return_value.raise_for_status = lambda: None
+            mp.return_value.json = lambda: {
+                "message": {"content": '{"intent": "author_vocab", '
+                                        '"author": "Shakespeare", '
+                                        '"book_title": null, "word": null, '
+                                        '"year_from": null, "year_to": null, '
+                                        '"country": null}'}
+            }
+            out = llm_intent.classify_and_extract("фирменные слова у Шекспира")
+            self.assertEqual(out["intent"], "author_vocab")
+            self.assertEqual(out["author"], "Shakespeare")
+            self.assertIsNone(out["book_title"])
+
+    def test_invalid_intent_rejected(self):
+        with mock.patch.object(llm_intent, "LLM_INTENT_ENABLED", True), \
+             mock.patch("scripts.v2.planner.llm_intent.requests.post") as mp:
+            mp.return_value.raise_for_status = lambda: None
+            mp.return_value.json = lambda: {
+                "message": {"content": '{"intent": "not_a_real_intent"}'}
+            }
+            self.assertIsNone(llm_intent.classify_and_extract("test"))
+
+    def test_cache_skips_second_call(self):
+        with mock.patch.object(llm_intent, "LLM_INTENT_ENABLED", True), \
+             mock.patch("scripts.v2.planner.llm_intent.requests.post") as mp:
+            mp.return_value.raise_for_status = lambda: None
+            mp.return_value.json = lambda: {
+                "message": {"content": '{"intent": "corpus_meta", '
+                                        '"author": null}'}
+            }
+            llm_intent.classify_and_extract("сколько книг")
+            llm_intent.classify_and_extract("сколько книг")
+            self.assertEqual(mp.call_count, 1)
+
+
+class CleanHelpers(unittest.TestCase):
+    def test_clean_str_strips_nulls(self):
+        self.assertIsNone(llm_intent._clean_str(None))
+        self.assertIsNone(llm_intent._clean_str(""))
+        self.assertIsNone(llm_intent._clean_str("null"))
+        self.assertIsNone(llm_intent._clean_str("none"))
+        self.assertEqual(llm_intent._clean_str("  Doyle  "), "Doyle")
+
+    def test_clean_int_range(self):
+        self.assertEqual(llm_intent._clean_int(1850), 1850)
+        self.assertEqual(llm_intent._clean_int("1900"), 1900)
+        self.assertIsNone(llm_intent._clean_int(None))
+        self.assertIsNone(llm_intent._clean_int(100))   # too small
+        self.assertIsNone(llm_intent._clean_int(3000))  # too large
+        self.assertIsNone(llm_intent._clean_int("abc"))
+
+    def test_clean_country(self):
+        self.assertEqual(llm_intent._clean_country("GB"), "GB")
+        self.assertEqual(llm_intent._clean_country("gb"), "GB")
+        self.assertIsNone(llm_intent._clean_country("ZZ"))
+        self.assertIsNone(llm_intent._clean_country(None))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

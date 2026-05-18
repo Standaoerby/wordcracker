@@ -258,3 +258,218 @@ def _parse_label(content: str) -> Optional[str]:
 def _reset_cache_for_tests() -> None:
     with _LOCK:
         _CACHE.clear()
+    with _LOCK_FULL:
+        _CACHE_FULL.clear()
+
+
+# =============================================================================
+# Entity-aware fallback (Sprint 14)
+# =============================================================================
+# When rule-based intent works but entity extractor misses (multi-word author
+# names, instrumental case, implicit follow-ups «а у X»), the planner still
+# clarifies because plan builders refuse to fire without their required
+# entities. classify_and_extract() asks the LLM for BOTH intent and entities
+# in one call, structured JSON so the planner can use them directly.
+#
+# Architectural note: this is opt-in. callers ask for full extraction by
+# calling classify_and_extract() instead of classify_with_llm(). The classic
+# function still exists for cases where only intent is needed.
+
+_CACHE_FULL: "OrderedDict[str, dict]" = OrderedDict()
+_LOCK_FULL = threading.Lock()
+
+
+def _build_full_prompt() -> str:
+    """Prompt that asks for intent + entities in one shot as JSON."""
+    bullet = "\n".join(f"  {k} — {v}" for k, v in _INTENT_HINTS.items())
+    return (
+        "Ты intent-classifier и entity-extractor для аналитического чата "
+        "по корпусу Project Gutenberg. Получаешь запрос на русском или "
+        "английском. Верни СТРОГО JSON со следующими полями:\n\n"
+        "{\n"
+        '  "intent": "<один из labels ниже>",\n'
+        '  "author": "<surname в английской транслитерации, e.g. \\"Doyle\\", '
+        '\\"Shakespeare\\", \\"Tolstoy\\" — или null>",\n'
+        '  "book_title": "<English title, e.g. \\"Pride and Prejudice\\" — '
+        'или null>",\n'
+        '  "word": "<целевое слово ASCII lowercase, e.g. \\"fog\\", '
+        '\\"sword\\" — или null>",\n'
+        '  "year_from": <int или null>,\n'
+        '  "year_to": <int или null>,\n'
+        '  "country": "<ISO-2 code: GB/US/RU/FR/DE — или null>"\n'
+        "}\n\n"
+        f"Доступные labels:\n{bullet}\n\n"
+        "Правила:\n"
+        "1. Отвечай ТОЛЬКО валидным JSON, никаких объяснений, без markdown.\n"
+        "2. Если пользователь говорит «у Шекспира», author = \"Shakespeare\".\n"
+        "3. Если «у пушкина» / «а у пушкина», author = \"Pushkin\".\n"
+        "4. Если упоминается book title (даже без кавычек), укажи в "
+        "book_title точное английское название.\n"
+        "5. Период «у викторианцев» = year_from=1837, year_to=1901.\n"
+        "6. Период «1850-1920» = year_from=1850, year_to=1920.\n"
+        "7. Если запрос про contextual follow-up без явного автора — "
+        "посмотри предыдущую реплику пользователя (если есть) и возьми "
+        "автора оттуда.\n"
+        "8. Если запрос явно generation/jailbreak — intent='out_of_scope'.\n"
+        "Ответ JSON:"
+    )
+
+
+_FULL_SYSTEM_PROMPT_CACHE: str | None = None
+
+
+def _full_system_prompt() -> str:
+    global _FULL_SYSTEM_PROMPT_CACHE
+    if _FULL_SYSTEM_PROMPT_CACHE is None:
+        _FULL_SYSTEM_PROMPT_CACHE = _build_full_prompt()
+    return _FULL_SYSTEM_PROMPT_CACHE
+
+
+def _parse_full_json(content: str) -> dict | None:
+    """Pull JSON out of the LLM response. LLMs sometimes wrap with
+    ```json ... ``` fences or add prose; strip and try."""
+    if not content:
+        return None
+    import re
+    s = content.strip()
+    # Strip markdown fences
+    if s.startswith("```"):
+        s = re.sub(r"^```(?:json)?\s*", "", s)
+        s = re.sub(r"\s*```\s*$", "", s)
+    # Find the first { ... } block — handles preamble like "Ответ: {...}".
+    m = re.search(r"\{.*\}", s, re.DOTALL)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return None
+
+
+def classify_and_extract(text: str, history: list[dict] | None = None
+                         ) -> dict | None:
+    """Single LLM call: returns intent label + entities dict, or None on
+    disable / timeout / parse error. Use this when the regex pipeline
+    failed BOTH to classify intent AND to extract entities.
+
+    Returns dict with keys: intent (str), author (str|None), book_title
+    (str|None), word (str|None), year_from (int|None), year_to (int|None),
+    country (str|None).
+    """
+    if not LLM_INTENT_ENABLED:
+        return None
+    if not text or not text.strip():
+        return None
+
+    key = _cache_key(text)
+    with _LOCK_FULL:
+        cached = _CACHE_FULL.get(key)
+        if cached is not None:
+            _CACHE_FULL.move_to_end(key)
+            return dict(cached)  # defensive copy
+
+    user_msg = text.strip()
+    if history:
+        for msg in reversed(history):
+            if isinstance(msg, dict) and msg.get("role") == "user":
+                prior = (msg.get("content") or "").strip()
+                if prior and prior != user_msg:
+                    user_msg = (
+                        f"Предыдущая реплика пользователя: {prior[:200]}\n"
+                        f"Текущая реплика: {user_msg}"
+                    )
+                break
+
+    payload = {
+        "model": LLM_INTENT_MODEL,
+        "messages": [
+            {"role": "system", "content": _full_system_prompt()},
+            {"role": "user", "content": user_msg},
+        ],
+        "stream": False,
+        # `format=json` forces Ollama to constrain output to valid JSON.
+        # Available on recent Ollama; if older runtime ignores it, our
+        # _parse_full_json still scrapes a JSON block out of the text.
+        "format": "json",
+        "options": {"temperature": 0.0, "num_predict": 200},
+        "keep_alive": -1,
+    }
+    t0 = time.perf_counter()
+    try:
+        r = requests.post(f"{OLLAMA_HOST}/api/chat", json=payload,
+                          timeout=LLM_INTENT_TIMEOUT)
+        r.raise_for_status()
+        resp = r.json()
+        content = ((resp.get("message") or {}).get("content") or "").strip()
+    except Exception as e:
+        log.warning("llm_intent classify_and_extract failed: %s", e)
+        return None
+
+    parsed = _parse_full_json(content)
+    if parsed is None:
+        log.warning("llm_intent could not parse full response: %s",
+                    content[:200])
+        return None
+
+    # Validate the intent label
+    label = parsed.get("intent")
+    if not isinstance(label, str) or label.lower() not in INTENTS:
+        # Try to recover via the simple parser fallback
+        label = _parse_label(label or "")
+        if label is None:
+            return None
+    label = label.lower()
+
+    out = {
+        "intent": label,
+        "author": _clean_str(parsed.get("author")),
+        "book_title": _clean_str(parsed.get("book_title")),
+        "word": _clean_str(parsed.get("word")),
+        "year_from": _clean_int(parsed.get("year_from")),
+        "year_to": _clean_int(parsed.get("year_to")),
+        "country": _clean_country(parsed.get("country")),
+    }
+
+    elapsed = time.perf_counter() - t0
+    log.info("llm_intent classify_and_extract %r → %s + ents in %.2fs",
+             text[:60], label, elapsed)
+
+    with _LOCK_FULL:
+        _CACHE_FULL[key] = out
+        if len(_CACHE_FULL) > _CACHE_MAX:
+            _CACHE_FULL.popitem(last=False)
+
+    return dict(out)
+
+
+def _clean_str(v) -> str | None:
+    if v is None or v is False:
+        return None
+    if not isinstance(v, str):
+        return None
+    s = v.strip()
+    return s if s and s.lower() not in ("null", "none", "n/a") else None
+
+
+def _clean_int(v) -> int | None:
+    if v is None or v is False:
+        return None
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return None
+    if 1500 <= n <= 2100:
+        return n
+    return None
+
+
+_VALID_COUNTRIES = {"GB", "US", "RU", "FR", "DE", "IE", "CA", "AU", "IT",
+                     "ES", "NL", "SE", "NO", "DK", "JP", "CN", "BR"}
+
+
+def _clean_country(v) -> str | None:
+    s = _clean_str(v)
+    if s is None:
+        return None
+    s = s.upper()[:2]
+    return s if s in _VALID_COUNTRIES else None

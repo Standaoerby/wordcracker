@@ -109,6 +109,24 @@ AUTHOR_ALIASES: dict[str, str] = {
     "бронте":           "^Bront",
     "bronte":           "^Bront",
     "brontë":           "^Bront",
+    # Stan round 3 missing aliases
+    "шекспир":          "^Shakespeare,",
+    "шекспира":         "^Shakespeare,",
+    "шекспиру":         "^Shakespeare,",
+    "шекспире":         "^Shakespeare,",
+    "shakespeare":      "^Shakespeare,",
+    "лермонтов":        "^Lermontov,",
+    "лермонтова":       "^Lermontov,",
+    "lermontov":        "^Lermontov,",
+    "булгаков":         "^Bulgakov,",
+    "булгакова":        "^Bulgakov,",
+    "bulgakov":         "^Bulgakov,",
+    "набоков":          "^Nabokov,",
+    "набокова":         "^Nabokov,",
+    "nabokov":          "^Nabokov,",
+    # Q3 Salinger (common copyright author)
+    "сэлинджер":        "^Salinger,",
+    "salinger":         "^Salinger,",
 }
 
 
@@ -168,6 +186,17 @@ KNOWN_BOOKS: dict[str, tuple[str, str]] = {
     "the lord of the rings":      ("",      "The Lord of the Rings"),
     "the hobbit":                 ("",      "The Hobbit"),
     "the old man and the sea":    ("",      "The Old Man and the Sea"),
+    # Stan round 2 Q11 — Harry Potter is post-1929 copyright
+    "harry potter":               ("",      "Harry Potter"),
+    "гарри поттер":               ("",      "Harry Potter"),
+    "harry potter and the philosopher's stone": ("", "Harry Potter and the Philosopher's Stone"),
+    # Stan round 3 Q14 — Anna Karenina has a Tolstoy translation in PG, NOT copyright
+    "anna karenina":              ("PG1399", "Anna Karenina"),
+    "анна каренина":              ("PG1399", "Anna Karenina"),
+    # Catcher in the Rye is copyright
+    "catcher in the rye":         ("",      "The Catcher in the Rye"),
+    "the catcher in the rye":     ("",      "The Catcher in the Rye"),
+    "над пропастью во ржи":       ("",      "The Catcher in the Rye"),
 }
 
 

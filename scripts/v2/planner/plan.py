@@ -43,24 +43,44 @@ class QueryPlan:
 
 
 def _need_author(e: Entities, what: str = "автор") -> QueryPlan:
+    # Sprint 14 — inline contextual help: instead of «нужен автор» / «уточни»
+    # show concrete reformulations the user can copy. Include the captured
+    # raw query as scaffold so they can edit it minimally.
+    raw = (e.raw_misc or {}).get("raw_text", "") or ""
+    hint = ""
+    if raw:
+        # Show what they likely meant: «у Doyle / Wodehouse / Достоевского»
+        hint = (
+            f"\n\nТы написал: «{raw[:120]}». Добавь автора:\n"
+            f"• «… у Doyle»\n"
+            f"• «… у Wodehouse»\n"
+            f"• «… у Достоевского»"
+        )
     return QueryPlan(
         intent="clarify", entities=e, steps=[],
         needs_clarify=True,
         clarify_question=(
-            f"Для этого нужен {what}. Уточни — например: "
-            f"«у Wodehouse», «у Doyle», «у Достоевского»."
+            f"Для этого нужен {what}.{hint}"
         ),
         explain="запросил у пользователя автора",
     )
 
 
 def _need_book(e: Entities) -> QueryPlan:
+    raw = (e.raw_misc or {}).get("raw_text", "") or ""
+    hint = ""
+    if raw:
+        hint = (
+            f"\n\nТы написал: «{raw[:120]}». Добавь книгу:\n"
+            f"• «… в \"Pride and Prejudice\"»\n"
+            f"• «… в \"Dracula\"»\n"
+            f"• «… в \"Преступление и наказание\"»"
+        )
     return QueryPlan(
         intent="clarify", entities=e, steps=[],
         needs_clarify=True,
         clarify_question=(
-            "Уточни название книги или PG id. Пример: "
-            "«Pride and Prejudice» / «PG1342» / «Преступление и наказание»."
+            f"Уточни название книги или PG id (например, PG1342).{hint}"
         ),
         explain="запросил у пользователя книгу",
     )

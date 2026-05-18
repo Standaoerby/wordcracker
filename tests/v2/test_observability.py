@@ -100,6 +100,63 @@ class DiskWriter(unittest.TestCase):
         self.assertEqual(len(obs.recent_records()), 1)
 
 
+class TopFailedPhrases(unittest.TestCase):
+    """Sprint 14: aggregate failed queries to identify the «top 10 things
+    to fix» — Stan's regex-synthesis pass."""
+
+    def setUp(self):
+        obs._reset()
+
+    def test_empty(self):
+        self.assertEqual(obs.top_failed_phrases(), [])
+
+    def test_groups_by_normalized_phrase(self):
+        for _ in range(3):
+            obs.log_request({"is_failure": True, "failure_kind": "clarify",
+                              "intent": "clarify",
+                              "question_truncated": "Помоги"})
+        obs.log_request({"is_failure": True, "failure_kind": "clarify",
+                          "intent": "clarify",
+                          "question_truncated": "помоги "})
+        obs.log_request({"is_failure": True, "failure_kind": "out_of_scope",
+                          "intent": "out_of_scope",
+                          "question_truncated": "напиши стих"})
+        top = obs.top_failed_phrases(top_n=10)
+        # «Помоги», «помоги», «помоги » all normalize to "помоги"
+        helpful = next(r for r in top if "помог" in r["phrase"].lower())
+        self.assertEqual(helpful["count"], 4)
+        self.assertEqual(helpful["kinds"], {"clarify": 4})
+
+    def test_sorted_by_count(self):
+        for _ in range(5):
+            obs.log_request({"is_failure": True, "failure_kind": "clarify",
+                              "intent": "clarify",
+                              "question_truncated": "freq query"})
+        for _ in range(2):
+            obs.log_request({"is_failure": True, "failure_kind": "clarify",
+                              "intent": "clarify",
+                              "question_truncated": "rare query"})
+        top = obs.top_failed_phrases()
+        self.assertEqual(top[0]["count"], 5)
+        self.assertEqual(top[1]["count"], 2)
+
+    def test_excludes_successful_records(self):
+        obs.log_request({"intent": "author_vocab"})  # success
+        obs.log_request({"is_failure": True, "failure_kind": "clarify",
+                          "question_truncated": "fail query"})
+        top = obs.top_failed_phrases()
+        self.assertEqual(len(top), 1)
+        self.assertEqual(top[0]["phrase"], "fail query")
+
+    def test_respects_top_n_limit(self):
+        for i in range(15):
+            obs.log_request({"is_failure": True, "failure_kind": "clarify",
+                              "intent": "clarify",
+                              "question_truncated": f"unique q {i}"})
+        top = obs.top_failed_phrases(top_n=5)
+        self.assertEqual(len(top), 5)
+
+
 class RecentFailures(unittest.TestCase):
     """v2.7: admin endpoint pulls is_failure rows from the ring buffer."""
 
