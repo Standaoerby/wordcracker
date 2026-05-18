@@ -100,5 +100,37 @@ class DiskWriter(unittest.TestCase):
         self.assertEqual(len(obs.recent_records()), 1)
 
 
+class RecentFailures(unittest.TestCase):
+    """v2.7: admin endpoint pulls is_failure rows from the ring buffer."""
+
+    def setUp(self):
+        obs._reset()
+
+    def test_empty_when_no_fails(self):
+        obs.log_request({"intent": "author_vocab"})
+        self.assertEqual(obs.recent_failures(), [])
+
+    def test_pulls_only_failures(self):
+        obs.log_request({"intent": "author_vocab"})  # success
+        obs.log_request({"intent": "clarify", "is_failure": True,
+                         "failure_kind": "clarify",
+                         "question_truncated": "ну привет"})
+        obs.log_request({"intent": "out_of_scope", "is_failure": True,
+                         "failure_kind": "out_of_scope",
+                         "question_truncated": "напиши стих"})
+        fails = obs.recent_failures()
+        self.assertEqual(len(fails), 2)
+        # newest first
+        self.assertEqual(fails[0]["question_truncated"], "напиши стих")
+
+    def test_respects_limit(self):
+        for i in range(30):
+            obs.log_request({"intent": "clarify", "is_failure": True,
+                              "failure_kind": "clarify",
+                              "question_truncated": f"q{i}"})
+        fails = obs.recent_failures(limit=10)
+        self.assertEqual(len(fails), 10)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

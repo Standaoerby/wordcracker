@@ -119,6 +119,19 @@ def aggregate_recent(window_n: int | None = None) -> dict:
     }
 
 
+def recent_failures(limit: int = 50) -> list[dict]:
+    """Return the most recent N records where is_failure=True.
+
+    v2.7 admin endpoint: Stan wants a queryable «what users asked but
+    didn't get an answer for» view. Reads from the in-process ring
+    buffer (last 256 by default) — newer records first. JSONL on disk
+    still has the full history; this helper is for the live admin UI."""
+    with _ring_lock:
+        records = list(_ring)
+    fails = [r for r in records if r.get("is_failure")]
+    return list(reversed(fails))[:limit]
+
+
 def _reset() -> None:
     """For tests."""
     with _ring_lock:

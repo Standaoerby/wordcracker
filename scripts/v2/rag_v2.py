@@ -191,8 +191,24 @@ def ask(
     plan = plan_mod.build(intent.label, entities)
 
     if plan.needs_clarify:
+        clarify_answer = plan.clarify_question or "Уточни запрос."
+        # v2.7: log failed query so admin UI can show «what users asked
+        # but didn't get a tool answer for». Reason = why the planner
+        # bounced out (no author / no book / no word / etc).
+        obs_mod.log_request({
+            "question_truncated": question[:300],
+            "intent": intent.label,
+            "intent_confidence": intent.confidence,
+            "plan_steps": [],
+            "tool_calls": [],
+            "total_elapsed_ms": int((time.perf_counter() - t0) * 1000),
+            "answer_truncated": clarify_answer[:300],
+            "is_failure": True,
+            "failure_kind": "clarify",
+            "failure_reason": plan.explain or "no specific reason",
+        })
         return {
-            "answer": plan.clarify_question or "Уточни запрос.",
+            "answer": clarify_answer,
             "tool_calls": [],
             "iterations": 0,
             "model": model,
@@ -201,6 +217,23 @@ def ask(
             "intent_confidence": intent.confidence,
         }
     if plan.out_of_scope_reason:
+        # v2.7: also log out_of_scope. Stan wants to see these because
+        # some are legit refusals (genre_compare, translation_quality)
+        # but others are «user phrased it wrong, classifier mis-routed»
+        # — both need eyeballs on free-form Russian.
+        obs_mod.log_request({
+            "question_truncated": question[:300],
+            "intent": "out_of_scope",
+            "original_intent": intent.label,
+            "intent_confidence": intent.confidence,
+            "plan_steps": [],
+            "tool_calls": [],
+            "total_elapsed_ms": int((time.perf_counter() - t0) * 1000),
+            "answer_truncated": plan.out_of_scope_reason[:300],
+            "is_failure": True,
+            "failure_kind": "out_of_scope",
+            "failure_reason": plan.explain or plan.out_of_scope_reason[:200],
+        })
         return {
             "answer": plan.out_of_scope_reason,
             "tool_calls": [],

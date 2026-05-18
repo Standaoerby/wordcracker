@@ -453,6 +453,13 @@ def _reindex_running() -> bool:
         return False
 
 
+def _admin_nav_html() -> str:
+    """Inserted into PAGE so admin upload page links to failed-query view."""
+    return '<div class=meta style="margin-top:-12px; margin-bottom:14px;">' \
+           '<a href="/failed" style="color:#7ed321;">→ failed queries log</a>' \
+           '</div>'
+
+
 def _trigger_reindex_async() -> dict:
     """Start build_index_raw in background. Returns info dict."""
     if _reindex_running():
@@ -522,6 +529,9 @@ PAGE = r"""<!doctype html>
 <body>
 <h1>wordcracker · admin</h1>
 <div class=meta>Загрузка архива книг → extract → hard-link в /data/raw_text → reindex.</div>
+<div class=meta style="margin-top:-12px; margin-bottom:14px;">
+  <a href="/failed" style="color:#7ed321;">→ failed queries log</a>
+</div>
 
 <form id=f enctype=multipart/form-data>
   <input type=file name=archive id=archive required
@@ -628,6 +638,145 @@ setInterval(refreshJobs, 8000);
 """
 
 
+# v2.7: standalone HTML for /failed (failed-query log viewer).
+_FAILED_PAGE = r"""<!doctype html>
+<html lang=ru>
+<head>
+<meta charset=utf-8>
+<title>wordcracker · failed queries</title>
+<style>
+  body { font-family: ui-sans-serif, system-ui, sans-serif; background:#1c1f24; color:#eaeaea;
+         max-width:1100px; margin:32px auto; padding:0 20px; }
+  h1 { margin:0 0 6px 0; }
+  .meta { color:#888; font-size:13px; margin-bottom:24px; }
+  .nav { margin-bottom:16px; }
+  .nav a { color:#7ed321; margin-right:14px; }
+  .filter { background:#262a31; padding:10px 14px; border-radius:6px; margin-bottom:16px;
+            display:flex; gap:14px; align-items:center; }
+  .filter label { color:#aaa; font-size:13px; }
+  .filter select { background:#1a1d22; color:#eaeaea; border:1px solid #2f343c;
+                   padding:4px 8px; border-radius:4px; }
+  table { border-collapse:collapse; width:100%; background:#262a31;
+          border-radius:6px; overflow:hidden; }
+  thead { background:#1a1d22; }
+  th { text-align:left; padding:10px 14px; font-size:12px; color:#888;
+       text-transform:uppercase; letter-spacing:0.5px; font-weight:normal;
+       border-bottom:1px solid #2f343c; }
+  td { padding:10px 14px; border-bottom:1px solid #1f2227; vertical-align:top;
+       font-size:13px; }
+  td.q { color:#a0c4ff; max-width:340px; }
+  td.intent { color:#888; font-family:ui-monospace,monospace; font-size:12px;
+              white-space:nowrap; }
+  td.intent .original { color:#e0a04e; }
+  td.kind .clarify { background:#3a3320; color:#e0a04e; padding:2px 7px;
+                     border-radius:9px; font-size:11px; }
+  td.kind .oos     { background:#2d3a4d; color:#a0c4ff; padding:2px 7px;
+                     border-radius:9px; font-size:11px; }
+  td.ans { color:#bbb; max-width:380px; font-size:12px; }
+  td.reason { color:#888; max-width:240px; font-size:12px; font-style:italic; }
+  td.ts { color:#666; font-family:ui-monospace,monospace; font-size:11px;
+          white-space:nowrap; }
+  .empty { color:#666; text-align:center; padding:40px 0; }
+</style>
+</head>
+<body>
+<h1>wordcracker · failed queries</h1>
+<div class=meta>Запросы, на которые планировщик ответил <code>clarify</code> или
+<code>out_of_scope</code>. Новее — выше. Ring buffer хранит последние ~256
+запросов; полная история в JSONL логах.</div>
+
+<div class=nav>
+  <a href="/">← upload</a>
+  <a href="/api/failed">JSON</a>
+</div>
+
+<div class=filter>
+  <label>kind:</label>
+  <select id=kind>
+    <option value="">all</option>
+    <option value=clarify>clarify</option>
+    <option value=out_of_scope>out_of_scope</option>
+  </select>
+  <span style="flex:1"></span>
+  <span class=meta id=count>загрузка…</span>
+</div>
+
+<table id=tbl>
+  <thead>
+    <tr>
+      <th>time</th>
+      <th>kind</th>
+      <th>intent</th>
+      <th>query</th>
+      <th>answer (truncated)</th>
+      <th>reason</th>
+    </tr>
+  </thead>
+  <tbody id=body><tr><td colspan=6 class=empty>загрузка…</td></tr></tbody>
+</table>
+
+<script>
+let RAW = [];
+async function load() {
+  try {
+    const r = await fetch('/api/failed');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    RAW = d.failed || [];
+  } catch (e) {
+    document.getElementById('body').innerHTML =
+      '<tr><td colspan=6 class=empty>ошибка загрузки: ' + e.message + '</td></tr>';
+    return;
+  }
+  render();
+}
+function render() {
+  const kind = document.getElementById('kind').value;
+  const rows = kind ? RAW.filter(r => r.failure_kind === kind) : RAW;
+  document.getElementById('count').textContent = rows.length + ' rows';
+  if (!rows.length) {
+    document.getElementById('body').innerHTML =
+      '<tr><td colspan=6 class=empty>пусто</td></tr>';
+    return;
+  }
+  document.getElementById('body').innerHTML = rows.map(r => {
+    const t = (r.ts || '').replace('T', ' ').slice(0, 19);
+    const kindCls = r.failure_kind === 'clarify' ? 'clarify' : 'oos';
+    const kindTxt = r.failure_kind || '?';
+    const intent = r.intent || '?';
+    const orig = r.original_intent && r.original_intent !== r.intent
+                  ? ` <span class=original>(was: ${escapeHtml(r.original_intent)})</span>`
+                  : '';
+    const q = escapeHtml(r.question_truncated || '');
+    const ans = escapeHtml((r.answer_truncated || '').slice(0, 200));
+    const reason = escapeHtml(r.failure_reason || '—');
+    return `<tr>
+      <td class=ts>${t}</td>
+      <td class=kind><span class="${kindCls}">${kindTxt}</span></td>
+      <td class=intent>${escapeHtml(intent)}${orig}</td>
+      <td class=q>${q}</td>
+      <td class=ans>${ans}</td>
+      <td class=reason>${reason}</td>
+    </tr>`;
+  }).join('');
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+document.getElementById('kind').addEventListener('change', render);
+load();
+setInterval(load, 15000);
+</script>
+</body>
+</html>
+"""
+
+
+def _render_failed_page() -> str:
+    return _FAILED_PAGE
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a, **k): return
 
@@ -661,6 +810,18 @@ class Handler(BaseHTTPRequestHandler):
                 "reindex_running": _reindex_running(),
                 "jobs": _read_jobs(),
             })
+        # v2.7: failed-query log. Admin can see «what users asked that
+        # we couldn't answer» — clarify + out_of_scope rows from the
+        # chat ring buffer, newest first. JSON for tooling, HTML for
+        # eyeballs.
+        if self.path in ("/api/failed", "/api/failed_queries"):
+            try:
+                from scripts.v2.observability import recent_failures
+                return self._json(200, {"failed": recent_failures(limit=100)})
+            except Exception as e:
+                return self._json(500, {"error": str(e)})
+        if self.path == "/failed":
+            return self._html(_render_failed_page())
         return self._html(PAGE)
 
     def do_POST(self):
