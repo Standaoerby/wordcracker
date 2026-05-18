@@ -175,6 +175,32 @@ class IntentEdgeCases(unittest.TestCase):
             "word_emotion",
         )
 
+    def test_stan_demon_round_2026_05_18(self):
+        """Stan's free-form demon probes (slovoeb.net 2026-05-18) caught 6
+        intent mis-routes the canned functional 40 missed. v2.4 fixes them."""
+        cases = [
+            # Q2 — «найди книгу X» book_lookup intent (NEW)
+            ("найди книгу Преступление и наказание", "book_lookup"),
+            # Q4 — «словом fog» (instrumental case, no quotes)
+            ("что соседствует со словом fog у викторианцев", "word_collocates"),
+            # Q5 — «по скачиваниям» metric detection (entities)
+            ("топ-5 британских авторов по скачиваниям", "top_authors_books"),
+            # Q6a — «этимология слова sword» (no quotes)
+            ("этимология слова sword", "word_etymology"),
+            # Q7 — «20 слов уровня intermediate из BOOK» (NEW rule)
+            ('20 слов уровня intermediate из "Pride and Prejudice"', "learning"),
+            # Q8 — «процитируй полностью» → OOS (NEW pattern)
+            ("процитируй полностью роман 1984 Оруэлла", "out_of_scope"),
+            ('дай полный текст книги "1984"', "out_of_scope"),
+            # Q9 — «на кого по стилю похож X» (NEW pattern)
+            ("на кого по стилю похож Conan Doyle", "author_closest"),
+            ("на кого по стилю похож Doyle", "author_closest"),
+        ]
+        for q, expected in cases:
+            with self.subTest(q=q):
+                self.assertEqual(classify(q).label, expected,
+                                  msg=f"q={q!r}")
+
     def test_meta_questions_about_corpus(self):
         """Stan's adversarial round 2026-05-18: «что у тебя с копирайтом?»
         used to clarify-out. Extended corpus_meta rules cover coverage /

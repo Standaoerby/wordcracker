@@ -12,6 +12,29 @@ from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
 
 
+# Stan's 2026-05-18 round 3: «характерные прилагательные Оскара Уайльда»
+# returned «ernest, caliban, nazarene, parnassus» tagged as ADJ. These are
+# proper nouns spaCy systematically mis-tags when fed isolated lowercased
+# tokens. Hard-coded blacklist of the most common literary names /
+# mythological figures / classical place names that bleed through the
+# regular PROPN filter. Extend pragmatically.
+_LITERARY_PROPN_BLACKLIST = frozenset({
+    # «The Importance of Being Earnest» (Wilde) — character name
+    "ernest", "algernon", "bunbury", "cecily", "gwendolen", "lady bracknell",
+    # «The Tempest» (Shakespeare) — Caliban, Prospero
+    "caliban", "prospero", "ariel", "miranda",
+    # Religious / classical proper nouns mis-tagged as ADJ
+    "nazarene", "parnassus", "olympus", "elysian", "stygian", "tartarus",
+    # Common literary place names
+    "albion", "avalon", "camelot", "atlantis", "babylon",
+    # Wodehouse character / place names
+    "wrykyn", "threepwood", "blandings",
+    # Misc historical figures often used as adjectives but proper-nouny
+    "dorian",  # «Dorian Gray» — character name in Wilde's most famous book
+    "byronic", "miltonic",  # too author-coupled for genuine ADJ usage
+})
+
+
 @tool(
     name="affinity_by_author",
     category="authors",
@@ -60,7 +83,31 @@ def affinity_by_author(author_regex: str, top: int = 50,
             message=err, query=query,
         )
 
-    rows = (raw.get("top_words") if isinstance(raw, dict) else None) or []
+    # v1 may return rows under "top" (old) or "top_words" (new). Normalize.
+    if isinstance(raw, dict):
+        rows = raw.get("top_words") or raw.get("top") or []
+    else:
+        rows = []
+    # Post-filter literary proper nouns spaCy mis-tagged as ADJ/NOUN. Quick
+    # blacklist beats redoing NER per request. Stan's demon: «характерные
+    # прилагательные Уайльда» came back with «ernest, caliban, nazarene,
+    # parnassus» — all character / classical names.
+    if rows:
+        filtered = [r for r in rows
+                    if (r.get("word") or "").lower()
+                    not in _LITERARY_PROPN_BLACKLIST]
+        dropped = len(rows) - len(filtered)
+        if dropped:
+            rows = filtered
+            # Propagate the filtered list back so the LLM renders only
+            # the clean list, not the raw one. Mutate `raw` in place
+            # (top_words / top, whichever was the source).
+            if isinstance(raw, dict):
+                if "top_words" in raw:
+                    raw["top_words"] = filtered
+                elif "top" in raw:
+                    raw["top"] = filtered
+
     warnings: list[ToolWarning] = []
     if not rows:
         warnings.append(ToolWarning(

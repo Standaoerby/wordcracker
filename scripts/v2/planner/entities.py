@@ -227,6 +227,7 @@ class Entities:
     etymology_family: str | None = None
     pos_filter: list[str] | None = None
     top_n: int | None = None
+    top_metric: Literal["books", "downloads", "tokens"] | None = None
     multi_author_regex: list[str] = field(default_factory=list)  # «Мелвилла, Конрада и Стивенсона»
     raw_misc: dict = field(default_factory=dict)
 
@@ -395,12 +396,26 @@ _WORD_QUOTED = re.compile(
     "|‘([a-zA-Zа-яёА-ЯЁ-]{2,30})’"
     "|'([a-zA-Zа-яёА-ЯЁ-]{2,30})'"
 )
-# Match only "слово X" (singular), not "слова X" (plural — usually a question
-# phrasing like "слова чаще всего..."). For an unquoted bare word after the
-# keyword we still require it to dodge the stopword set so a question phrasing
-# like "слова чаще встречаются" doesn't get bucketed as e.word="чаще".
+# Catch the word-noun in any case (слово / слова / слову / словом / слове),
+# plus English equivalents. The captured token still has to dodge the
+# stopword set so question phrasings like «слова чаще встречаются» don't
+# bucket e.word="чаще". Stan's 2026-05-18 demon round caught the original
+# version missing «словом fog» (instrumental case) and «слова sword»
+# (genitive). Single-form rule was too narrow for free-form Russian.
 _WORD_AFTER_KEY = re.compile(
-    r"\bслово\b\s+[\"'«“]?([a-zA-Zа-яё-]{2,30})[\"'»”]?",
+    r"\b(?:слов(?:о|а|у|ом|е)|word|the\s+word)\s+"
+    r"[\"'«“]?([a-zA-Zа-яё-]{2,30})[\"'»”]?",
+    re.IGNORECASE,
+)
+# «этимология слова X» / «этимология X» / «происхождение слова X» / «contexts
+# of X» — single bare ASCII/Cyrillic token directly after a word-anchor verb.
+# Distinct rule (not folded into _WORD_AFTER_KEY) so we can tighten the
+# trigger keywords without weakening the «слово X» case.
+_WORD_AFTER_VERB = re.compile(
+    r"\b(?:этимолог\w*|происхожден\w*|соседств\w*|"
+    r"collocates?\s+of|etymology\s+of|contexts?\s+of)\s+"
+    r"(?:слова\s+|word\s+)?"
+    r"[\"'«“]?([a-zA-Zа-яё-]{3,30})[\"'»”]?",
     re.IGNORECASE,
 )
 # «имени Анна / имя Anna / по имени X» — Stan asks for usage examples of a
@@ -439,6 +454,12 @@ def _find_word(text: str) -> str | None:
     if m:
         w = m.group(1).lower()
         if (len(w) >= 2 and not w.istitle()
+                and w not in _WORD_STOPWORDS):
+            return w
+    m = _WORD_AFTER_VERB.search(text)
+    if m:
+        w = m.group(1).lower()
+        if (len(w) >= 3 and not w.istitle()
                 and w not in _WORD_STOPWORDS):
             return w
     # «имени X / имя X» — name probe. The original-case requirement in the
@@ -590,6 +611,30 @@ def _find_top_n(text: str) -> int | None:
     return None
 
 
+# ---------- top_metric (для top_authors_by) ----------
+# Q5 (Stan's 2026-05-18 demon round): «топ-5 британских авторов по
+# скачиваниям» raw-extract'нулся в `top_n=5, country=GB` без указания
+# метрики, plan дёргал `top_authors_by_country` дефолт metric=books,
+# и сортировал ответ по количеству книг при наличии downloads колонки.
+# Этот extractor вытаскивает явное намерение пользователя по сортировке.
+_METRIC_TRIGGERS = {
+    "downloads": ("скачивани", "downloads", "скачк", "popular", "популярн"),
+    "tokens":    ("токен", "tokens", "размер", "объём", "богатств",
+                  "словарн", "размеру словар", "vocabulary size"),
+    "books":     ("количеств\\w+\\s+книг", "количество\\s+произвед",
+                  "books?\\s+count", "по\\s+числу\\s+книг"),
+}
+
+
+def _find_top_metric(text: str) -> str | None:
+    s = text.lower()
+    for metric, keys in _METRIC_TRIGGERS.items():
+        for k in keys:
+            if re.search(rf"\b{k}", s):
+                return metric
+    return None
+
+
 # ---------- main API ----------
 
 def extract(text: str) -> Entities:
@@ -626,6 +671,7 @@ def extract(text: str) -> Entities:
         etymology_family=_find_etymology(text),
         pos_filter=_find_pos(text),
         top_n=_find_top_n(text),
+        top_metric=_find_top_metric(text),
         multi_author_regex=multi,
         raw_misc={"raw_text": text},
     )

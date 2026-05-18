@@ -271,23 +271,70 @@ def _plan_author_metadata(e: Entities) -> QueryPlan:
     )
 
 
+def _plan_book_lookup(e: Entities) -> QueryPlan:
+    """Q2 (Stan's 2026-05-18 demon round): «найди книгу X» = pure resolution
+    query. Run `find_book` directly. If extractor already pinned a PG id
+    via KNOWN_BOOKS substring scan, just return that — no tool call
+    needed."""
+    if e.book_id:
+        # Synthesize a find_book-shape response from KNOWN_BOOKS so the
+        # renderer has structured data to talk about.
+        return QueryPlan(
+            intent="book_lookup", entities=e, steps=[
+                PlanStep(tool="find_book",
+                         args={"title": e.book_title or e.book_id})],
+            expected_cost="cheap",
+            explain=f"find_book({e.book_title or e.book_id}) — known book {e.book_id}",
+        )
+    if e.book_title:
+        return QueryPlan(
+            intent="book_lookup", entities=e, steps=[
+                PlanStep(tool="find_book", args={"title": e.book_title})],
+            expected_cost="cheap",
+            explain=f"find_book({e.book_title})",
+        )
+    # User said «найди книгу» but didn't name one — extract the rest of
+    # the sentence after the trigger as the title query.
+    text = (e.raw_misc or {}).get("raw_text", "")
+    import re
+    m = re.search(r"\b(?:найди|поищи)\s+книг\w*\s+(.+)$", text, re.IGNORECASE)
+    title = (m.group(1).strip(" \"«»") if m else "")
+    if not title:
+        return _need_book(e)
+    return QueryPlan(
+        intent="book_lookup", entities=e, steps=[
+            PlanStep(tool="find_book", args={"title": title})],
+        expected_cost="cheap",
+        explain=f"find_book({title}) — extracted from trigger",
+    )
+
+
 def _plan_top_authors(e: Entities) -> QueryPlan:
+    # Honor `top_metric` when user said «по скачиваниям» / «по токенам».
+    # Default falls back to «books». Stan's 2026-05-18 demon caught this:
+    # «топ-5 британских авторов по скачиваниям» used to silently sort by
+    # books even when the response table included downloads — confusing.
+    metric = e.top_metric or "books"
+    # top_authors_by_country only supports books/downloads; coerce tokens
+    # to downloads which is the closest «popularity» proxy when filtered
+    # by country.
     if e.country:
+        country_metric = "downloads" if metric == "tokens" else metric
         return QueryPlan(
             intent="top_authors_books", entities=e,
             steps=[PlanStep(tool="top_authors_by_country",
                             args={"country": e.country,
-                                  "metric": "books",
+                                  "metric": country_metric,
                                   "top": e.top_n or 20})],
             expected_cost="medium",
-            explain=f"top_authors_by_country({e.country})",
+            explain=f"top_authors_by_country({e.country}, metric={country_metric})",
         )
     return QueryPlan(
         intent="top_authors_books", entities=e,
         steps=[PlanStep(tool="top_authors_by",
-                        args={"metric": "books", "top": e.top_n or 10})],
+                        args={"metric": metric, "top": e.top_n or 10})],
         expected_cost="medium",
-        explain="top_authors_by",
+        explain=f"top_authors_by(metric={metric})",
     )
 
 
@@ -1059,6 +1106,7 @@ PLAN_BUILDERS = {
     "word_emotion":         _plan_word_emotion,
     "learning":             _plan_learning,
     "top_authors_books":    _plan_top_authors,
+    "book_lookup":          _plan_book_lookup,
     "country_compare":      _plan_country_compare,
     "country_vocab":        _plan_country_vocab,
     "composite_compare":    _plan_composite_compare,

@@ -47,6 +47,7 @@ INTENTS = frozenset({
     "word_movement",
     "learning",
     "top_authors_books",
+    "book_lookup",
     "country_compare",
     "country_vocab",
     "composite_compare",
@@ -102,6 +103,7 @@ PRIORITY = {
     "word_contexts": 88,
     "author_vocab": 85,
     "top_authors_books": 70,
+    "book_lookup": 122,
     "corpus_meta": 60,
     "author_top_words": 87,
     "author_metadata": 55,
@@ -138,6 +140,20 @@ RULES: list[tuple[Pattern[str], str, float]] = [
          r"(рассказ\w*|стих\w*|поэм\w*|глав\w*|стат\w*)"), "out_of_scope", 0.95),
     (_re(r"(write|compose)\s.{0,40}(story|poem|chapter|novel|article)"),
      "out_of_scope", 0.9),
+    # Q8 (Stan's 2026-05-18 demon round): «процитируй полностью», «дай
+    # полный текст», «give me the full text», «quote verbatim» — verbatim-
+    # reproduction requests. Always refuse: we do RAG analytics, not full-
+    # text serving. Catches both copyright-locked AND public-domain — Stan
+    # doesn't want the system shipping 200 KB of Pride and Prejudice
+    # through chat either.
+    (_re(r"(процитируй|приведи|дай|покажи)\s+(весь|полный|целиком|"
+         r"полностью)\s+(текст|роман|книгу|главу)|"
+         r"полный\s+текст\s+(книги|романа)|"
+         r"give\s+me\s+the\s+full\s+text|"
+         r"quote\s+(verbatim|entirely|in\s+full)|"
+         r"verbatim\s+(text|copy)"),
+     "out_of_scope", 0.95),
+    (_re(r"процитируй\s+полностью"), "out_of_scope", 0.93),
     # Out-of-scope news/weather queries — narrow patterns so we don't
     # accidentally eat "слова в описаниях погоды" (that's topic_words).
     (_re(r"\b(какая|сейчас|сегодня|завтра|today|now|current)\s+погод"),
@@ -181,6 +197,20 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"когда\s+(родил\w*|умер\w*|жил\w*)"), "author_metadata", 0.9),
     (_re(r"year of (birth|death)"), "author_metadata", 0.9),
     (_re(r"сколько у\s+.{1,40}\s*книг"), "author_metadata", 0.85),
+
+    # ===== book_lookup (Q2 from demon round) =====
+    # «найди книгу X», «есть ли у тебя X», «где книга X», «is X in the
+    # corpus» — pure resolution query, route to find_book directly so the
+    # answer is concrete (PG id + title + author + downloads) instead of a
+    # generic clarify. Routes through `book_recommendation` plan-builder
+    # is wrong — that gives popular-books listing. We need a dedicated
+    # `book_lookup` intent → `find_book` tool.
+    (_re(r"\b(найди|поищи|есть\s+ли\s+у\s+тебя)\s+книг\w*\s+"),
+     "book_lookup", 0.93),
+    (_re(r"\bis\s+(the\s+)?book\s+.{2,60}\s+in\s+(the\s+)?(corpus|library)"),
+     "book_lookup", 0.9),
+    (_re(r"\bкнига\s+.{2,60}\s+есть\s+у\s+тебя"),
+     "book_lookup", 0.9),
 
     # ===== top_authors_books =====
     (_re(r"\b(топ[- ]?\d*|top\s*\d*)\s.{0,40}(автор\w*|writer)"),
@@ -232,6 +262,15 @@ RULES: list[tuple[Pattern[str], str, float]] = [
          r"кто\s+похож\s+на|"
          r"похож\w*\s+на\s+(автор\w*|писател\w*|стил\w*|поэт\w*)"),
      "author_closest", 0.9),
+    # Q9 (Stan's 2026-05-18 demon round): «на кого по стилю похож X»,
+    # «по стилю похож на X», «similar to X stylistically», «like X in style»
+    # — natural Russian word order, NOT covered by «похожи на стиль» rule
+    # which expects «похожи на стиль» literally.
+    (_re(r"\b(на\s+кого|кто)\s+по\s+стилю\s+похож\w*|"
+         r"по\s+стилю\s+похож\w*\s+на|"
+         r"стилистически\s+(близок|похож)|"
+         r"similar\s+(to\s+\w+\s+)?stylistically|"
+         r"like\s+\w+\s+in\s+style"), "author_closest", 0.92),
 
     # ===== author_attribution =====
     (_re(r"кто автор|определи автора|attribute (this )?text|authorship of"),
@@ -376,6 +415,14 @@ RULES: list[tuple[Pattern[str], str, float]] = [
      "word_contexts", 0.9),
 
     # ===== learning =====
+    # Q7 (Stan's 2026-05-18 demon round): «20 слов уровня intermediate из
+    # "Pride and Prejudice"» — пример прямо из README'а. Старый набор
+    # правил не ловил это явное сочетание «N слов уровня X из BOOK».
+    (_re(r"\b\d+\s+слов\w*\s+уровня?\s+(b1|b2|c1|c2|intermediate|advanced|basic|"
+         r"начальн\w*|средн\w*|продвинут\w*|базов\w*)\s+(из|для)"),
+     "learning", 0.95),
+    (_re(r"\b\d+\s+(intermediate|advanced|basic)\s+words?\s+(from|for)"),
+     "learning", 0.92),
     (_re(r"\b(b1|b2|c1|c2)\b"), "learning", 0.7),
     (_re(r"\b(intermediate|advanced)\b.{0,30}\b(слов\w*|word|vocab)"),
      "learning", 0.85),
