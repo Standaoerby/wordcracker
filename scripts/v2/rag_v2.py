@@ -55,6 +55,7 @@ RENDER_PROMPT = """Тебя зовут {name}. Ты — литературный
 4. **Markdown-таблицы для табличных данных.**
 5. **В конце предложи 1-2 next-step вопроса** в формате «можно дальше спросить: "..." или "..."».
 6. Если coverage низкое или есть warning'и — упомяни это.
+7. **Если в payload есть поле `render_instructions` — это ПРИОРИТЕТНЫЕ правила, всегда им следуй.** Они описывают, как именно рендерить специфические данные, чтобы не перепутать индексы / годы / метрики.
 
 Tool trace тебе передан как JSON. Каждая запись — {{tool, query, data, warnings, coverage}}. Возьми оттуда factual content."""
 
@@ -79,15 +80,35 @@ def _conversation_summary(history: list[dict] | None, plan: plan_mod.QueryPlan) 
     }
 
 
+def _collect_render_instructions(results: list[ToolResult]) -> list[str]:
+    """Pull `_render_note` strings out of every tool's data payload and
+    promote them into a top-level field the LLM sees first. The Qwen3
+    renderer was missing notes buried inside `data` — surfacing them
+    explicitly makes Q1 (index conflation), Q12 (publication-vs-life
+    years), and cosine=0 cases land on the user with the right caveat."""
+    notes: list[str] = []
+    for r in results:
+        if not isinstance(r.data, dict):
+            continue
+        note = r.data.get("_render_note")
+        if isinstance(note, str) and note.strip():
+            notes.append(f"[{r.tool}] {note.strip()}")
+    return notes
+
+
 def _llm_render(question: str, plan: plan_mod.QueryPlan,
                 results: list[ToolResult], *, model: str,
                 ollama_host: str,
                 history: list[dict] | None = None) -> str:
     """Send one /api/chat call with the render prompt + tool data. No tools."""
+    render_instructions = _collect_render_instructions(results)
     summary_payload = {
         "intent": plan.intent,
         "explain": plan.explain,
         "conversation_context": _conversation_summary(history, plan),
+        # Top-level priority instructions — the renderer was missing notes
+        # buried inside per-tool `data`. Surface them explicitly.
+        "render_instructions": render_instructions,
         "tool_results": [
             {
                 "tool": r.tool,
