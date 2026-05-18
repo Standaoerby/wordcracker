@@ -37,7 +37,7 @@ planner → router → tool result → renderer
 **Цель:** дать всем tools единый контракт, не ломая поведения. Старый `TOOL_DISPATCH` = адаптер поверх нового registry.
 
 ### 1.1 ToolResult envelope
-- `scripts/v2/types.py`: dataclasses `ToolResult`, `ToolWarning`, `Coverage`, `SourceInfo`.
+- `scripts/v2/_types.py`: dataclasses `ToolResult`, `ToolWarning`, `Coverage`, `SourceInfo`. (Renamed from `types.py` early on to avoid shadowing Python's stdlib `types` module — broke ImportError in `build_fts_index` until the leading underscore went in.)
 - `to_dict()` сериализатор → совместим с текущим `messages[].content = json.dumps(result)`.
 - `from_legacy(dict)` — wraps old `{...data..., "error": ...}` returns в новую форму. Используется для tools, ещё не отрефакторенных.
 
