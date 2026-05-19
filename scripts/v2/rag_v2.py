@@ -607,12 +607,48 @@ def ask_stream(
            "confidence": intent.confidence, "explain": plan.explain}
 
     if plan.needs_clarify:
+        # Sprint 17 fix: ask_stream() never logged failures, so the
+        # chat-UI path was invisible to /admin/failed. Stan's 2026-05-19
+        # «что сложнее читать ... или Сон в летнюю ночь?» went here and
+        # left no trace. Mirror the ask() failure-logging block so the
+        # JSONL log + admin dashboard see streamed clarifies too.
+        unknown_authors = _detect_unknown_author_candidates(question, entities)
+        clarify_answer = plan.clarify_question or ""
+        obs_mod.log_request({
+            "question_truncated": question[:300],
+            "intent": intent.label,
+            "intent_confidence": intent.confidence,
+            "plan_steps": [],
+            "tool_calls": [],
+            "total_elapsed_ms": int((time.perf_counter() - t0) * 1000),
+            "answer_truncated": clarify_answer[:300],
+            "is_failure": True,
+            "failure_kind": "clarify",
+            "failure_reason": plan.explain or "no specific reason",
+            "via_stream": True,
+            **({"unknown_author_candidates": unknown_authors}
+               if unknown_authors else {}),
+        })
         yield {"event": "clarify", "question": plan.clarify_question or ""}
         yield {"event": "answer", "text": plan.clarify_question or ""}
         yield {"event": "done", "tool_calls": [], "iterations": 0,
                "elapsed_sec": round(time.perf_counter() - t0, 2)}
         return
     if plan.out_of_scope_reason:
+        obs_mod.log_request({
+            "question_truncated": question[:300],
+            "intent": "out_of_scope",
+            "original_intent": intent.label,
+            "intent_confidence": intent.confidence,
+            "plan_steps": [],
+            "tool_calls": [],
+            "total_elapsed_ms": int((time.perf_counter() - t0) * 1000),
+            "answer_truncated": plan.out_of_scope_reason[:300],
+            "is_failure": True,
+            "failure_kind": "out_of_scope",
+            "failure_reason": plan.explain or plan.out_of_scope_reason[:200],
+            "via_stream": True,
+        })
         yield {"event": "out_of_scope", "reason": plan.out_of_scope_reason}
         yield {"event": "answer", "text": plan.out_of_scope_reason}
         yield {"event": "done", "tool_calls": [], "iterations": 0,
@@ -667,6 +703,27 @@ def ask_stream(
         answer, critic_records, intent=intent.label,
     )
     answer = audit_mod.annotate_with_audit(answer, audit_report)
+
+    # Sprint 17 fix: mirror ask()'s success-path log_request so the
+    # status dashboard sees stream queries (was previously stream-blind).
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    obs_mod.log_request({
+        "question_truncated": question[:300],
+        "intent": intent.label,
+        "intent_confidence": intent.confidence,
+        "plan_steps": [s.tool for s in plan.steps],
+        "tool_calls": [
+            {"name": r.tool, "runtime_ms": r.runtime_ms,
+             "ok": r.ok, "cache_hit": r.cache_hit}
+            for r in results
+        ],
+        "total_elapsed_ms": elapsed_ms,
+        "critic_verified": verdict.verified,
+        "critic_unsupported_n": len(verdict.unsupported_claims),
+        "numeric_audit_mismatches": len(audit_report.mismatches),
+        "answer_truncated": answer[:300],
+        "via_stream": True,
+    })
 
     yield {"event": "critic",
            "verified": verdict.verified,

@@ -221,6 +221,54 @@ class ReadabilityCompareClarifyDrop(unittest.TestCase):
         self.assertLessEqual(len(readability_steps), 3)
 
 
+class AskStreamObservability(unittest.TestCase):
+    """Sprint 17 — ask_stream() (used by /api/chat/stream and therefore
+    every chat-UI query) had NO obs_mod.log_request() calls, so /admin/
+    failed was permanently empty for streamed queries. Stan's 2026-05-19
+    test caught this. Mirror ask()'s three logging blocks (clarify,
+    out_of_scope, success-tail) into ask_stream()."""
+
+    def _consume(self, gen):
+        """Exhaust the SSE generator and return the captured events."""
+        return list(gen)
+
+    def test_stream_clarify_logs_failure(self):
+        import unittest.mock as _mock
+        from scripts.v2 import rag_v2
+        with _mock.patch.object(rag_v2.obs_mod, "log_request") as mp:
+            events = self._consume(rag_v2.ask_stream("asdfqwerty xyz random gibberish"))
+        # At least one log_request call
+        self.assertGreater(mp.call_count, 0,
+                           msg="ask_stream clarify path never logged")
+        # The call should mark is_failure=True with failure_kind=clarify
+        rec = mp.call_args_list[0][0][0]
+        self.assertTrue(rec.get("is_failure"))
+        self.assertEqual(rec.get("failure_kind"), "clarify")
+        self.assertTrue(rec.get("via_stream"))
+
+    def test_stream_out_of_scope_logs_failure(self):
+        import unittest.mock as _mock
+        from scripts.v2 import rag_v2
+        with _mock.patch.object(rag_v2.obs_mod, "log_request") as mp:
+            events = self._consume(rag_v2.ask_stream(
+                "напиши мне короткий рассказ в стиле Wodehouse"))
+        self.assertGreater(mp.call_count, 0)
+        kinds = [c[0][0].get("failure_kind") for c in mp.call_args_list]
+        self.assertIn("out_of_scope", kinds)
+
+    def test_stream_marks_via_stream(self):
+        """Records from ask_stream must carry via_stream=True so admin
+        can distinguish stream vs non-stream sources later if needed."""
+        import unittest.mock as _mock
+        from scripts.v2 import rag_v2
+        with _mock.patch.object(rag_v2.obs_mod, "log_request") as mp:
+            self._consume(rag_v2.ask_stream("xyzzy nonsense"))
+        for call in mp.call_args_list:
+            rec = call[0][0]
+            self.assertTrue(rec.get("via_stream"),
+                            msg=f"record missing via_stream: {rec}")
+
+
 class MidsummerKnownBook(unittest.TestCase):
     def test_nominative_resolves(self):
         e = ent_mod.extract("какие архаизмы в Сне в летнюю ночь")  # prep case
