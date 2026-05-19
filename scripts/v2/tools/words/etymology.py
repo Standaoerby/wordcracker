@@ -87,14 +87,42 @@ def find_words_by_etymology(scope, family: str, top: int = 30,
                       else "internal"),
             message=err, query=query,
         )
-    rows = (raw.get("matches") if isinstance(raw, dict) else None) or []
+    # Sprint 18+ Round 9 bug: v1 returns `matched` (not `matches`).
+    # Old wrapper read the wrong key → rows always empty → no_matches
+    # warning fired even when v1 had found 15 words. Stan caught this
+    # in «германские слова Толкина» where 15 ME words showed alongside
+    # a false «no_matches» warning.
+    rows = (raw.get("matched") if isinstance(raw, dict) else None) or []
+
+    # Render hint: family expansion includes Old/Middle English + Proto-
+    # Germanic, so «germanic words» returns common ME function words
+    # (wite/ich/u/hi/sei) alongside content words. Tell the renderer to
+    # set user expectations honestly so the answer doesn't look broken.
+    if rows and isinstance(raw, dict):
+        raw["_render_note"] = (
+            f"family={family} расширяется через ETYMOLOGY_FAMILY_GROUPS — "
+            f"для germanic это включает Old/Middle English функциональные "
+            f"слова (wite, ich, hi, u, sei) И content words. Если user "
+            f"ожидал redакторские content words (sword, blade, dread) — "
+            f"скажи прямо: «вот всё что имеет germanic etymology в "
+            f"корпусе X с min_corpus_count={min_corpus_count}; повысь "
+            f"min_corpus_count или используй pos_filter=ADJ для более "
+            f"специфичной выборки»."
+        )
+
+    warnings: list[ToolWarning] = []
+    if not rows:
+        warnings.append(ToolWarning(
+            "no_matches",
+            f"no words of family={family} above min_corpus_count="
+            f"{min_corpus_count}",
+        ))
+
     return ToolResult.success(
         tool="find_words_by_etymology", data=raw,
         coverage=Coverage(books_matched=raw.get("books_total", -1)
                                        if isinstance(raw, dict) else -1,
                           books_total=-1),
-        warnings=[ToolWarning("no_matches",
-                              f"no words of family={family} above min_corpus_count")]
-                 if not rows else [],
+        warnings=warnings,
         query=query,
     )
