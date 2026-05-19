@@ -81,8 +81,25 @@
 | `learning` | "слова для изучения", "B1/B2/C1", "vocab to learn" | learning_words → enrich → export |
 | `top_authors_books` | "топ авторов", "самые скачиваемые", "most popular X" | top_authors_by / top_books_by_* |
 | `country_filter` | "британские/американские слова", "BrE vs AmE" | top_authors_by_country + author_vocab |
+| `author_lookup` 🆕v3.0 | "какие книги у X", "what books does X have" | author_metadata (sample_titles) |
+| `book_extremum` 🆕v3.0 | "самая длинная / популярная книга", "the longest book" | top_books_by_downloads(top=1) or clarify |
+| `corpus_extremum` 🆕v3.0 | "самый плодовитый / популярный автор" | top_authors_by(top=1) |
+| `topic_book_search` 🆕v3.0 | "найди книгу про X", "book about Y" | find_book_by_topic → hybrid_search dedupe |
+| `book_pub_year` 🆕v3.0 | "когда была опубликована X", "year of publication" | find_book → pub_year from OL enrichment |
 | `out_of_scope` | "напиши рассказ", "переведи стих", "что в новостях" | → refusal renderer |
 | `clarify` | LOW confidence на classifier | → clarify renderer |
+
+**Sprint 16 (v3.0) intent priorities** — placed above the generic
+catch-alls so specific phrasings win:
+
+```python
+"author_lookup":     160,  # «какие книги у X» — wins over author_metadata (55)
+"book_extremum":     158,  # singular superlative
+"corpus_extremum":   155,  # singular author superlative
+"vocab_passport":    150,  # (existing)
+"book_pub_year":     148,  # «когда вышла X» — wins over book_lookup (122)
+"topic_book_search": 145,  # «найди книгу про X» — wins over book_recommendation (118)
+```
 
 ### 2.2 Rules engine
 

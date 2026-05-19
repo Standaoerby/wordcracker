@@ -1,5 +1,14 @@
 # wordcracker v2.0 — Release Notes
 
+> **Subsequent releases:** see `gh_release_body_v2.X.md` per-tag bodies,
+> and `gh_release_body_v3.0.md` for the Sprint 16 / v3.0 release
+> (2026-05-19). Quick index:
+>
+> - **v2.0** (this doc) — deterministic pipeline (2026-05-17)
+> - v2.0.1 → v2.10.1 — Sprints 6–15, 2026-05-17 → 2026-05-19
+> - **v3.0** — Sprint 16: open architecture (3 plugin surfaces +
+>   numeric audit + 5 new intents + 2 new tools). 422 unit tests.
+
 ## TL;DR
 
 `wordcracker:v2` ships a deterministic planner+router pipeline, replacing

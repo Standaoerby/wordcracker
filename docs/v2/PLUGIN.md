@@ -8,17 +8,19 @@ and intent rules — each with its own contract and regression-test scaffold.
 
 ```
 user query
-  → intent.classify()         — 80+ regex rules + LLM fallback (rule)
-  → entities.extract()        — author / book / word / period (alias-driven)
+  → intent.classify()          — 80+ regex rules + LLM fallback
+  → entities.extract()         — author / book / word / period (alias-driven)
   → history.merge_with_history — multi-turn entity backfill
-  → plan.build()              — 33 plan templates (intent + entities → steps)
-  → router.execute()          — tool dispatch (no LLM in loop)
-  → renderer (1 LLM call)     — strict facts-only render
-  → critic.review()           — fact-check pass, MAX_FLAGS guard
+  → plan.build()               — 38 plan templates (intent + entities → steps)
+  → router.execute()           — tool dispatch (no LLM in loop)
+  → renderer (1 LLM call)      — strict facts-only render (rule 11 = counts)
+  → critic.review()            — fact-check pass, MAX_FLAGS guard
+  → numeric_audit.audit_numbers — programmatic count check (Phase D)
 ```
 
-Three extension points let new functionality slot in **without changing
-the core pipeline** — only changing data that the pipeline reads.
+Four extension points let new functionality slot in **without changing
+the core pipeline** — only changing data the pipeline reads or plugin
+slots it dispatches to.
 
 ---
 
@@ -67,70 +69,95 @@ Every curated entry is automatically tested:
 
 ---
 
-## 2. Adding a scoring metric (Phase B foundation)
+## 2. Adding a scoring metric (Phase B + C)
 
 ### Protocol
 
 ```python
-# scripts/v2/scoring/_base.py
-from typing import Protocol
+# scripts/v2/scoring/__init__.py
+from typing import Literal, Protocol, runtime_checkable
 
+ScoringKind = Literal["author_similarity", "retrieval_rerank", "word_pair"]
+
+@runtime_checkable
 class ScoringPlugin(Protocol):
     name: str
+    kinds: tuple[ScoringKind, ...]   # which use-cases the plugin supports
     cost: Literal["cheap", "medium", "heavy"]
     def compute(self, query: ScoringQuery) -> list[ScoredItem]: ...
     def explain(self, scored: ScoredItem) -> str: ...
 ```
 
-Where `ScoringQuery` is e.g. `{"author": "^Doyle,", "candidates": [...]}` or
-`{"query_text": "...", "candidate_passages": [...]}` — same protocol for
-**both** author-similarity and retrieval-reranking use cases.
+`ScoringQuery` carries `(kind, target, candidates, options)`. Shape of
+`candidates` depends on `kind`:
 
-### Registry
+| kind | target | candidates | options |
+|---|---|---|---|
+| `author_similarity` | author regex `^Doyle,` | list of author regexes | `{"top": int}` |
+| `retrieval_rerank` | query text | list of `(id, text)` tuples or dicts | — |
+| `word_pair` | target word | list of `{"word", "c_pair", "c_neighbor"}` | `{"c_target", "N", "window"}` |
+
+### Registry (7 plugins)
 
 ```python
 # scripts/v2/scoring/__init__.py
 REGISTRY: dict[str, ScoringPlugin] = {
-    "burrows_delta":  BurrowsDelta(),
-    "jaccard_top200": JaccardTop200(),
-    "jsd_unigram":    JSDUnigram(),
-    "bge_reranker":   BGEReranker(),   # lazy-loaded
-    "ensemble":       Ensemble(["burrows_delta", "jaccard_top200", "jsd_unigram"]),
+    "burrows_delta":  BurrowsDelta(),    # author_similarity, medium
+    "jaccard_top200": JaccardTop200(),   # author_similarity, cheap
+    "ensemble":       Ensemble(),         # author_similarity, medium (Borda count)
+    "bge_reranker":   BGEReranker(),     # retrieval_rerank, heavy (lazy-loaded)
+    "pmi":            PMI(),              # word_pair, cheap
+    "npmi":           NPMI(),             # word_pair, cheap (Bouma normalized)
+    "dice":           Dice(),             # word_pair, cheap
 }
 ```
 
-### Where it's used
+### Where each kind is used
 
-- `author_influences(metric="ensemble")` — default in v3.0; opt-in to single metric for forensic comparison
-- `hybrid_search(rerank_with="bge_reranker")` — cross-encoder rerank after RRF merge
-- `compare_authors(metric=...)` — same registry, same protocol
+- `author_similarity` → `author_influences()` (default = `ensemble`)
+- `retrieval_rerank` → `hybrid_search(rerank_with="bge_reranker")` and
+  `find_book_by_topic(rerank_with="bge_reranker")` (cross-encoder reorder
+  after RRF merge)
+- `word_pair` → `word_collocates(metric="pmi" | "npmi" | "dice",
+  min_cooccurrence=5)` — reranks raw window-cooccurrence counts using
+  scope-level marginal frequencies
 
 ### Regression test
 
-`tests/v2/test_scoring_plugins.py` checks:
-1. Every plugin in `REGISTRY` matches the Protocol
-2. `compute()` returns deterministic results given fixed input fixture
-3. `explain()` returns non-empty string
+`tests/v2/test_scoring_plugins.py` auto-iterates `REGISTRY`:
+1. Every plugin satisfies the runtime-checkable Protocol
+2. `name` matches the registry key
+3. `kinds` is a non-empty tuple, `cost` ∈ `{cheap, medium, heavy}`
+4. `get(name)` and `list_plugins()` return the entry
 
-Adding a new plugin = new module + registration + one fixture row in the test.
+Per-plugin behaviour tests live alongside (direction, bounds, soft-fail).
+
+Adding a new plugin = new class + REGISTRY line; the contract suite
+catches it automatically. Per-plugin math tests are optional but
+recommended.
 
 ### Lazy-load heavy plugins
+
+`BGEReranker` is the canonical example: model is `None` at import time,
+loads `sentence-transformers` + `BAAI/bge-reranker-base` only on first
+`compute()`. Container startup stays fast; only first-use pays the
+~440 MB download.
 
 ```python
 class BGEReranker:
     name = "bge_reranker"
+    kinds = ("retrieval_rerank",)
     cost = "heavy"
-    _model = None
-    def _ensure_model(self):
+    def __init__(self): self._model = None
+    def _load(self):
         if self._model is None:
             from sentence_transformers import CrossEncoder
             self._model = CrossEncoder("BAAI/bge-reranker-base")
+        return self._model
     def compute(self, query):
-        self._ensure_model()
-        return self._model.predict(...)
+        if query.kind != "retrieval_rerank": return []
+        ...
 ```
-
-Avoids paying load cost on container startup; only first-use latency.
 
 ---
 
@@ -172,7 +199,51 @@ broader rule:
 
 ---
 
-## 4. Adding an LLM fallback intent / entity slot
+## 4. Tuning the numeric audit (Phase D)
+
+After the critic LLM pass, `scripts/v2/numeric_audit.py` runs a
+**programmatic** sweep over numbers in the rendered answer. Catches the
+specific failure mode where the LLM writes a count that doesn't appear
+in any tool result («у Doyle 47 → answer says 200»). The critic missed
+this 30-40% of the time; the audit catches it deterministically.
+
+### Knobs (env)
+
+```
+WC_NUMERIC_AUDIT=on       # default; off disables completely
+WC_AUDIT_MIN=5            # ignore numbers below this (skip «top 2» noise)
+WC_AUDIT_TOL=0.10         # ±10% match window; 0.05 = stricter
+```
+
+### Skip-list
+
+`_INTENT_SKIP` is a small frozenset of intents whose answers don't need
+numeric verification (`introduction`, `clarify`, `out_of_scope`). Add to
+it when a new chatty intent ships and you see false-positives in the
+admin log.
+
+### Behaviour contract
+
+- **Never crash the pipeline.** All errors → `AuditReport.trust()`.
+- **Never modify the answer when no mismatches.** Footer attaches only
+  when `report.has_issues()` is True.
+- **Cap at 3 mismatches.** Beyond that, the renderer is broken
+  wholesale, not tactically hallucinating.
+- **Year-like numbers** (1500-2100) pass through unless context shows
+  they were used as a count («1881 книг»). `_bio_source: hardcoded`
+  data is trusted on the data side.
+
+### Adding a new heuristic
+
+If a class of false-positive shows up in `/admin/failed`:
+1. Identify the pattern (e.g. percentages stripped of `%`, ISO dates)
+2. Add a guard in `_is_year_like` or write `_is_<kind>_like(value, context)`
+3. Call from `audit_numbers()` between min_value check and `_is_matched`
+4. Add 2-3 cases in `tests/v2/test_numeric_audit.py::YearLike` style
+
+---
+
+## 5. Adding an LLM fallback intent / entity slot
 
 The LLM fallback in `scripts/v2/planner/llm_intent.py` extracts a fixed
 JSON schema:
@@ -192,7 +263,7 @@ Stays 1 LLM call, no extra latency.
 
 ---
 
-## 5. Failed-query telemetry → regex synthesis
+## 6. Failed-query telemetry → regex synthesis
 
 (Phase H3 — deferred per Stan 2026-05-19 «не горит, делаем после первого
 внешнего user'a в проде»)
