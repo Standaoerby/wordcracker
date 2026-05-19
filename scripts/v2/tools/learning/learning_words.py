@@ -10,6 +10,7 @@ if str(_REPO) not in sys.path:
 
 from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
+from scripts.v2.tools.authors._surname_filter import filter_surnames
 
 
 # Stan round 2 Q9: learning_words на P&P вернул `Lambton`, `Shire` — это
@@ -60,7 +61,8 @@ _LITERARY_LOCATION_BLACKLIST = frozenset({
 def learning_words(scope, level: str = "intermediate", top: int = 30,
                    lemmatize: bool = True,
                    pos_filter: list[str] | None = None,
-                   _capped_from: int | None = None) -> ToolResult:
+                   _capped_from: int | None = None,
+                   _translate_followup_disclose: bool = False) -> ToolResult:
     try:
         from scripts.learning_tools import learning_words as _v1
     except ImportError as e:
@@ -88,6 +90,33 @@ def learning_words(scope, level: str = "intermediate", top: int = 30,
                 not in _LITERARY_LOCATION_BLACKLIST]
         if len(rows) < before and isinstance(raw, dict):
             raw["words"] = rows
+    # Sprint 20 — Stan 2026-05-19: translate-followup routes here, output
+    # included character names (quin/kettering/giraud/lorraine — all
+    # Christie characters), and the LLM "translator" hallucinated
+    # definitions for them. Mirror the v3.1.1 surname filter from
+    # affinity_by_author so learning_words doesn't leak character names
+    # into a study list. filter_surnames uses curated literary character
+    # set + PG-metadata author surnames.
+    if rows:
+        # The `word_key` argument in filter_surnames defaults to "word",
+        # but learning_words rows use either "lemma" or "word" → use
+        # whichever is present per row by normalising before the filter.
+        for r in rows:
+            if "word" not in r and "lemma" in r:
+                r["_word_for_filter"] = r["lemma"]
+            else:
+                r["_word_for_filter"] = r.get("word") or r.get("lemma") or ""
+        rows, surname_dropped = filter_surnames(
+            rows, word_key="_word_for_filter",
+        )
+        for r in rows:
+            r.pop("_word_for_filter", None)
+        if surname_dropped and isinstance(raw, dict):
+            raw["words"] = rows
+            prev = raw.get("_render_note", "")
+            note = (f"v2 surname filter dropped {surname_dropped} "
+                     f"character/author names from learning list.")
+            raw["_render_note"] = (prev + " " + note).strip()
     warnings: list[ToolWarning] = []
     if not rows:
         warnings.append(ToolWarning(
@@ -101,6 +130,28 @@ def learning_words(scope, level: str = "intermediate", top: int = 30,
             "top_capped",
             f"user asked for top={_capped_from}; per-call cap is {top} "
             f"(LLM enrichment cost). Tell the user and offer a follow-up.",
+        ))
+    # Sprint 20 — translate-followup honest disclosure. When the user
+    # said «переведи слова» after an `author_vocab` turn, history layer
+    # routed here. learning_words returns a DIFFERENT list (CEFR-banded,
+    # not affinity-ranked), so the user's expectation «те же 96 слов»
+    # would be wrong. Front-load the disclosure in _render_note so the
+    # renderer tells the user explicitly.
+    if _translate_followup_disclose and isinstance(raw, dict):
+        prev = raw.get("_render_note", "")
+        disclosure = (
+            "ВАЖНО: список слов ПЕРЕФОРМИРОВАН — это learning_words "
+            "(CEFR-band intermediate), НЕ тот же affinity-список из "
+            "предыдущего хода. Если пользователь хотел перевод "
+            "конкретных слов («tuppence», «stitching», «embroidery») "
+            "из прошлого ответа — попроси его явно перечислить слова: "
+            "«переведи tuppence, stitching, embroidery». "
+            "v3 rules-path не передаёт prior tool output между ходами."
+        )
+        raw["_render_note"] = (prev + " | " + disclosure if prev else disclosure)
+        warnings.append(ToolWarning(
+            "translate_followup_list_changed",
+            "learning_words returns CEFR-band selection, not prior affinity list",
         ))
     return ToolResult.success(
         tool="learning_words", data=raw,

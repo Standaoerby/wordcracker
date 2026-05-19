@@ -1049,6 +1049,14 @@ def _plan_learning(e: Entities) -> QueryPlan:
             "top": eff_top, "lemmatize": True}
     if requested > eff_top:
         args["_capped_from"] = requested
+    # Sprint 20 — translate-followup disclosure. When user said «переведи
+    # эти слова», history layer set _translate_to='ru' AND switched
+    # intent to `learning`. learning_words returns a DIFFERENT list from
+    # the prior `affinity_by_author` turn (CEFR band-pass, not affinity).
+    # Stamp a _render_hint so the renderer tells the user the list has
+    # changed — otherwise they assume the same 96 words were translated.
+    if (e.raw_misc or {}).get("_translate_to") == "ru":
+        args["_translate_followup_disclose"] = True
     return QueryPlan(
         intent="learning", entities=e,
         steps=[PlanStep(tool="learning_words", args=args)],
