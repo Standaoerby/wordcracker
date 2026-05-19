@@ -199,14 +199,19 @@ def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
 
     # If either author's top list is empty, flag — that's the v1.1.7 partial.
     warnings: list[ToolWarning] = []
+    empty_sides: list[tuple[str, str]] = []  # filled below
     if isinstance(raw, dict):
-        for label, key in (("author1", "top_unique_a"), ("author2", "top_unique_b")):
+        for label, key, regex in (
+            ("author1", "top_unique_a", author1_regex),
+            ("author2", "top_unique_b", author2_regex),
+        ):
             if not raw.get(key):
                 warnings.append(ToolWarning(
                     code=f"{label}_empty",
                     message=f"{label} produced no signature words — "
                             f"check if author exists in SPGC corpus",
                 ))
+                empty_sides.append((label, regex))
 
         # Stan's 2026-05-18 demon: cosine=0.0 between Poe and Lovecraft
         # looked suspicious. It's structurally near-zero because top-N
@@ -220,14 +225,50 @@ def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
             raw["cosine_is_structural_zero"] = True
             shared = raw.get("shared_high_affinity") or []
             raw["shared_top_words_count"] = len(shared)
+            existing = raw.get("_render_note", "")
             raw["_render_note"] = (
-                "cosine_similarity ниже 0.05 — это СТРУКТУРНОЕ свойство "
+                (existing + " " if existing else "")
+                + "cosine_similarity ниже 0.05 — это СТРУКТУРНОЕ свойство "
                 "метрики (top-N фирменных слов у разных авторов почти не "
                 "пересекаются), а НЕ показатель стилистической дистанции. "
                 "Не говори пользователю «авторы совершенно разные» из-за "
                 "cosine=0. Расскажи про shared_high_affinity (общие "
                 "стилистические маркеры) и про top_unique_a / "
                 "top_unique_b — это содержательная часть ответа."
+            )
+
+        # Round 10 Q15 P0 — Lovecraft hallucination regression (6-round
+        # persistent). When one side returns 0 signature words, renderer
+        # historically invented words («rhyming/amended/journalism/
+        # editorials/corey») to «balance» the compare. Forceful
+        # _render_note + structured empty_sides field tells the LLM to
+        # render only the present side with an honest explanation. Runs
+        # AFTER the cosine block so both notes co-exist on the same
+        # ToolResult.
+        if empty_sides:
+            empty_labels = ", ".join(f"{lbl} ({rx})" for lbl, rx in empty_sides)
+            raw["empty_sides"] = [{"label": lbl, "regex": rx}
+                                   for lbl, rx in empty_sides]
+            present_text = (
+                "ПОКАЖИ только signature words той стороны, у которой "
+                "top_unique НЕ пустой. "
+                if len(empty_sides) == 1
+                else "ОБЕ стороны пусты — скажи прямо: «не нашлось "
+                "signature words ни у одной из двух сторон». "
+            )
+            existing = raw.get("_render_note", "")
+            raw["_render_note"] = (
+                (existing + " | " if existing else "")
+                + f"⚠ КРИТИЧНО: у {empty_labels} top_unique=пустой массив "
+                f"(0 signature words в индексе с "
+                f"min_corpus_count={min_corpus_count}). "
+                + present_text
+                + "ЗАПРЕЩЕНО изобретать слова чтобы заполнить пустую "
+                "сторону — это галлюцинация. Скажи пользователю честно: "
+                "«у этого автора в нашем индексе не нашлось уникальных "
+                "стилистических маркеров; возможно мало книг под этим "
+                "author_regex или нужно понизить min_corpus_count». "
+                "6-round persistent bug Q15."
             )
 
     return ToolResult.success(
