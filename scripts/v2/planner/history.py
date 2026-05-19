@@ -127,10 +127,14 @@ def _is_propn_removal(text: str) -> bool:
 # pass (learning_words internally calls enrich_word with target_lang=ru).
 _TRANSLATE_PATTERNS = re.compile(
     r"(?:переведи|переводи|"
-    r"(?:сделай|дай|покажи)\s+перевод\w*|"
+    # Sprint 20 — allow 0-3 filler words between verb and «перевод»:
+    # «дай их в переводе», «сделай мне перевод», «покажи всех слов
+    # перевод».
+    r"(?:сделай|дай|покажи)(?:\s+\w+){0,3}\s+перевод\w*|"
+    r"в\s+переводе\s+(?:на\s+)?русск\w+|"
     r"translate(?:\s+(?:these|them|the\s+words?|the\s+list))?|"
     r"with\s+(?:russian|ru)\s+translations?)"
-    # Optional intermediate words («N слов», «этих слов», «фраз»)
+    # Optional follow-on words («N слов», «этих слов», «на русский»)
     r"(?:\s+\w+){0,4}?"
     r"(?:\s+(?:на\s+русск\w+|to\s+russian|to\s+ru\b|на\s+ru\b))?",
     re.IGNORECASE,
@@ -143,10 +147,17 @@ _PRIOR_OUTPUT_REF = re.compile(
     r"(?:возьми|take)\s+(?:слова|words?|эти|the\s+(?:words?|list))|"
     r"которые\s+ты\s+(?:мне\s+)?(?:выдал|показал|дал|вернул)|"
     r"which\s+you\s+(?:gave|returned|showed)|"
-    # «этих слов / эти слова / тех слов / эти» — Russian demonstrative
-    # references to the prior list. Strong signal that the followup
-    # is about the previous assistant message's word list.
-    r"\b(?:эт(?:их|и|ими)|т(?:ех|ем|еми))\s+слов",
+    # «этих слов / эти слова / тех слов» — Russian demonstrative
+    # references to the prior list.
+    r"\b(?:эт(?:их|и|ими)|т(?:ех|ем|еми))\s+слов|"
+    # Sprint 20 — bare «их» as accusative pronoun referring to a
+    # prior list, paired with a translation verb or preposition that
+    # signals «do something with them». Examples:
+    #   «дай их в переводе», «переведи их», «их перевод на русский».
+    # Conservative: requires the verb/preposition context to avoid
+    # matching generic «у них» / «о них».
+    r"\b(?:дай|сделай|покажи|переведи)(?:\s+\w+){0,2}\s+их\b|"
+    r"\bих\s+перевод\w*",
     re.IGNORECASE,
 )
 
