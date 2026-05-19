@@ -39,6 +39,52 @@ def book_readability(pg_id: str, sample_chars: int = 200_000) -> ToolResult:
     if isinstance(raw, dict) and raw.get("error"):
         return ToolResult.fail(tool="book_readability", err_type="not_found",
                                message=str(raw["error"]), query=query)
+
+    # Sprint 19+ — Stan 2026-05-19: «уровень сложности Pride and
+    # Prejudice» вернул `words=34427` которое renderer подал как
+    # «общее количество слов». Реально это count внутри первых
+    # 200k chars sample (для скорости Flesch/FK). Реальная книга —
+    # ~122k слов. Numeric audit не отловил т.к. 34427 действительно
+    # в data.
+    #
+    # Fix: дочитать total_words из counts file (полный per-book
+    # frequency dump, лежит в spgc/<dir>/<id>_counts.txt) и явно
+    # отрендерить разницу в `_render_note`.
+    if isinstance(raw, dict) and not raw.get("total_words_estimate"):
+        try:
+            from scripts.rag_tools import _counts_path as _v1_counts_path
+            cf = _v1_counts_path(pg_id.upper())
+            if cf.exists():
+                total = 0
+                with open(cf, encoding="utf-8") as fh:
+                    for line in fh:
+                        parts = line.rstrip("\n").split("\t")
+                        if len(parts) == 2:
+                            try:
+                                total += int(parts[1])
+                            except ValueError:
+                                continue
+                if total > 0:
+                    raw["total_words_estimate"] = total
+                    # Mark the existing words field as the sampled one
+                    raw["words_sampled_for_metric"] = raw.get("words")
+                    # Render hint — keep the existing _render_note if any
+                    existing = raw.get("_render_note") or ""
+                    note = (
+                        f"`words` ({raw.get('words')}) — это count внутри "
+                        f"первых {raw.get('sampled_chars', sample_chars)} "
+                        f"chars sample (используется для Flesch/FK расчёта, "
+                        f"не для длины книги). Реальная длина книги ≈ "
+                        f"**{total:,} слов** ({total // 250}-{total // 200} "
+                        f"страниц при 200-250 слов/страница). Если "
+                        f"пользователь спросил «сколько слов / страниц в "
+                        f"книге» — отвечай через `total_words_estimate`, "
+                        f"НЕ через `words`."
+                    )
+                    raw["_render_note"] = (existing + " " + note).strip()
+        except Exception:
+            pass
+
     return ToolResult.success(
         tool="book_readability", data=raw,
         coverage=Coverage(books_matched=1, books_total=1),
