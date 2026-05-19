@@ -415,6 +415,13 @@ def _plan_author_top_words(e: Entities) -> QueryPlan:
 
 @_with_copyright_check
 def _plan_author_vocab(e: Entities) -> QueryPlan:
+    # Sprint 18 — book-scope override. «характерные прилагательные в
+    # "Dorian Gray"» matched author_vocab intent (pattern «характерные
+    # слов») but the user explicitly named a book, not an author. Fall
+    # through to _plan_book_vocab instead of pestering for an author —
+    # the book entity is enough to compute affinity_by_book signature.
+    if not e.author_regex and (e.book_id or e.book_title):
+        return _plan_book_vocab(e)
     if not e.author_regex:
         return _need_author(e)
     # Sprint 11.3: when several authors are named (Q27 «морские авторы —

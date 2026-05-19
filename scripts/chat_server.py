@@ -200,6 +200,18 @@ PAGE = r"""<!doctype html>
   #suggestions.collapsed::before { content:"💡 примеры запросов"; color:#666;
                                     font-size:12px; cursor:pointer; }
   #suggestions.collapsed:hover::before { color:#a0c4ff; }
+  /* Sprint 18 — pure-CSS auto-hide when any message is in the log.
+     Bullets through history-state edge cases (page load before localStorage
+     hydration, manual clear+immediate-submit, browser cache of old JS).
+     Sibling selector — relies on #log and #suggestions being adjacent.
+     `force-show` class overrides for the user's manual expand. */
+  #log:not(:empty) ~ #suggestions:not(.force-show) { display:none; }
+  #suggestions:empty { display:none; padding:0; }
+  /* Tiny expand button that lives next to clear in the header */
+  .show-hints-btn { background:transparent; border:1px solid #2f343c;
+                    color:#666; padding:3px 10px; border-radius:12px;
+                    font-size:11px; cursor:pointer; }
+  .show-hints-btn:hover { color:#a0c4ff; border-color:#a0c4ff; }
   /* v2.8 progressive help overlay — appears after 3 consecutive clarify */
   #help-overlay { position:fixed; bottom:80px; right:24px; max-width:340px;
                   background:#262a31; border:1px solid #50e3c2;
@@ -257,6 +269,8 @@ PAGE = r"""<!doctype html>
   <h1>__ASSISTANT_NAME__ · wordcracker</h1>
   <span class=meta>v2 engine · wordcracker:v2 · planner→router→renderer→critic</span>
   <span style="flex:1"></span>
+  <button class="show-hints-btn" type=button onclick="toggleHints()"
+          title="показать примеры запросов">💡 примеры</button>
   <button class=secondary type=button onclick="clearHistory()">clear</button>
 </header>
 <div id=log></div>
@@ -329,8 +343,29 @@ function clearHistory() {
   if (confirm('Очистить историю?')) {
     localStorage.removeItem(HKEY);
     log.innerHTML = '';
+    document.getElementById('suggestions').classList.remove('force-show');
     renderSuggestions();
   }
+}
+// Sprint 18 — manual toggle so user can re-show example chips after the
+// CSS-driven auto-hide kicks in. Force-show wins over the
+// `#log:not(:empty) ~ #suggestions { display:none }` rule. Also
+// re-renders chips if the container was emptied by renderSuggestions
+// (history-non-empty branch — chips need re-creating).
+function toggleHints() {
+  const host = document.getElementById('suggestions');
+  if (host.classList.contains('force-show')) {
+    host.classList.remove('force-show');
+    return;
+  }
+  if (host.children.length === 0) {
+    // Re-populate; render uses history-empty shortcut so bypass it
+    const saved = window._forceRender || false;
+    window._forceRender = true;
+    renderSuggestions();
+    window._forceRender = saved;
+  }
+  host.classList.add('force-show');
 }
 
 function render(role, text, extras) {
@@ -613,7 +648,11 @@ const SUGGESTIONS = [
 ];
 function renderSuggestions() {
   const host = document.getElementById('suggestions');
-  if (loadHistory().length > 0) { host.innerHTML = ''; return; }
+  // Sprint 18 — force-show bypasses the «empty when history non-empty»
+  // guard, so the manual «💡 примеры» button can repopulate chips.
+  if (!window._forceRender && loadHistory().length > 0) {
+    host.innerHTML = ''; return;
+  }
   host.innerHTML = '';
   for (const group of SUGGESTIONS) {
     const wrapper = document.createElement('div');
