@@ -258,9 +258,53 @@ class HybridIntegration(unittest.TestCase):
         self.assertEqual(r.data["lexical_n"], 3)
         self.assertEqual(r.data["semantic_n"], 2)
 
+    def test_rerank_reorders_top_k(self):
+        """rerank_with='bge_reranker' should reorder by cross-encoder scores.
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+        Mock the reranker to assign decreasing scores to PG4, PG3, PG2, PG1
+        — exact reverse of RRF order. Final order should follow the
+        reranker, not RRF."""
+        from unittest import mock as _mock
+        from scripts.v2.tools.search.hybrid import hybrid_search
+        # Force-load registry, then patch the plugin's compute().
+        from scripts.v2.scoring import REGISTRY, ScoredItem
+        plugin = REGISTRY["bge_reranker"]
+        fake_compute = _mock.MagicMock(return_value=[
+            ScoredItem(id="PG4", score=0.95, direction="higher_better"),
+            ScoredItem(id="PG3", score=0.80, direction="higher_better"),
+            ScoredItem(id="PG2", score=0.60, direction="higher_better"),
+            ScoredItem(id="PG1", score=0.10, direction="higher_better"),
+        ])
+        with _mock.patch.object(plugin, "compute", fake_compute):
+            r = hybrid_search("ajar", k=10, per_retriever=10,
+                              rerank_with="bge_reranker")
+        self.assertTrue(r.ok)
+        ids = [m["pg_id"] for m in r.data["matches"]]
+        self.assertEqual(ids, ["PG4", "PG3", "PG2", "PG1"])
+        self.assertEqual(r.data.get("reranked_by"), "bge_reranker")
+        # rerank_score is attached to each match
+        for m in r.data["matches"]:
+            self.assertIn("rerank_score", m)
+
+    def test_rerank_unknown_plugin_warns(self):
+        from scripts.v2.tools.search.hybrid import hybrid_search
+        r = hybrid_search("ajar", k=5, per_retriever=10,
+                          rerank_with="not_a_real_plugin")
+        # Tool still succeeds — rerank failure is non-fatal
+        self.assertTrue(r.ok)
+        codes = [w.code for w in r.warnings]
+        self.assertIn("rerank_unknown", codes)
+        # data shouldn't claim it was reranked
+        self.assertNotIn("reranked_by", r.data)
+
+    def test_rerank_wrong_kind_warns(self):
+        from scripts.v2.tools.search.hybrid import hybrid_search
+        # burrows_delta is kind="author_similarity", not retrieval_rerank
+        r = hybrid_search("ajar", k=5, per_retriever=10,
+                          rerank_with="burrows_delta")
+        self.assertTrue(r.ok)
+        codes = [w.code for w in r.warnings]
+        self.assertIn("rerank_kind_mismatch", codes)
 
 
 if __name__ == "__main__":

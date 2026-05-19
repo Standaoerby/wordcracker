@@ -198,6 +198,92 @@ def _top_words_set(affinity_fn, author_regex: str, top: int) -> set[str]:
             if isinstance(r, dict) and r.get("word")}
 
 
+class BGEReranker:
+    """Cross-encoder reranker — BAAI/bge-reranker-base.
+
+    For `retrieval_rerank` kind: given a query text and a list of
+    candidate passages, score each (query, passage) pair with a
+    cross-encoder for relevance. Cross-encoders are slower than
+    bi-encoders (must run for every pair) but much more accurate —
+    typical recipe: bi-encoder retrieves top-30, cross-encoder reranks
+    to top-10.
+
+    Lazy-loaded: model (~440 MB) only loads on first compute() call,
+    not at import time. Caches model on instance after first load.
+
+    Candidate shapes accepted (auto-normalized):
+      - tuple/list: (id, text)
+      - dict: {"id": ..., "text": ...} OR {"pg_id": ..., "snippet": ...}
+        OR {"pg_id": ..., "text": ...}
+    """
+    name = "bge_reranker"
+    kinds = ("retrieval_rerank",)
+    cost = "heavy"
+    model_name = "BAAI/bge-reranker-base"
+
+    def __init__(self) -> None:
+        self._model: Any = None  # CrossEncoder once loaded
+
+    def _load(self) -> Any:
+        if self._model is not None:
+            return self._model
+        try:
+            from sentence_transformers import CrossEncoder
+        except ImportError as e:
+            raise RuntimeError(
+                f"BGEReranker needs `sentence-transformers`: {e}") from e
+        # CrossEncoder auto-downloads on first run, then caches in HF cache.
+        self._model = CrossEncoder(self.model_name)
+        return self._model
+
+    @staticmethod
+    def _normalize(cand: Any) -> tuple[Any, str] | None:
+        """Return (id, text) or None if cand has no usable text."""
+        if isinstance(cand, (tuple, list)) and len(cand) >= 2:
+            return cand[0], str(cand[1])
+        if isinstance(cand, dict):
+            id_ = cand.get("id") or cand.get("pg_id")
+            text = cand.get("text") or cand.get("snippet") or cand.get("body")
+            if id_ is not None and text:
+                return id_, str(text)
+        return None
+
+    def compute(self, query: ScoringQuery) -> list[ScoredItem]:
+        if query.kind != "retrieval_rerank":
+            return []
+        target = query.target
+        if not isinstance(target, str) or not target.strip():
+            return []
+        normalized: list[tuple[Any, str]] = []
+        for cand in query.candidates:
+            n = self._normalize(cand)
+            if n is not None:
+                normalized.append(n)
+        if not normalized:
+            return []
+        try:
+            model = self._load()
+        except Exception:
+            return []
+        pairs = [[target, text] for _id, text in normalized]
+        try:
+            scores = model.predict(pairs)
+        except Exception:
+            return []
+        out: list[ScoredItem] = []
+        for (id_, _text), score in zip(normalized, scores):
+            out.append(ScoredItem(
+                id=id_, score=float(score), direction="higher_better",
+            ))
+        out.sort(key=lambda s: s.score, reverse=True)
+        return out
+
+    def explain(self, scored: ScoredItem) -> str:
+        return (f"BGE cross-encoder relevance {scored.score:.3f} "
+                f"(выше = релевантнее запросу; full cross-attention "
+                f"между query и кандидатом)")
+
+
 class Ensemble:
     """Vote across multiple plugins — used as the v3.0 default for
     `author_influences`. Member plugins compute their own scoring on
@@ -256,7 +342,7 @@ REGISTRY: dict[str, ScoringPlugin] = {
     "burrows_delta":  BurrowsDelta(),
     "jaccard_top200": JaccardTop200(),
     "ensemble":       Ensemble(),
-    # B4 (next commit): BGEReranker — lazy-loaded, kind="retrieval_rerank"
+    "bge_reranker":   BGEReranker(),  # heavy, lazy-loads on first .compute()
 }
 
 

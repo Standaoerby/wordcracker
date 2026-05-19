@@ -106,6 +106,82 @@ class JaccardPlugin(unittest.TestCase):
             self.assertGreater(results[0].score, results[1].score)
 
 
+class BGERerankerPlugin(unittest.TestCase):
+    def test_wrong_kind_returns_empty(self):
+        from scripts.v2.scoring import BGEReranker
+        plugin = BGEReranker()
+        self.assertEqual(plugin.compute(ScoringQuery(
+            kind="author_similarity", target="^Doyle,")), [])
+
+    def test_empty_target_returns_empty(self):
+        from scripts.v2.scoring import BGEReranker
+        plugin = BGEReranker()
+        self.assertEqual(plugin.compute(ScoringQuery(
+            kind="retrieval_rerank", target="")), [])
+        self.assertEqual(plugin.compute(ScoringQuery(
+            kind="retrieval_rerank", target="   ")), [])
+
+    def test_no_valid_candidates_returns_empty(self):
+        from scripts.v2.scoring import BGEReranker
+        plugin = BGEReranker()
+        # No id/text — all candidates filtered out
+        self.assertEqual(plugin.compute(ScoringQuery(
+            kind="retrieval_rerank", target="fog in london",
+            candidates=[{"foo": "bar"}, None, 42])), [])
+
+    def test_normalizes_tuple_and_dict_candidates(self):
+        from scripts.v2.scoring import BGEReranker
+        # _normalize is the conversion hot-path; test directly so we
+        # don't need to load the model for shape checks.
+        norm = BGEReranker._normalize
+        self.assertEqual(norm(("PG123", "fog")), ("PG123", "fog"))
+        self.assertEqual(norm(["PG123", "fog"]), ("PG123", "fog"))
+        self.assertEqual(norm({"id": "X", "text": "y"}), ("X", "y"))
+        self.assertEqual(norm({"pg_id": "PG345", "snippet": "haze"}),
+                          ("PG345", "haze"))
+        self.assertEqual(norm({"pg_id": "PG345", "text": "haze"}),
+                          ("PG345", "haze"))
+        self.assertIsNone(norm({"id": "X"}))            # no text
+        self.assertIsNone(norm({"text": "y"}))          # no id
+        self.assertIsNone(norm("just a string"))
+        self.assertIsNone(norm(None))
+
+    def test_compute_with_mocked_model(self):
+        """End-to-end shape with a fake CrossEncoder — no real download."""
+        from scripts.v2.scoring import BGEReranker, ScoringQuery
+        plugin = BGEReranker()
+        fake_model = mock.MagicMock()
+        # Score reversed-order: 2nd candidate gets highest score
+        fake_model.predict.return_value = [0.1, 0.9, 0.5]
+        plugin._model = fake_model  # bypass _load()
+        results = plugin.compute(ScoringQuery(
+            kind="retrieval_rerank",
+            target="fog in london",
+            candidates=[
+                {"pg_id": "PG1", "snippet": "weather report"},
+                {"pg_id": "PG2", "snippet": "london fog at dawn"},
+                {"pg_id": "PG3", "snippet": "novel about haze"},
+            ],
+        ))
+        self.assertEqual(len(results), 3)
+        # Highest score first
+        self.assertEqual(results[0].id, "PG2")
+        self.assertAlmostEqual(results[0].score, 0.9)
+        self.assertEqual(results[0].direction, "higher_better")
+        # Verify pairs structure: [[query, text], ...]
+        called_pairs = fake_model.predict.call_args[0][0]
+        self.assertEqual(called_pairs[0], ["fog in london", "weather report"])
+
+    def test_load_failure_returns_empty(self):
+        from scripts.v2.scoring import BGEReranker, ScoringQuery
+        plugin = BGEReranker()
+        with mock.patch.object(plugin, "_load",
+                                side_effect=RuntimeError("no model")):
+            self.assertEqual(plugin.compute(ScoringQuery(
+                kind="retrieval_rerank", target="x",
+                candidates=[("id1", "text1")])), [])
+
+
 class EnsemblePlugin(unittest.TestCase):
     def test_borda_count_combines_metrics(self):
         from scripts.v2.scoring import Ensemble

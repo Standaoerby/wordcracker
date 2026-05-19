@@ -43,7 +43,8 @@ def _rank_map(items: list[dict[str, Any]], key: str = "pg_id") -> dict[str, int]
     description=(
         "Гибридный поиск: lexical (FTS5 BM25) + semantic (ChromaDB) "
         "+ Reciprocal Rank Fusion. Используй когда хочешь и точные упоминания "
-        "слова, и параграфы по смыслу. Возвращает merged top-k."
+        "слова, и параграфы по смыслу. Возвращает merged top-k. "
+        "Optional rerank_with='bge_reranker' для cross-encoder reorder."
     ),
     input_schema={
         "type": "object",
@@ -52,6 +53,7 @@ def _rank_map(items: list[dict[str, Any]], key: str = "pg_id") -> dict[str, int]
             "k":             {"type": "integer", "description": "final top-k (default 12)"},
             "per_retriever": {"type": "integer", "description": "k for each retriever before merge (default 30)"},
             "author_filter": {"type": "string", "description": "regex passed to semantic_search"},
+            "rerank_with":   {"type": "string", "description": "plugin name from scoring.REGISTRY, e.g. 'bge_reranker' (slow but accurate)"},
         },
         "required": ["query"],
     },
@@ -60,7 +62,8 @@ def _rank_map(items: list[dict[str, Any]], key: str = "pg_id") -> dict[str, int]
     cacheable=True,
 )
 def hybrid_search(query: str, k: int = 12, per_retriever: int = 30,
-                  author_filter: str | None = None) -> ToolResult:
+                  author_filter: str | None = None,
+                  rerank_with: str | None = None) -> ToolResult:
     warnings: list[ToolWarning] = []
 
     # Lexical via v2 lexical_search
@@ -121,7 +124,10 @@ def hybrid_search(query: str, k: int = 12, per_retriever: int = 30,
         fused.append((pg, score, by_id_lex.get(pg, {}), by_id_sem.get(pg, {})))
 
     fused.sort(key=lambda t: t[1], reverse=True)
-    top = fused[:k]
+    # When reranking, keep a wider pool (2k items) so the reranker has
+    # room to reorder. Otherwise the cross-encoder is just confirming RRF.
+    pool_size = min(len(fused), max(k * 2, 30)) if rerank_with else k
+    top = fused[:pool_size]
 
     out_matches = []
     for pg, score, lm, sm in top:
@@ -135,17 +141,61 @@ def hybrid_search(query: str, k: int = 12, per_retriever: int = 30,
             "author": sm.get("metadata", {}).get("author") if isinstance(sm.get("metadata"), dict) else None,
         })
 
+    # Optional cross-encoder rerank — bi-encoder pool → cross-encoder top-k
+    rerank_applied: str | None = None
+    if rerank_with and out_matches:
+        try:
+            from scripts.v2.scoring import REGISTRY as _SCORING, ScoringQuery
+            plugin = _SCORING.get(rerank_with)
+            if plugin is None:
+                warnings.append(ToolWarning(
+                    code="rerank_unknown",
+                    message=f"plugin {rerank_with!r} not in REGISTRY",
+                ))
+            elif "retrieval_rerank" not in getattr(plugin, "kinds", ()):
+                warnings.append(ToolWarning(
+                    code="rerank_kind_mismatch",
+                    message=f"plugin {rerank_with!r} doesn't support retrieval_rerank",
+                ))
+            else:
+                rr = plugin.compute(ScoringQuery(
+                    kind="retrieval_rerank",
+                    target=query,
+                    candidates=out_matches,
+                ))
+                if rr:
+                    rerank_scores = {item.id: item.score for item in rr}
+                    out_matches = [m for m in out_matches if m["pg_id"] in rerank_scores]
+                    out_matches.sort(
+                        key=lambda m: rerank_scores.get(m["pg_id"], -1e9),
+                        reverse=True,
+                    )
+                    for m in out_matches:
+                        m["rerank_score"] = round(rerank_scores.get(m["pg_id"], 0.0), 6)
+                    rerank_applied = rerank_with
+        except Exception as e:
+            warnings.append(ToolWarning(
+                code="rerank_failed", message=f"{rerank_with}: {e}",
+            ))
+
+    # After optional rerank, trim down to user-requested k.
+    out_matches = out_matches[:k]
+
+    data = {
+        "query": query,
+        "matches": out_matches,
+        "lexical_n": len(lex_matches),
+        "semantic_n": len(sem_matches),
+        "k_rrf": K_RRF,
+    }
+    if rerank_applied:
+        data["reranked_by"] = rerank_applied
+
     return ToolResult.success(
         tool="hybrid_search",
-        data={
-            "query": query,
-            "matches": out_matches,
-            "lexical_n": len(lex_matches),
-            "semantic_n": len(sem_matches),
-            "k_rrf": K_RRF,
-        },
+        data=data,
         coverage=Coverage(books_matched=len(out_matches), books_total=-1),
         warnings=warnings,
         query={"query": query, "k": k, "per_retriever": per_retriever,
-               "author_filter": author_filter},
+               "author_filter": author_filter, "rerank_with": rerank_with},
     )
