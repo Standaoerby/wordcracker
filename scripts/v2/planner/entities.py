@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
 
@@ -516,6 +517,78 @@ def _find_authors(text: str) -> list[tuple[str, str]]:
     return out
 
 
+# ---------- user-upload resolver (Sprint 19+ HP fix) ----------
+# When the user uploaded a copyrighted book locally (HP / LOTR / 1984 /
+# Catcher / etc. — listed in KNOWN_BOOKS with empty PG sentinel), we
+# should resolve to the user's U-id instead of refusing with the
+# copyright-OOS message. The book is now physically present on the
+# admin's drive; the OOS message was «we don't have the full text»,
+# which becomes a lie. Renderer adds a copyright disclosure footer
+# instead — see RENDER_PROMPT rule 12.
+
+_USER_UPLOADS_CACHE: dict[str, str] | None = None
+_USER_UPLOADS_CACHE_MTIME: float = 0.0
+_USER_UPLOADS_META_PATH = Path("/workspace/spgc/derived/user_uploads_metadata.csv")
+
+
+def _load_user_upload_titles() -> dict[str, str]:
+    """Return {normalized_title_lc: u_id}. Cached, mtime-aware so admin
+    uploads after server start become visible without restart."""
+    global _USER_UPLOADS_CACHE, _USER_UPLOADS_CACHE_MTIME
+    p = _USER_UPLOADS_META_PATH
+    if not p.exists():
+        return {}
+    try:
+        mtime = p.stat().st_mtime
+    except OSError:
+        return _USER_UPLOADS_CACHE or {}
+    if _USER_UPLOADS_CACHE is not None and mtime == _USER_UPLOADS_CACHE_MTIME:
+        return _USER_UPLOADS_CACHE
+    import csv as _csv
+    out: dict[str, str] = {}
+    try:
+        with open(p, encoding="utf-8") as fh:
+            for row in _csv.DictReader(fh):
+                u_id = (row.get("id") or "").strip()
+                title = (row.get("title") or "").strip()
+                if u_id and title:
+                    out[title.lower()] = u_id
+    except OSError:
+        return _USER_UPLOADS_CACHE or {}
+    _USER_UPLOADS_CACHE = out
+    _USER_UPLOADS_CACHE_MTIME = mtime
+    return out
+
+
+def find_user_upload_for_title(canonical_title: str) -> str | None:
+    """Match a canonical KNOWN_BOOKS title against user_uploads_metadata.csv.
+
+    Substring-matching both ways: a user uploaded «Harry Potter and the
+    Philosopher's Stone» should match canonical «Harry Potter», AND
+    a user upload titled exactly «Harry Potter» should match the
+    canonical too. Returns the first matching U-id (sorted by id for
+    determinism)."""
+    if not canonical_title:
+        return None
+    uploads = _load_user_upload_titles()
+    if not uploads:
+        return None
+    target = canonical_title.lower().strip()
+    # Exact match first
+    if target in uploads:
+        return uploads[target]
+    # Substring either direction
+    matches: list[tuple[str, str]] = []
+    for upload_title, u_id in uploads.items():
+        if target in upload_title or upload_title in target:
+            matches.append((u_id, upload_title))
+    if matches:
+        # Deterministic — pick the lowest U-id (oldest upload)
+        matches.sort(key=lambda x: int(x[0][1:]) if x[0][1:].isdigit() else 0)
+        return matches[0][0]
+    return None
+
+
 # ---------- book / title ----------
 
 # Titles can appear inside any of these quote pairs. We match each pair
@@ -558,9 +631,18 @@ def _find_book(text: str) -> tuple[str | None, str | None]:
         # works regardless of which quote style the user pasted in.
         key = title.lower().replace("’", "'").replace("‘", "'")
         if key in KNOWN_BOOKS:
-            pg, _ = KNOWN_BOOKS[key]
+            pg, canonical = KNOWN_BOOKS[key]
             if pg.startswith("PG") and pg != "PG":
                 return pg, title
+            # Sprint 19+ — empty-PG sentinel means «known but copyright,
+            # not in SPGC». BEFORE returning (None, title) which triggers
+            # the copyright-OOS refusal, check whether the admin
+            # uploaded this title locally. If yes, resolve to the
+            # U-id — tool chain works, renderer adds a copyright
+            # disclosure footer (RENDER_PROMPT rule 12 extension).
+            u_id = find_user_upload_for_title(canonical or title)
+            if u_id:
+                return u_id, title
             return None, title
         # Single short token (no spaces, < 12 chars) is almost certainly a
         # word, not a book title. Defer to _find_word; book_title stays None.
@@ -604,6 +686,12 @@ def _find_book(text: str) -> tuple[str | None, str | None]:
             pg, canon = KNOWN_BOOKS[key]
             if pg.startswith("PG") and pg != "PG":
                 return pg, canon
+            # Sprint 19+ — empty-PG sentinel: try user uploads before
+            # giving up to copyright OOS. Same fallback as in the
+            # quoted-title branch above.
+            u_id = find_user_upload_for_title(canon)
+            if u_id:
+                return u_id, canon
             return None, canon
     return None, None
 

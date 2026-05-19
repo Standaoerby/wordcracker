@@ -61,7 +61,8 @@ RENDER_PROMPT = """Тебя зовут {name}. Ты — литературный
 9. **Если в payload есть поле `render_instructions` — это ПРИОРИТЕТНЫЕ правила, всегда им следуй.**
 10. **Если в data есть `_bio_source: "wordcracker hardcoded"` — bio years подтверждены, не сомневайся в них.**
 11. **Числа и счёты — буква-в-букву из tool data.** Если ответ говорит «top 10» — в списке ровно 10 элементов из data, не 8 и не 12. Если data показывает 47 — пиши «47», не «около 50» и не «больше 40». Округление в перифразе допустимо только если оно явное («примерно 50, точнее 47»). Никаких чисел из «знания мира» — если число не в data, его нет в ответе. Это включает количество книг, частоты, проценты, годы рождения/смерти, рейтинги, дистанции.
-12. **Источник данных — раскрой, если использованы загруженные пользователем книги.** Если в payload есть `user_uploads_used: true` (или ToolResult.source_info.has_user_uploads), добавь короткое примечание в конце ответа: «*В ответе использованы загруженные вами книги (U<N>) — это не часть канонического корпуса SPGC*». Список конкретных U-id есть в `user_upload_ids` если нужно их назвать. На работу tool это не влияет — это исключительно прозрачность для пользователя.
+12. **Источник данных — раскрой, если использованы загруженные пользователем книги.** Если в payload есть `user_uploads_used: true`, добавь короткое примечание в конце ответа: «*В ответе использованы загруженные вами книги (U<N>) — это не часть канонического корпуса SPGC*». Список конкретных U-id есть в `user_upload_ids`. На работу tool это не влияет — это исключительно прозрачность.
+13. **Copyright disclosure для загруженных copyright-книг.** Если в payload `copyright_book_via_upload: true` — добавь ПОВЕРХ обычного user-upload note ещё один блок: «*© Книга «<copyright_book_title>» находится под защитой copyright. Загружена локально для исследовательских целей (fair use). Запрещены: повторное распространение, копирование больших фрагментов, передача третьим лицам.*» Этот блок ВАЖНЕЕ обычного user-upload note — поставь его первым, обычный — после или объедини в один параграф если контекст позволяет.
 
 Tool trace тебе передан как JSON. Каждая запись — {{tool, query, data, warnings, coverage}}. Возьми оттуда factual content. **Ничего вне этих данных.**"""
 
@@ -336,6 +337,34 @@ def _detect_user_uploads(results: list[ToolResult]) -> tuple[bool, int, list[str
     return bool(seen), len(seen), sorted(seen)[:5]
 
 
+def _detect_copyright_via_uploads(entities) -> tuple[bool, str | None]:
+    """Sprint 19+ — when the entity extractor resolved a KNOWN_BOOKS
+    empty-PG title (copyright sentinel like Harry Potter / LOTR / 1984)
+    to a U-id (via find_user_upload_for_title), the chat must add a
+    fair-use / no-redistribution disclaimer. Detect that combo here.
+
+    Returns (is_copyright_upload, canonical_title) — the title is
+    used in the renderer footer so the LLM names the specific work."""
+    if not entities.book_id or not entities.book_id.startswith("U"):
+        return False, None
+    if not entities.book_title:
+        return False, None
+    try:
+        from scripts.v2.planner.entities import KNOWN_BOOKS
+    except ImportError:
+        return False, None
+    # Look up the title in KNOWN_BOOKS — if it's there with an empty
+    # PG sentinel, this is a known copyright work the user has
+    # uploaded locally.
+    title_lc = entities.book_title.lower().replace("’", "'").replace("‘", "'")
+    for key, (pg, canonical) in KNOWN_BOOKS.items():
+        if pg:
+            continue  # has PG id → not a copyright sentinel
+        if title_lc in key or key in title_lc or title_lc == canonical.lower():
+            return True, canonical
+    return False, None
+
+
 def _extract_retrieval_log(results: list[ToolResult],
                             limit: int = 12) -> list[dict] | None:
     """Build a compact retrieval-source list for obs_mod.log_request.
@@ -392,6 +421,11 @@ def _llm_render(question: str, plan: plan_mod.QueryPlan,
     render_instructions = _collect_render_instructions(results)
     # Sprint 19 — surface user-upload usage to the renderer.
     has_uploads, upload_count, upload_sample = _detect_user_uploads(results)
+    # Sprint 19+ — copyright-via-upload (HP / LOTR / 1984 / etc.
+    # uploaded locally). Renderer adds the fair-use disclaimer per
+    # RENDER_PROMPT rule 13.
+    is_copyright_upload, copyright_title = _detect_copyright_via_uploads(
+        plan.entities)
     summary_payload = {
         "intent": plan.intent,
         "explain": plan.explain,
@@ -399,10 +433,12 @@ def _llm_render(question: str, plan: plan_mod.QueryPlan,
         # Top-level priority instructions — the renderer was missing notes
         # buried inside per-tool `data`. Surface them explicitly.
         "render_instructions": render_instructions,
-        # Source transparency — see RENDER_PROMPT rule 12.
-        "user_uploads_used": has_uploads,
-        "user_upload_count": upload_count,
-        "user_upload_ids":   upload_sample,
+        # Source transparency — see RENDER_PROMPT rules 12 + 13.
+        "user_uploads_used":      has_uploads,
+        "user_upload_count":      upload_count,
+        "user_upload_ids":        upload_sample,
+        "copyright_book_via_upload": is_copyright_upload,
+        "copyright_book_title":      copyright_title,
         "tool_results": [
             {
                 "tool": r.tool,
