@@ -431,6 +431,14 @@ def _plan_author_vocab(e: Entities) -> QueryPlan:
         return _plan_book_vocab(e)
     if not e.author_regex:
         return _need_author(e)
+    # Sprint 20 — propn-strict modifier (from history follow-up «убери
+    # имена собственные»). Crank min_corpus_count up so OOV proper
+    # nouns and rare character names get dropped at the corpus-frequency
+    # gate — over and above the v3.1.1 surname blocklist that already
+    # runs in the affinity_by_author v2 wrapper.
+    propn_strict = bool((e.raw_misc or {}).get("_propn_strict"))
+    min_cc = max(_auto_min_corpus_count(e), 5000) if propn_strict \
+        else _auto_min_corpus_count(e)
     # Sprint 11.3: when several authors are named (Q27 «морские авторы —
     # Мелвилл, Конрад, Стивенсон»), run affinity_by_author for each in
     # parallel — the renderer can present the joined signature lists or
@@ -438,19 +446,21 @@ def _plan_author_vocab(e: Entities) -> QueryPlan:
     steps = [PlanStep(tool="affinity_by_author",
                       args={"author_regex": e.author_regex,
                             "top": e.top_n or 30,
-                            "min_corpus_count": _auto_min_corpus_count(e),
+                            "min_corpus_count": min_cc,
                             "pos_filter": e.pos_filter})]
     for extra in e.multi_author_regex[:3]:  # cap at 4 total to bound time
         steps.append(PlanStep(
             tool="affinity_by_author",
             args={"author_regex": extra,
                   "top": e.top_n or 30,
-                  "min_corpus_count": _auto_min_corpus_count(e),
+                  "min_corpus_count": min_cc,
                   "pos_filter": e.pos_filter},
             optional=True))
     explain = f"affinity_by_author({e.author_regex})"
     if e.multi_author_regex:
         explain += f" + {len(e.multi_author_regex[:3])} more"
+    if propn_strict:
+        explain += f" [propn_strict: min_corpus_count={min_cc}]"
     return QueryPlan(
         intent="author_vocab", entities=e, steps=steps,
         expected_cost="medium",

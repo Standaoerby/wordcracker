@@ -92,6 +92,31 @@ _RERANK_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+
+# Sprint 20 — result-modifier follow-up: «убери из них имена собственные»
+# / «без proper nouns» / «отфильтруй фамилии» / «exclude surnames».
+# These are *modifiers* over a previous turn's output. We re-classify the
+# prior user message to inherit its intent, AND set a hint on the entity
+# so the plan-builder can dial up the filter aggressiveness (higher
+# min_corpus_count, force exclude_proper_nouns).
+_PROPN_REMOVAL_PATTERNS = re.compile(
+    r"(?:убери|без|выкини|выкинь|выкинуть|отфильтру\w+|исключи|"
+    r"drop|exclude|filter\s+out|remove)\s+"
+    r"(?:из\s+них\s+|оттуда\s+|from\s+(?:them|the\s+list)\s+)?"
+    # «имена / имён / именам / именах / имена авторов / фамилии /
+    # фамилий / proper nouns / surnames / character names».
+    # `им[её]н\w*` covers both «имен-» (имена/именах) and «имён»
+    # (genitive plural with ё).
+    r"(?:им[её]н\w*\s+собственн\w+|фамил\w+|"
+    r"proper\s+nouns?|surnames?|character\s+names?|"
+    r"им[её]н\w*\s+(?:авторов|персонаж\w+))",
+    re.IGNORECASE,
+)
+
+
+def _is_propn_removal(text: str) -> bool:
+    return bool(_PROPN_REMOVAL_PATTERNS.search(text))
+
 # Sprint 19+ — expansion patterns: «покажи все», «полный список»,
 # «все книги серии», «show all», «list all», «give me the full
 # list». User wants the prior intent re-run with a wider top_n
@@ -110,7 +135,8 @@ _EXPAND_PATTERNS = re.compile(
 
 
 def _looks_like_followup(text: str) -> bool:
-    return bool(_REF_TRIGGERS.search(text) or _CONTEXT_SWAP_TRIGGERS.search(text))
+    return bool(_REF_TRIGGERS.search(text) or _CONTEXT_SWAP_TRIGGERS.search(text)
+                or _PROPN_REMOVAL_PATTERNS.search(text))
 
 
 def _is_context_swap(text: str) -> bool:
@@ -241,6 +267,18 @@ def infer_followup_intent(text: str,
             prior_intent = _classify(msg.get("content") or "")
             if prior_intent.label not in ("clarify", ""):
                 return prior_intent.label
+    # Sprint 20 — proper-noun removal modifier («убери имена собственные»).
+    # Same shape as re-rank: inherit the prior intent so the plan re-runs,
+    # but `merge_with_history` will set `_propn_strict=True` on the entity
+    # so the plan-builder can dial filter aggressiveness up.
+    if _PROPN_REMOVAL_PATTERNS.search(text) and history:
+        from scripts.v2.planner.intent import classify as _classify
+        for msg in reversed(history):
+            if msg.get("role") != "user":
+                continue
+            prior_intent = _classify(msg.get("content") or "")
+            if prior_intent.label not in ("clarify", ""):
+                return prior_intent.label
     # Sprint 19+ — expansion follow-up («покажи все», «полный список»).
     # Same re-classify-prior logic as rerank — same plan, but the
     # plan-builder will see e.top_n bumped (set in merge_with_history).
@@ -343,4 +381,13 @@ def merge_with_history(current: Entities, history: list[dict] | None,
     if is_expansion_followup(text) and (backfilled.top_n is None
                                           or backfilled.top_n < 20):
         backfilled.top_n = 30
+    # Sprint 20 — propn-removal modifier: stamp a hint so the plan
+    # builder can crank up filter aggressiveness on the re-run.
+    # _propn_strict is a soft flag; plan templates that respect it
+    # (e.g. _plan_author_vocab) raise min_corpus_count and force
+    # exclude_proper_nouns.
+    if _is_propn_removal(text):
+        rm = dict(backfilled.raw_misc or {})
+        rm["_propn_strict"] = True
+        backfilled.raw_misc = rm
     return backfilled
