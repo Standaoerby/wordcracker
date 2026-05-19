@@ -1573,10 +1573,86 @@ PLAN_BUILDERS = {
 }
 
 
+def _smart_clarify_recipe(e: Entities) -> str | None:
+    """Sprint 19+ — when intent failed but entities are RICH (compound
+    research query with country + period + emotion + comparator), give
+    the user a concrete 3-step recipe instead of generic «not sure».
+
+    Stan 2026-05-19 «кто из английских авторов XIX века самый темный
+    по эмоциональной палитре, у кого больше всего fear?» → entities
+    correctly extracted country=GB, year_from=1800, year_to=1899,
+    emotion=fear, but no single intent covers «extremum по emotion
+    среди authors in period». The user should see a recipe, not a
+    bare clarify.
+    """
+    rich_fields = sum([
+        bool(e.country),
+        bool(e.year_from or e.year_to),
+        bool(e.emotion),
+        bool(e.author_regex),
+        bool(e.book_id or e.book_title),
+        bool(e.word),
+    ])
+    if rich_fields < 2:
+        return None
+
+    parts: list[str] = ["Запрос сложный — у меня нет одного готового tool, "
+                         "но это можно собрать из 2-3 шагов:"]
+    if e.country and (e.year_from or e.year_to) and e.emotion:
+        # «extremum по эмоции среди country-period»
+        period = (f"{e.year_from or '?'}-{e.year_to or '?'}"
+                   if (e.year_from or e.year_to) else "")
+        parts.append(
+            f"\n1. **Top авторы из {e.country}{' ' + period if period else ''}**: "
+            f"спроси «топ-10 авторов из {e.country.lower()} по числу книг»\n"
+            f"2. Для каждого верхнего — спроси «эмоциональный профиль <author>» "
+            f"или «топ-3 книги {e.country.lower()} автора по {e.emotion} ratio»\n"
+            f"3. Сравни {e.emotion}% по результатам"
+        )
+    elif e.country and e.emotion:
+        parts.append(
+            f"\n1. **Топ авторов из {e.country}**: «топ-10 авторов "
+            f"{e.country.lower()} по числу книг»\n"
+            f"2. **Эмоциональный профиль каждого**: «эмоциональный "
+            f"профиль <author>» — посмотри {e.emotion}%\n"
+        )
+    elif e.country and (e.year_from or e.year_to):
+        period = f"{e.year_from or '?'}-{e.year_to or '?'}"
+        parts.append(
+            f"\n1. **Топ авторов {e.country}**: «топ-10 авторов "
+            f"{e.country.lower()} {period}»\n"
+            f"2. Для каждого — нужный анализ (vocab / emotion / readability)"
+        )
+    else:
+        # Generic compound — list what we found
+        found = []
+        if e.country: found.append(f"country={e.country}")
+        if e.year_from or e.year_to:
+            found.append(f"period={e.year_from or '?'}-{e.year_to or '?'}")
+        if e.emotion: found.append(f"emotion={e.emotion}")
+        if e.author_regex: found.append(f"author={e.author_regex}")
+        if e.word: found.append(f"word={e.word!r}")
+        parts.append(
+            "\nЯ извлёк: " + ", ".join(found) + ". Уточни глагол "
+            "(найди / сравни / топ / профиль / архаизмы) и я разверну в "
+            "конкретный tool chain."
+        )
+    return "\n".join(parts)
+
+
 def build(intent: str, entities: Entities) -> QueryPlan:
     fn = PLAN_BUILDERS.get(intent)
     if fn is None:
-        # clarify or unknown intent
+        # Sprint 19+ — smart recipe when entities are rich
+        recipe = _smart_clarify_recipe(entities)
+        if recipe:
+            return QueryPlan(
+                intent="clarify", entities=entities, steps=[],
+                needs_clarify=True,
+                clarify_question=recipe,
+                explain="rich entities, compound research query — recipe offered",
+            )
+        # clarify or unknown intent — generic example menu
         return QueryPlan(
             intent="clarify", entities=entities, steps=[],
             needs_clarify=True,

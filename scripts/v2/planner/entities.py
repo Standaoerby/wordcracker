@@ -164,6 +164,27 @@ AUTHOR_ALIASES_CURATED: dict[str, str] = {
     "флетчер":          "^Fletcher, John",
     "middleton":        "^Middleton,",
     "мидлтон":          "^Middleton,",
+    # Sprint 19+ — Gothic novelists (Stan 2026-05-19 «у Walpole в Castle
+    # of Otranto»). Round 6 also asked about Radcliffe / Maturin / Lewis;
+    # adding the cohort preemptively.
+    "walpole":          "^Walpole, Horace",  # disambiguate from Hugh Walpole
+    "horace walpole":   "^Walpole, Horace",
+    "уолпол":           "^Walpole, Horace",
+    "уолпола":          "^Walpole, Horace",  # gen
+    "уолполу":          "^Walpole, Horace",  # dat
+    "хорас уолпол":     "^Walpole, Horace",
+    "хораса уолпола":   "^Walpole, Horace",  # gen
+    "radcliffe":        "^Radcliffe, Ann",
+    "ann radcliffe":    "^Radcliffe, Ann",
+    "радклифф":         "^Radcliffe, Ann",
+    "радклиффа":        "^Radcliffe, Ann",
+    "анна радклифф":    "^Radcliffe, Ann",
+    "matthew lewis":    "^Lewis, M",  # Matthew Gregory Lewis (The Monk)
+    "м. г. льюис":      "^Lewis, M",
+    "мэтью льюис":      "^Lewis, M",
+    "maturin":          "^Maturin,",
+    "матюрин":          "^Maturin,",
+    "матьюрин":         "^Maturin,",
 }
 
 
@@ -250,6 +271,23 @@ KNOWN_BOOKS: dict[str, tuple[str, str]] = {
     "macbeth":                    ("PG2264", "Macbeth"),
     "макбет":                     ("PG2264", "Macbeth"),
 
+    # Sprint 19+ — Gothic classics (Stan 2026-05-19 «архаизмы у Walpole
+    # в Castle of Otranto» fell to clarify — title not in KNOWN_BOOKS).
+    # The Castle of Otranto (1764) is THE founding Gothic novel; users
+    # asking about Walpole almost always mean this.
+    "castle of otranto":          ("PG696", "The Castle of Otranto"),
+    "the castle of otranto":      ("PG696", "The Castle of Otranto"),
+    "замок отранто":              ("PG696", "The Castle of Otranto"),
+    "замке отранто":              ("PG696", "The Castle of Otranto"),
+    # The Mysteries of Udolpho (Radcliffe) — Gothic canon
+    "mysteries of udolpho":       ("PG3268", "The Mysteries of Udolpho"),
+    "the mysteries of udolpho":   ("PG3268", "The Mysteries of Udolpho"),
+    "удольфо":                    ("PG3268", "The Mysteries of Udolpho"),
+    # The Monk (Lewis) — Gothic
+    "the monk":                   ("PG601", "The Monk"),
+    "monk a romance":             ("PG601", "The Monk"),
+    "монах":                      ("PG601", "The Monk"),
+
     # English / American canon
     "pride and prejudice":        ("PG1342", "Pride and Prejudice"),
     "гордость и предубеждение":   ("PG1342", "Pride and Prejudice"),
@@ -319,7 +357,12 @@ KNOWN_BOOKS: dict[str, tuple[str, str]] = {
 
 
 COUNTRY_ALIASES: dict[str, str] = {
-    "британск": "GB", "british": "GB", "англия": "GB", "english": "GB", "uk": "GB", "брит": "GB",
+    # Sprint 19+ — added «английск» (Stan «английских авторов XIX века»
+    # caught no country signal because only «английский» = «English (lang)»
+    # was in the dict, not «английский (Brit. nation)»). Both senses map
+    # to GB in our corpus context (English-language ≈ British in SPGC).
+    "британск": "GB", "british": "GB", "англия": "GB", "english": "GB",
+    "uk": "GB", "брит": "GB", "английск": "GB",
     "американск": "US", "american": "US", "американ": "US", "usa": "US", "ame": "US", "amer": "US",
     "русск": "RU", "russian": "RU", "russia": "RU",
     "французск": "FR", "french": "FR", "франция": "FR",
@@ -1039,10 +1082,53 @@ def _find_top_metric(text: str) -> str | None:
 
 # ---------- main API ----------
 
+# Sprint 19+ — role-play preamble stripper. Stan 2026-05-19:
+#   «я готический сомелье, готовлю меню на ночь чтения. начнём с
+#    аперитива — какие архаизмы у Walpole в Castle of Otranto?»
+# The actual question is at the end; the role-play preamble adds 100+
+# chars of noise that confuses entity extractors. Detect «я <role>»
+# / «представь, что я <X>» / «as a <role>» openers + everything up to
+# an em-dash or final-sentence boundary, and feed only the trailing
+# substantive question to extractors.
+_ROLEPLAY_PREAMBLE = re.compile(
+    r"^\s*("
+    r"я\s+\w[\w\s,]{1,150}?[—\-:]\s*|"            # «я X — actual question»
+    r"я\s+\w[\w\s,]{1,80}?\.\s+\w[\w\s,]{1,80}?[—\-:]\s*|"  # «я X. Y — question»
+    r"представь(?:те)?,?\s+что\s+(?:я|ты)\s+[\w\s,]{1,80}?[—\-:.]\s*|"
+    r"as\s+a\s+\w[\w\s,]{1,80}?[—\-:,]\s*|"
+    r"pretend\s+(?:you\s+are|i\s+am)\s+[\w\s,]{1,80}?[—\-:,]\s*"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _strip_roleplay_preamble(text: str) -> str:
+    """Return text with the role-play preamble removed (if any).
+
+    Keeps the original text untouched at the call-site — caller
+    decides whether to use stripped (entity extractors) or original
+    (intent classification, raw_misc)."""
+    if not text:
+        return text
+    m = _ROLEPLAY_PREAMBLE.match(text)
+    if m:
+        stripped = text[m.end():].strip()
+        # Sanity: stripped should be a real question, not empty / 1-word
+        if len(stripped) >= 8:
+            return stripped
+    return text
+
+
 def extract(text: str) -> Entities:
     """Pull every entity from the query. Missing fields stay None."""
     if not text or not text.strip():
         return Entities()
+    # Sprint 19+ — strip role-play preamble before entity extraction.
+    # Intent classifier still sees the full text (keyword triggers like
+    # «архаизмы» often live in the substantive trailing question,
+    # which strip preserves; but if a trigger sits ONLY in the
+    # preamble, that's the user's fault for ambiguous phrasing).
+    text = _strip_roleplay_preamble(text)
 
     author_hits = _find_authors(text)
     primary_author = author_hits[0] if author_hits else (None, None)
