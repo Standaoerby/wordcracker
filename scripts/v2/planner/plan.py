@@ -1658,8 +1658,69 @@ PLAN_BUILDERS = {
     "book_similar":         _plan_book_similar,
     # Sprint 18 — ambiguous similarity router («в стиле X»)
     "similar_to":           _plan_similar_to,
+    # Sprint 20 — translate-followup escape hatch (honest clarify)
+    # filled after function defined below
     "out_of_scope":         _plan_out_of_scope,
 }
+
+
+def _plan_translate_word_list(e: Entities) -> QueryPlan:
+    """Sprint 20 — honest fallback for translate-followup.
+
+    Stan 2026-05-19 prod: «Возьми слова которые ты мне выдал и переведи
+    на русский» — user expects translation of the PRIOR turn's 96
+    affinity words. v3 rules-path can't pass tool results between turns
+    (prior assistant message is rendered Markdown, not structured), and
+    96 sequential enrich_word(Wiktionary 1.5s each) calls = ~150s, way
+    over the 90s chat timeout.
+
+    Routing to learning_words gave a *different* word list (CEFR band-
+    pass, not affinity-ranked) — Stan saw character names again,
+    feature wasn't useful.
+
+    Honest answer: surface a clarify with actionable advice — user
+    must list specific words explicitly («переведи tuppence, stitching,
+    embroidery»), 5-10 words fit in chat timeout. v4 LLM-planner sees
+    conversation context and could compose this DAG automatically;
+    that's the real fix, behind WC_LLM_PLANNER=on.
+    """
+    author = e.author_label or _regex_to_canonical(e.author_regex) \
+        if e.author_regex else None
+    raw = (e.raw_misc or {}).get("raw_text", "") or ""
+    return QueryPlan(
+        intent="translate_word_list", entities=e, steps=[],
+        needs_clarify=True,
+        clarify_question=(
+            "Хочешь перевод слов из предыдущего ответа? Я не могу "
+            "автоматически вытащить их из текста — нужно перечислить "
+            "слова явно.\n\n"
+            "Скопируй 5-10 слов из списка и спроси: "
+            "«переведи tuppence, stitching, embroidery, strychnine, "
+            "vavasour» — за этими словами есть данные по контексту "
+            "у Christie, я подготовлю переводы.\n\n"
+            "Почему так:\n"
+            "• в проде сейчас rules-based pipeline без передачи tool "
+            "results между ходами\n"
+            "• 96 enrich_word calls по Wiktionary занимают ~150 сек, "
+            "не влезают в 90с chat timeout\n"
+            "• `WC_LLM_PLANNER=on` (alpha v4) видит conversation и "
+            "может построить DAG автоматически — спроси админа когда "
+            "переключит"
+        ),
+        explain="translate_word_list — honest clarify (v3 cannot pass results between turns)",
+    )
+
+
+# Wire builder into the dispatch table now that the function exists.
+PLAN_BUILDERS["translate_word_list"] = _plan_translate_word_list
+
+
+def _regex_to_canonical(regex: str | None) -> str | None:
+    """`^Doyle, Arthur` → `Doyle, Arthur`. `^Wodehouse,` → `Wodehouse`."""
+    if not regex:
+        return None
+    s = regex.lstrip("^").rstrip(",").strip()
+    return s
 
 
 def _smart_clarify_recipe(e: Entities) -> str | None:

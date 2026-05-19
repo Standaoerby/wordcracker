@@ -92,8 +92,10 @@ class TranslateFollowupPattern(unittest.TestCase):
 
 
 class TranslateFollowupRouting(unittest.TestCase):
-    """When user asks to translate after a word-list turn, we switch
-    intent to `learning` so the re-run gives words+translations."""
+    """Sprint 20 retrospective — when user asks to translate after a
+    word-list turn, we DO NOT route to learning_words (different list,
+    misleading). Instead surface honest clarify via the new
+    `translate_word_list` intent."""
 
     def setUp(self):
         self.history = [
@@ -101,11 +103,11 @@ class TranslateFollowupRouting(unittest.TestCase):
             {"role": "assistant", "content": "blighter, dashed, ripping, …"},
         ]
 
-    def test_inherits_learning_intent(self):
+    def test_inherits_translate_word_list_intent(self):
         inferred = history_mod.infer_followup_intent(
             "переведи их на русский", self.history,
         )
-        self.assertEqual(inferred, "learning")
+        self.assertEqual(inferred, "translate_word_list")
 
     def test_takes_prior_author(self):
         e = ent_mod.extract("переведи их на русский")
@@ -120,7 +122,7 @@ class TranslateFollowupRouting(unittest.TestCase):
             "Возьми слова, которые ты мне выдал и переведи на русский",
             self.history,
         )
-        self.assertEqual(inferred, "learning")
+        self.assertEqual(inferred, "translate_word_list")
 
     def test_explicit_author_in_followup_wins(self):
         """User translates with explicit different author («у Кристи»);
@@ -133,7 +135,7 @@ class TranslateFollowupRouting(unittest.TestCase):
         self.assertEqual(merged.author_regex, "^Christie,")
         self.assertEqual((merged.raw_misc or {}).get("_translate_to"), "ru")
 
-    def test_full_plan_routes_to_learning_words(self):
+    def test_full_plan_surfaces_honest_clarify(self):
         q = "Возьми слова, которые ты мне выдал и переведи на русский"
         m = int_mod.classify(q)
         inferred = history_mod.infer_followup_intent(q, self.history)
@@ -141,11 +143,13 @@ class TranslateFollowupRouting(unittest.TestCase):
         e = ent_mod.extract(q)
         e = history_mod.merge_with_history(e, self.history, q)
         plan = plan_mod.build(intent_label, e)
-        self.assertFalse(plan.needs_clarify)
-        self.assertEqual(plan.steps[0].tool, "learning_words")
-        # scope from prior turn
-        self.assertEqual(plan.steps[0].args["scope"].get("author"),
-                          "^Doyle,")
+        # Honest clarify — no learning_words fake list
+        self.assertTrue(plan.needs_clarify)
+        self.assertEqual(plan.intent, "translate_word_list")
+        # Actionable advice in the clarify question
+        msg = plan.clarify_question or ""
+        self.assertIn("перечислить слова явно", msg)
+        self.assertIn("WC_LLM_PLANNER", msg)
 
 
 class TranslateFollowupNonWordlistPrior(unittest.TestCase):
@@ -178,6 +182,11 @@ class StanThreeScenariosE2E(unittest.TestCase):
         self.assertEqual(p.steps[0].args["author_regex"], "^Christie,")
 
     def test_query_2_translation_with_explicit_author(self):
+        """Sprint 20 retrospective: translate-followup now surfaces
+        honest clarify instead of routing to learning_words. The
+        explicit-author detection (Christie wins over prior Wodehouse)
+        still works — it goes into entities.author_regex and is shown
+        in the clarify message for context."""
         history = [
             {"role": "user", "content": "фирменные слова Wodehouse"},
             {"role": "assistant", "content": "blighter, dashed, ripping…"},
@@ -190,11 +199,11 @@ class StanThreeScenariosE2E(unittest.TestCase):
         e = ent_mod.extract(q)
         e = history_mod.merge_with_history(e, history, q)
         plan = plan_mod.build(intent_label, e)
-        self.assertEqual(plan.intent, "learning")
-        # Christie explicit in this turn wins over Wodehouse from prior
-        self.assertEqual(plan.steps[0].args["scope"].get("author"),
-                          "^Christie,")
-        self.assertFalse(plan.needs_clarify)
+        self.assertEqual(plan.intent, "translate_word_list")
+        self.assertTrue(plan.needs_clarify)
+        # The entity still has the explicit Christie reference for any
+        # future renderer to use
+        self.assertEqual(e.author_regex, "^Christie,")
 
     def test_query_3_take_words_and_translate(self):
         history = [
@@ -208,11 +217,10 @@ class StanThreeScenariosE2E(unittest.TestCase):
         e = ent_mod.extract(q)
         e = history_mod.merge_with_history(e, history, q)
         plan = plan_mod.build(intent_label, e)
-        self.assertEqual(plan.intent, "learning")
-        # No explicit author this turn → Wodehouse from prior
-        self.assertEqual(plan.steps[0].args["scope"].get("author"),
-                          "^Wodehouse,")
-        self.assertFalse(plan.needs_clarify)
+        self.assertEqual(plan.intent, "translate_word_list")
+        self.assertTrue(plan.needs_clarify)
+        # Wodehouse backfilled from prior, available in entity
+        self.assertEqual(e.author_regex, "^Wodehouse,")
 
 
 if __name__ == "__main__":

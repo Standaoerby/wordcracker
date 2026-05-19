@@ -326,13 +326,28 @@ def infer_followup_intent(text: str,
             if prior_intent.label not in ("clarify", ""):
                 return prior_intent.label
     # Sprint 20 — translation modifier («переведи на русский слова»).
-    # When the prior turn produced a word list (author_vocab /
-    # book_vocab / learning / word_etymology), re-route to `learning`
-    # intent — learning_words combines affinity-band + per-word
-    # enrich_word(target_lang='ru'), so the user gets the same words
-    # with translations in one re-run. The flag `_translate_to=ru`
-    # stamped by merge_with_history is informational; the intent
-    # switch itself does the work.
+    # Stan 2026-05-19 prod retrospective: previously we routed this to
+    # `learning` intent so learning_words would combine band-pass +
+    # per-word enrich_word translation. Two problems with that approach:
+    #
+    #   (a) learning_words returns a DIFFERENT word list (CEFR-banded,
+    #       not affinity-ranked). User asks «переведи те 96 слов» —
+    #       gets a fresh list of 30 different words. Mismatch.
+    #   (b) translating the SAME 96 words would mean re-running prior
+    #       affinity_by_author (cache hit, instant) + 96 enrich_word
+    #       calls × 1.5s each (Wiktionary) ≈ 150s — way past chat
+    #       timeout.
+    #
+    # Honest fix: when translate-followup detected AND prior turn was
+    # a word-list intent, return "translate_word_list" — a NEW intent
+    # whose plan-builder surfaces a smart clarify with actionable advice
+    # («перечисли явно слова которые хочешь перевести: tuppence,
+    # stitching, embroidery — 5-10 слов влезут в chat timeout»).
+    # No fake results, no different word list.
+    #
+    # Long-term: v4 LLM-planner sees the full conversation, can extract
+    # words from the prior assistant message, and emit a DAG with
+    # parallel enrich_word steps. v3 rules-path lacks that mechanism.
     if _is_translate_followup(text) and history:
         from scripts.v2.planner.intent import classify as _classify
         for msg in reversed(history):
@@ -342,7 +357,7 @@ def infer_followup_intent(text: str,
             if prior_intent.label in ("author_vocab", "book_vocab",
                                         "learning", "word_etymology",
                                         "author_top_words"):
-                return "learning"
+                return "translate_word_list"
             if prior_intent.label not in ("clarify", ""):
                 # Prior wasn't a word-list intent (e.g. readability,
                 # compare_authors). Keep the prior intent — the

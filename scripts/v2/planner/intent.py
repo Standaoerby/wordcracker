@@ -72,6 +72,12 @@ INTENTS = frozenset({
     # disambiguator routes to book_similar OR author_closest based on
     # which entity (book or author) was resolved.
     "similar_to",
+    # Sprint 20 — translate-followup escape hatch. When user asks
+    # «переведи эти слова» after a word-list turn, this intent surfaces
+    # an honest clarify with actionable advice (list the specific words
+    # explicitly — 5-10 fit in chat timeout). Real solution lives in
+    # v4 LLM planner that can extract words from conversation history.
+    "translate_word_list",
     "out_of_scope",
     "clarify",
 })
