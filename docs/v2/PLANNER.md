@@ -84,8 +84,11 @@
 | `author_lookup` 🆕v3.0 | "какие книги у X", "what books does X have" | author_metadata (sample_titles) |
 | `book_extremum` 🆕v3.0 | "самая длинная / популярная книга", "the longest book" | top_books_by_downloads(top=1) or clarify |
 | `corpus_extremum` 🆕v3.0 | "самый плодовитый / популярный автор" | top_authors_by(top=1) |
-| `topic_book_search` 🆕v3.0 | "найди книгу про X", "book about Y" | find_book_by_topic → hybrid_search dedupe |
+| `topic_book_search` 🆕v3.0 | "найди книгу про X", "book about Y" | find_book_by_topic (BGE rerank default) → hybrid_search dedupe |
 | `book_pub_year` 🆕v3.0 | "когда была опубликована X", "year of publication" | find_book → pub_year from OL enrichment |
+| `book_readability_compare` 🆕v3.0.1 | "что сложнее читать X или Y" | book_readability × N (multi-book) |
+| `book_similar` 🆕v3.0.1 | "похожие на X", "продолжение X", "что почитать после X", "similar to X" | find_book_by_topic (BGE rerank default) |
+| `similar_to` 🆕v3.0.2 | "в стиле X" (book/author ambiguous) | plan-time disambiguate: book → book_similar, author → author_closest |
 | `out_of_scope` | "напиши рассказ", "переведи стих", "что в новостях" | → refusal renderer |
 | `clarify` | LOW confidence на classifier | → clarify renderer |
 
@@ -93,12 +96,15 @@
 catch-alls so specific phrasings win:
 
 ```python
-"author_lookup":     160,  # «какие книги у X» — wins over author_metadata (55)
-"book_extremum":     158,  # singular superlative
-"corpus_extremum":   155,  # singular author superlative
-"vocab_passport":    150,  # (existing)
-"book_pub_year":     148,  # «когда вышла X» — wins over book_lookup (122)
-"topic_book_search": 145,  # «найди книгу про X» — wins over book_recommendation (118)
+"author_lookup":            160,  # «какие книги у X» — wins over author_metadata (55)
+"book_extremum":            158,  # singular superlative
+"corpus_extremum":          155,  # singular author superlative
+"book_readability_compare": 152,  # «сложнее читать X или Y» (Sprint 17)
+"vocab_passport":           150,  # (existing)
+"book_pub_year":            148,  # «когда вышла X» — wins over book_lookup (122)
+"book_similar":             146,  # «похожие на X», «что почитать после X» (Sprint 17)
+"topic_book_search":        145,  # «найди книгу про X» — wins over book_recommendation (118)
+"similar_to":               130,  # ambiguous «в стиле X» router (Sprint 18)
 ```
 
 ### 2.2 Rules engine

@@ -1,13 +1,21 @@
 # wordcracker v2.0 — Release Notes
 
 > **Subsequent releases:** see `gh_release_body_v2.X.md` per-tag bodies,
-> and `gh_release_body_v3.0.md` for the Sprint 16 / v3.0 release
-> (2026-05-19). Quick index:
+> and `gh_release_body_v3.X.md` for v3 releases. Quick index:
 >
 > - **v2.0** (this doc) — deterministic pipeline (2026-05-17)
 > - v2.0.1 → v2.10.1 — Sprints 6–15, 2026-05-17 → 2026-05-19
 > - **v3.0** — Sprint 16: open architecture (3 plugin surfaces +
 >   numeric audit + 5 new intents + 2 new tools). 422 unit tests.
+> - **v3.0.1** — Sprint 17: 7 commits — perf (classifier short-
+>   circuit + extended critic skip-list), readability-compare,
+>   ask_stream observability, book_similar follow-up trap, «что
+>   почитать после X», Ollama token logging, Round 8 P0 closures.
+>   471 unit tests.
+> - **v3.0.2** — Sprint 18: 2 commits — BGE rerank default for
+>   topical intents, retrieval source log, per_retriever 30→50,
+>   book-scope override for author_vocab, chat-hints CSS auto-hide.
+>   501 unit tests.
 
 ## TL;DR
 
