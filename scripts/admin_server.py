@@ -732,21 +732,57 @@ _FAILED_PAGE = r"""<!doctype html>
 <script>
 let RAW = [];
 let TOP = [];
+// v2.10: guarded refresh chain.
+// The old `setInterval(load, 15000)` created overlapping fetches when
+// /api/failed was slow (big ring buffer + lm-sensors subprocess) —
+// Stan reported the failed-log page freezing. Three fixes here:
+//   1. AbortController cancels the previous request if a new tick fires
+//      while it's still in flight (defensive — rarely needed once #2 is
+//      in place).
+//   2. Re-schedule with setTimeout INSIDE load()'s `.finally` instead
+//      of a blind setInterval. New tick can't start until previous
+//      one fully resolved.
+//   3. Pause polling when the page tab is hidden (visibilityState),
+//      resume on focus. Stops background-tab buildup.
+let inflightAbort = null;
+let pollTimer = null;
+let isLoading = false;
+const POLL_MS = 15000;
+
 async function load() {
+  if (isLoading) return;
+  isLoading = true;
+  if (inflightAbort) try { inflightAbort.abort(); } catch {}
+  inflightAbort = new AbortController();
   try {
-    const r = await fetch('/api/failed');
+    const r = await fetch('/api/failed', {
+      signal: inflightAbort.signal, cache: 'no-store',
+    });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
-    RAW = d.failed || [];
-    TOP = d.top_phrases || [];
+    RAW = (d.failed || []).slice(0, 100);
+    TOP = (d.top_phrases || []).slice(0, 30);
+    renderTop();
+    render();
   } catch (e) {
-    document.getElementById('body').innerHTML =
-      '<tr><td colspan=6 class=empty>ошибка загрузки: ' + e.message + '</td></tr>';
-    return;
+    if (e.name !== 'AbortError') {
+      document.getElementById('body').innerHTML =
+        '<tr><td colspan=6 class=empty>ошибка загрузки: ' +
+        (e.message || e.name) + '</td></tr>';
+    }
+  } finally {
+    isLoading = false;
+    schedule();
   }
-  renderTop();
-  render();
 }
+function schedule() {
+  if (pollTimer) clearTimeout(pollTimer);
+  if (document.visibilityState === 'hidden') return;  // pause in bg
+  pollTimer = setTimeout(load, POLL_MS);
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') load();
+});
 function renderTop() {
   if (!TOP.length) {
     document.getElementById('top-body').innerHTML =
@@ -800,7 +836,6 @@ function escapeHtml(s) {
 }
 document.getElementById('kind').addEventListener('change', render);
 load();
-setInterval(load, 15000);
 </script>
 </body>
 </html>

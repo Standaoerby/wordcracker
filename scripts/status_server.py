@@ -308,6 +308,7 @@ def _build_status(now_ts: float):
         },
         "host": {
             "uptime": uptime,
+            "thermals": _collect_thermals(),
         },
         "top_authors": top_authors(20),
         "health": _collect_health(ollama, chroma_bytes, build_running, du),
@@ -315,6 +316,107 @@ def _build_status(now_ts: float):
     _STATUS_CACHE["data"] = result
     _STATUS_CACHE["ts"] = now_ts
     return result
+
+
+def _collect_thermals() -> dict:
+    """Stan 2026-05-19: SOW running 69h+ uptime, worried about overheating
+    under continuous Ollama+ChromaDB load. Surface every available temp
+    sensor: kernel thermal_zone interface (CPU package + per-core),
+    lm-sensors if installed (k10temp / coretemp / nvme / drives), and
+    NVIDIA GPU temperatures via nvidia-smi.
+
+    All paths are best-effort — missing tools / read errors return empty
+    lists, never crash the status page."""
+    out: dict = {"zones": [], "gpu": [], "sensors": [], "max_c": None}
+
+    # 1. Kernel thermal_zone* (always present on Linux; gives CPU package,
+    #    integrated GPU, etc.). Each /sys/class/thermal/thermal_zoneN
+    #    has `type` (label) + `temp` (millicelsius).
+    try:
+        zone_dir = Path("/sys/class/thermal")
+        if zone_dir.exists():
+            for z in sorted(zone_dir.glob("thermal_zone*")):
+                try:
+                    label = (z / "type").read_text().strip()
+                    raw = (z / "temp").read_text().strip()
+                    millic = int(raw)
+                    out["zones"].append({
+                        "id": z.name,
+                        "label": label,
+                        "celsius": round(millic / 1000.0, 1),
+                    })
+                except (OSError, ValueError):
+                    continue
+    except Exception:
+        pass
+
+    # 2. NVIDIA GPU temperature via nvidia-smi (separate from VRAM block
+    #    above so we don't tangle with the existing ollama dict).
+    try:
+        proc = subprocess.run(
+            ["nvidia-smi",
+             "--query-gpu=index,name,temperature.gpu,temperature.memory",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if proc.returncode == 0:
+            for line in proc.stdout.strip().splitlines():
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) >= 3:
+                    try:
+                        gpu_temp = int(parts[2]) if parts[2] not in ("[N/A]", "N/A") else None
+                    except ValueError:
+                        gpu_temp = None
+                    try:
+                        mem_temp = int(parts[3]) if len(parts) >= 4 and parts[3] not in ("[N/A]", "N/A") else None
+                    except ValueError:
+                        mem_temp = None
+                    out["gpu"].append({
+                        "index": parts[0], "name": parts[1],
+                        "gpu_celsius": gpu_temp,
+                        "memory_celsius": mem_temp,
+                    })
+    except Exception:
+        pass
+
+    # 3. lm-sensors JSON if installed — gives drive temps, motherboard
+    #    sensors, etc that thermal_zone might miss.
+    try:
+        proc = subprocess.run(
+            ["sensors", "-j"], capture_output=True, text=True, timeout=5,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            data = json.loads(proc.stdout)
+            # data is {chip_label: {sensor_name: {tempN_input: float, ...}}}
+            # flatten to list[{chip, sensor, celsius}].
+            for chip, sensors in data.items():
+                if not isinstance(sensors, dict):
+                    continue
+                for sensor_name, vals in sensors.items():
+                    if not isinstance(vals, dict):
+                        continue
+                    for key, val in vals.items():
+                        if key.endswith("_input") and isinstance(val, (int, float)):
+                            out["sensors"].append({
+                                "chip": chip[:40],
+                                "sensor": sensor_name[:40],
+                                "celsius": round(float(val), 1),
+                            })
+                            break  # one reading per sensor is enough
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    except Exception:
+        pass
+
+    # Compute peak across all sources for at-a-glance dashboard.
+    all_temps = (
+        [z["celsius"] for z in out["zones"]]
+        + [g["gpu_celsius"] for g in out["gpu"] if g["gpu_celsius"]]
+        + [s["celsius"] for s in out["sensors"]]
+    )
+    if all_temps:
+        out["max_c"] = round(max(all_temps), 1)
+    return out
 
 
 def _check_http(url: str, timeout: float = 2.0) -> bool:
@@ -593,6 +695,38 @@ def render_html(s: dict) -> str:
         ("Contexts written", human_int(s["contexts_files"])),
     ], accent="#9013fe")
 
+    # v2.10: thermals dashboard — every available temperature sensor.
+    thermals = s["host"].get("thermals") or {}
+    thermal_rows = []
+    max_c = thermals.get("max_c")
+    if max_c is not None:
+        # Colour code peak: green <70, yellow 70-85, red >85.
+        if max_c < 70:
+            color = "#7ed321"
+        elif max_c < 85:
+            color = "#e0a04e"
+        else:
+            color = "#e05a5a"
+        thermal_rows.append(("Peak temperature",
+                             f"<b style='color:{color}'>{max_c} °C</b>"))
+    # CPU/SOC zones
+    for z in (thermals.get("zones") or [])[:8]:
+        thermal_rows.append((f"zone · {z['label']}", f"{z['celsius']} °C"))
+    # GPU temperatures
+    for g in thermals.get("gpu") or []:
+        line = f"{g.get('gpu_celsius', '?')} °C"
+        if g.get("memory_celsius"):
+            line += f" (VRAM {g['memory_celsius']} °C)"
+        thermal_rows.append((f"GPU#{g['index']} {g.get('name', '')[:30]}", line))
+    # lm-sensors entries — cap to 8 to keep card readable
+    for sn in (thermals.get("sensors") or [])[:8]:
+        thermal_rows.append((f"sensor · {sn['chip']} / {sn['sensor']}",
+                             f"{sn['celsius']} °C"))
+    if not thermal_rows:
+        thermal_rows.append(("(no sensors detected)",
+                              "install lm-sensors / mount /sys"))
+    therm_card = card("Thermals", thermal_rows, accent="#e0a04e")
+
     # authors_analyzed and top_authors stay in /api/status JSON for tooling, but
     # the dashboard no longer renders the two big tables that used to sit below
     # the cards.
@@ -633,6 +767,7 @@ def render_html(s: dict) -> str:
     {chroma_card}
     {ollama_card}
     {sys_card}
+    {therm_card}
   </div>
 
   <footer>Source: <code>~/wordcracker/scripts/status_server.py</code> · Server-on-Wheels · stdlib only</footer>
