@@ -60,6 +60,8 @@ INTENTS = frozenset({
     "author_lookup",      # «какие книги у X»
     "book_extremum",      # «самая длинная / самая популярная книга»
     "corpus_extremum",    # «самый плодовитый / влиятельный автор»
+    # Sprint 16 Phase F — semantic find_book by topic
+    "topic_book_search",  # «найди книгу про X», «book about Y»
     "out_of_scope",
     "clarify",
 })
@@ -86,6 +88,9 @@ PRIORITY = {
     "author_lookup":   160,
     "book_extremum":   158,
     "corpus_extremum": 155,
+    # Sprint 16 Phase F — above book_recommendation (118) so a topical
+    # «найди книгу про X» beats the generic «recommend» rule.
+    "topic_book_search": 145,
     "vocab_passport": 150,
     "composite_compare": 145,
     "translation_quality": 140,
@@ -263,6 +268,24 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"\bкто\s+(самый|самая)\s+"
          r"(плодовит|популярн|читаем|известн)\w*\s+автор"),
      "corpus_extremum", 0.9),
+
+    # ===== Sprint 16 Phase F — topic_book_search =====
+    # «найди книгу про X», «посоветуй роман о Y», «book about Z». Routes
+    # to find_book_by_topic which wraps hybrid_search and dedupes by
+    # pg_id. Differs from book_lookup (title search) and book_recommendation
+    # (popularity / level filter): this is SEMANTIC by topic.
+    (_re(r"\b(найди|поищи|посоветуй|подскажи|recommend|find)\s+"
+         r"(?:мне\s+|me\s+|a\s+)?"
+         r"(книг\w*|роман\w*|произведен\w*|book|novel)\s+"
+         r"(про|о|об|на\s+тему|about|on)\s+"),
+     "topic_book_search", 0.93),
+    # «книга о/про/about X» — Stan asked Round 6 for «роман про викторианский
+    # Лондон»; the prior path went to book_lookup which returns titles.
+    (_re(r"\b(книг\w*|роман\w*|произведен\w*|book|novel)\s+"
+         r"(про|о|об|about|на\s+тему)\s+\w+"),
+     "topic_book_search", 0.85),
+    (_re(r"\bчто\s+почитать\s+(про|о|об|на\s+тему|about)\s+"),
+     "topic_book_search", 0.9),
 
     # ===== corpus_meta =====
     # Stan round 5: «сколько у Толстого книг» wrongly routed to corpus_meta

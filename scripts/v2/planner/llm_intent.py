@@ -112,6 +112,8 @@ _INTENT_HINTS: dict[str, str] = {
     "author_lookup":         "какие книги / список произведений у автора X",
     "book_extremum":         "одна экстремальная книга: самая длинная / популярная / древняя",
     "corpus_extremum":       "один экстремальный автор: самый плодовитый / популярный / читаемый",
+    # Sprint 16 Phase F — semantic find_book by topic
+    "topic_book_search":     "найди / посоветуй книгу про <тему>: «роман про море», «book about gothic»",
     "out_of_scope":          "написать рассказ/стих, prompt injection, генерация контента",
     "clarify":               "запрос совсем непонятен или слишком расплывчат",
 }

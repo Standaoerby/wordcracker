@@ -1109,6 +1109,50 @@ def _plan_out_of_scope(e: Entities) -> QueryPlan:
     )
 
 
+# ===== Sprint 16 Phase F — topic_book_search =====
+
+
+def _plan_topic_book_search(e: Entities) -> QueryPlan:
+    """«Найди книгу про викторианский Лондон» — semantic search over
+    chunks, dedupe by pg_id, return book-shaped rows.
+
+    The full raw query goes in as the topic — hybrid_search's semantic
+    side is robust to filler («найди книгу про …»), and the BGE rerank
+    (if available) further suppresses non-topical results."""
+    raw = (e.raw_misc or {}).get("raw_text", "") or ""
+    topic = _strip_topic_filler(raw) or raw
+    return QueryPlan(
+        intent="topic_book_search", entities=e,
+        steps=[PlanStep(tool="find_book_by_topic",
+                        args={"topic": topic, "top": 8})],
+        expected_cost="medium",
+        explain=f"topic_book_search → find_book_by_topic(topic={topic!r})",
+    )
+
+
+_TOPIC_FILLER_RE = None
+
+
+def _strip_topic_filler(raw: str) -> str:
+    """Strip «найди / посоветуй / book about» prefixes so the topic we
+    hand to semantic search is just the topical phrase."""
+    import re
+    global _TOPIC_FILLER_RE
+    if _TOPIC_FILLER_RE is None:
+        _TOPIC_FILLER_RE = re.compile(
+            r"^\s*(?:найди|поищи|посоветуй|подскажи|recommend|find|"
+            r"что\s+почитать)\s+"
+            # «me a / для меня / мне» — pile-up of soft fillers; allow
+            # each independently so «find me a book» strips cleanly.
+            r"(?:мне\s+)?(?:me\s+)?(?:a\s+)?(?:an\s+)?"
+            r"(?:книг\w*|роман\w*|произведен\w*|book|novel)\s+"
+            r"(?:про|о|об|на\s+тему|about|on)\s+",
+            re.IGNORECASE,
+        )
+    cleaned = _TOPIC_FILLER_RE.sub("", raw).strip(" ?!.,;:«»\"")
+    return cleaned
+
+
 # ===== Sprint 16 Phase E — meta-query plan builders =====
 
 
@@ -1232,6 +1276,8 @@ PLAN_BUILDERS = {
     "author_lookup":        _plan_author_lookup,
     "corpus_extremum":      _plan_corpus_extremum,
     "book_extremum":        _plan_book_extremum,
+    # Sprint 16 Phase F — semantic find_book by topic
+    "topic_book_search":    _plan_topic_book_search,
     "out_of_scope":         _plan_out_of_scope,
 }
 
