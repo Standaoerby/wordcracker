@@ -173,16 +173,32 @@ def plan_query(text: str, *,
     if not text or not text.strip():
         return None
 
-    history_tail = ""
+    # Sprint 20+ — for follow-up queries the LLM needs to see BOTH the
+    # prior user message (intent context) AND the prior assistant
+    # response (the actual data the user is referring to with «эти
+    # слова» / «их» / «убери из них имена собственные»). Without the
+    # assistant body, the LLM can't know what to translate / filter /
+    # transform. Stan chose this routing on 2026-05-19.
+    prior_user = ""
+    prior_assistant = ""
     if history:
         for msg in reversed(history):
-            if isinstance(msg, dict) and msg.get("role") == "user":
+            role = msg.get("role") if isinstance(msg, dict) else None
+            if role == "assistant" and not prior_assistant:
+                content = (msg.get("content") or "").strip()
+                if content:
+                    prior_assistant = _summarize_assistant_for_planner(content)
+            if role == "user" and not prior_user:
                 cand = (msg.get("content") or "").strip()
                 if cand and cand != text.strip():
-                    history_tail = cand
+                    prior_user = cand
+            if prior_user and prior_assistant:
                 break
 
-    key = _cache_key(text, history_tail)
+    # Cache key includes a fingerprint of the prior turn so two different
+    # conversations with the same `text` don't collide.
+    history_fp = (prior_user[:120] + "|" + prior_assistant[:120]).lower()
+    key = _cache_key(text, history_fp)
     with _LOCK:
         cached = _CACHE.get(key)
         if cached is not None:
@@ -190,11 +206,16 @@ def plan_query(text: str, *,
             return PlannerResult(plan=cached, attempts=0, elapsed_s=0.0)
 
     user_msg = text.strip()
-    if history_tail:
-        user_msg = (
-            f"Previous user message (context): {history_tail[:200]}\n"
-            f"Current query: {user_msg}"
-        )
+    if prior_user or prior_assistant:
+        ctx_parts: list[str] = []
+        if prior_user:
+            ctx_parts.append(f"Previous user message: {prior_user[:300]}")
+        if prior_assistant:
+            ctx_parts.append(
+                f"Previous assistant response (truncated):\n"
+                f"{prior_assistant[:1800]}"
+            )
+        user_msg = "\n\n".join(ctx_parts) + f"\n\nCurrent query: {user_msg}"
 
     t_overall = time.perf_counter()
     last_validation: Optional[ValidationReport] = None
@@ -383,6 +404,57 @@ def _parse_json(text: str) -> Optional[dict]:
                 except json.JSONDecodeError:
                     return None
     return None
+
+
+def _summarize_assistant_for_planner(content: str, max_chars: int = 1800) -> str:
+    """Compact a prior assistant response for the v4 planner's prompt.
+
+    The renderer often produces multi-paragraph Markdown with a table.
+    The planner mainly needs:
+      - the table's column 1 (for word-list follow-ups)
+      - the first paragraph (intent context)
+      - some sample row data
+
+    Truncating naively at `max_chars` cuts mid-table and confuses the
+    LLM. Better: keep first 600 chars (header + intro), then the first
+    ~50 table rows column-1, then the closing paragraph if any. Skip
+    huge data columns the LLM doesn't need.
+    """
+    if not content:
+        return ""
+    if len(content) <= max_chars:
+        return content
+    lines = content.splitlines()
+    # Find first markdown table row
+    table_start = None
+    for i, line in enumerate(lines):
+        if "|" in line and line.count("|") >= 2:
+            table_start = i
+            break
+    if table_start is None:
+        # No table — just take the head
+        return content[:max_chars].rstrip() + "\n…[truncated]"
+    head = "\n".join(lines[:table_start]).strip()
+    # Compress table to column 1 only, max 50 rows
+    table_rows: list[str] = []
+    for line in lines[table_start:table_start + 60]:
+        if "|" not in line:
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        # Drop leading/trailing empty cells from `| x | y |` split
+        parts = [p for p in parts if p]
+        if not parts:
+            continue
+        # Separator rows like `---|---|---`
+        if all(set(p) <= set("-: ") for p in parts):
+            continue
+        first = parts[0]
+        table_rows.append(f"| {first} |")
+    body = "\n".join(table_rows) if table_rows else ""
+    summary = f"{head[:600]}\n\n{body}".strip()
+    if len(summary) > max_chars:
+        summary = summary[:max_chars].rstrip() + "\n…[truncated]"
+    return summary
 
 
 def _schema_hints_for_failed_tools(plan, report) -> str:

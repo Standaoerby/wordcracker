@@ -505,57 +505,110 @@ def ask(
     {"answer", "tool_calls", "iterations", "model", "elapsed_sec", "intent"}
     """
     t0 = time.perf_counter()
-    intent = int_mod.classify(question)
-    entities = ent_mod.extract(question)
-    # Multi-turn backfill: «приведи примеры такого», «эти слова», «у этого
-    # автора» reuse the last turn's author/book/word so the planner doesn't
-    # clarify on every follow-up.
-    entities = history_mod.merge_with_history(entities, history, question)
-    # Follow-up intent inference: if the user's phrasing implies a specific
-    # intent (e.g. «приведи примеры» → word_contexts), override clarify so
-    # the planner can route to a real tool. Only kicks in for clarify-class
-    # responses so explicit intents still win.
-    if intent.label == "clarify":
-        inferred = history_mod.infer_followup_intent(question, history)
-        if inferred:
-            intent = int_mod.IntentMatch(label=inferred, confidence=0.75,
-                                         matched_pattern="followup-inferred")
-    # LLM fallback (Sprint 13). Stan's 2026-05-18 demon round 2 hit 50%
-    # clarify on free-form Russian; rule-based regex can never close the
-    # gap with human phrasing breadth. Ask the local LLM to classify into
-    # the 35-label taxonomy when rules + history both miss.
-    #
-    # Sprint 14 round 2 escalation: not just intent, also entities. The
-    # planner often classifies correctly but plan-builder clarifies on
-    # missing author / book / word that regex didn't extract («у Шекспира»,
-    # «а у пушкина», «теперь у Диккенса»). One LLM call now returns both,
-    # and we merge the LLM-extracted entities INTO the regex-extracted
-    # ones (regex wins where it found something — LLM only fills gaps).
+
+    # Sprint 20+ — v4 LLM planner takes over for follow-up turns when
+    # the feature flag is on. Stan 2026-05-19 («отдать всё v4 для
+    # post-followup queries»): rules-based followup logic accumulated
+    # 5 different reroute branches (translate / propn-remove / rerank /
+    # expand / context-swap), each with whitelist gaps and flag-contract
+    # gaps documented in the pipeline trace. LLM sees the prior user
+    # message + prior assistant response + tool catalog and composes
+    # the right DAG — including enrich_word chains for translation,
+    # stricter affinity re-runs for «убери имена», cross-tool combos.
+    # When flag is off, the rules path continues exactly as before.
+    v4_followup_used = False
+    v4_followup_report = None
+    if history and history_mod._looks_like_followup(question):
+        try:
+            from scripts.v2.planner import llm_planner as _llmp
+        except ImportError:
+            _llmp = None
+        if _llmp is not None and _llmp.LLM_PLANNER_ENABLED:
+            try:
+                pres = _llmp.plan_query(question, history=history)
+            except Exception:
+                log.exception("v4 LLM planner crashed on followup")
+                pres = None
+            if pres is not None and pres.ok and pres.plan and pres.plan.steps:
+                v4_followup_used = True
+                v4_followup_report = pres
+                rr_v4 = router_mod.execute_spec(pres.plan)
+                # Build stand-in intent + entities so downstream
+                # observability + render code paths keep working.
+                intent = int_mod.IntentMatch(
+                    label=pres.plan.intent_hint or "v4_followup",
+                    confidence=0.9,
+                    matched_pattern="v4-followup-llm",
+                )
+                entities = ent_mod.Entities()
+                plan = rr_v4.plan
+                rr = rr_v4
+            elif pres is not None and pres.clarify:
+                # LLM produced an honest clarify after seeing the
+                # conversation — better than rules clarify.
+                intent = int_mod.IntentMatch(
+                    label="clarify", confidence=0.5,
+                    matched_pattern="v4-followup-clarify",
+                )
+                entities = ent_mod.Entities()
+                plan = plan_mod.QueryPlan(
+                    intent="clarify", entities=entities, steps=[],
+                    needs_clarify=True,
+                    clarify_question=pres.clarify,
+                    explain="v4 LLM planner clarify on followup",
+                )
+                v4_followup_report = pres
+
     llm_used_for = None
-    if intent.label == "clarify":
-        try:
-            from scripts.v2.planner import llm_intent
-            full = llm_intent.classify_and_extract(question, history)
-            if full is not None:
-                intent = int_mod.IntentMatch(label=full["intent"],
-                                              confidence=0.7,
-                                              matched_pattern="llm-fallback-full")
-                _merge_llm_entities(entities, full)
-                llm_used_for = "intent+entities"
-        except Exception:
-            pass
-    elif _needs_entity_help(intent.label, entities):
-        # Intent classified by rules but entities missing — ask LLM only
-        # for entities, keep the rule's intent.
-        try:
-            from scripts.v2.planner import llm_intent
-            full = llm_intent.classify_and_extract(question, history)
-            if full is not None:
-                _merge_llm_entities(entities, full)
-                llm_used_for = "entities-only"
-        except Exception:
-            pass
-    plan = plan_mod.build(intent.label, entities)
+    if v4_followup_used or (v4_followup_report is not None
+                              and v4_followup_report.clarify is not None):
+        # v4 followup path already set intent / entities / plan above.
+        # Skip the rules-based pipeline entirely for this turn.
+        pass
+    else:
+        intent = int_mod.classify(question)
+        entities = ent_mod.extract(question)
+        # Multi-turn backfill: «приведи примеры такого», «эти слова», «у этого
+        # автора» reuse the last turn's author/book/word so the planner doesn't
+        # clarify on every follow-up.
+        entities = history_mod.merge_with_history(entities, history, question)
+        # Follow-up intent inference: if the user's phrasing implies a specific
+        # intent (e.g. «приведи примеры» → word_contexts), override clarify so
+        # the planner can route to a real tool. Only kicks in for clarify-class
+        # responses so explicit intents still win.
+        if intent.label == "clarify":
+            inferred = history_mod.infer_followup_intent(question, history)
+            if inferred:
+                intent = int_mod.IntentMatch(label=inferred, confidence=0.75,
+                                             matched_pattern="followup-inferred")
+        # LLM fallback (Sprint 13). Stan's 2026-05-18 demon round 2 hit 50%
+        # clarify on free-form Russian; rule-based regex can never close the
+        # gap with human phrasing breadth. Ask the local LLM to classify into
+        # the 35-label taxonomy when rules + history both miss.
+        #
+        # Sprint 14 round 2 escalation: not just intent, also entities.
+        if intent.label == "clarify":
+            try:
+                from scripts.v2.planner import llm_intent
+                full = llm_intent.classify_and_extract(question, history)
+                if full is not None:
+                    intent = int_mod.IntentMatch(label=full["intent"],
+                                                  confidence=0.7,
+                                                  matched_pattern="llm-fallback-full")
+                    _merge_llm_entities(entities, full)
+                    llm_used_for = "intent+entities"
+            except Exception:
+                pass
+        elif _needs_entity_help(intent.label, entities):
+            try:
+                from scripts.v2.planner import llm_intent
+                full = llm_intent.classify_and_extract(question, history)
+                if full is not None:
+                    _merge_llm_entities(entities, full)
+                    llm_used_for = "entities-only"
+            except Exception:
+                pass
+        plan = plan_mod.build(intent.label, entities)
 
     # v4 LLM planner — when rules-based path produces clarify AND the
     # planner feature flag is on, try generating a DAG plan with the
@@ -655,8 +708,9 @@ def ask(
             "intent_confidence": intent.confidence,
         }
 
-    # Skip router if v4 LLM planner already produced results.
-    if not v4_planner_used:
+    # Skip router if EITHER v4 path already produced results (followup
+    # path runs early; main v4 path runs after rules clarify).
+    if not v4_planner_used and not v4_followup_used:
         rr = router_mod.execute(plan)
 
     render_meta: dict = {}
@@ -774,16 +828,85 @@ def ask_stream(
     """SSE events compatible with v1 plus v2-specific intent/plan/clarify."""
     yield {"event": "start"}
     t0 = time.perf_counter()
-    intent = int_mod.classify(question)
-    entities = ent_mod.extract(question)
-    entities = history_mod.merge_with_history(entities, history, question)
-    if intent.label == "clarify":
-        inferred = history_mod.infer_followup_intent(question, history)
-        if inferred:
-            intent = int_mod.IntentMatch(label=inferred, confidence=0.75,
-                                         matched_pattern="followup-inferred")
-    # LLM fallback for free-form phrasings (Sprint 13/14).
-    if intent.label == "clarify":
+
+    # Sprint 20+ — v4 LLM planner takes the followup path. See `ask()`
+    # for the architectural decision. Mirrors the same gating logic;
+    # only difference is event emission order.
+    v4_followup_used = False
+    v4_followup_report = None
+    if history and history_mod._looks_like_followup(question):
+        try:
+            from scripts.v2.planner import llm_planner as _llmp
+        except ImportError:
+            _llmp = None
+        if _llmp is not None and _llmp.LLM_PLANNER_ENABLED:
+            try:
+                pres = _llmp.plan_query(question, history=history)
+            except Exception:
+                log.exception("v4 LLM planner crashed on followup (stream)")
+                pres = None
+            if pres is not None and pres.ok and pres.plan and pres.plan.steps:
+                v4_followup_used = True
+                v4_followup_report = pres
+                rr_v4 = router_mod.execute_spec(pres.plan)
+                intent = int_mod.IntentMatch(
+                    label=pres.plan.intent_hint or "v4_followup",
+                    confidence=0.9,
+                    matched_pattern="v4-followup-llm",
+                )
+                entities = ent_mod.Entities()
+                plan = rr_v4.plan
+                results = rr_v4.results
+                # Emit v4_plan event + replay step events
+                yield {"event": "intent", "label": intent.label,
+                       "confidence": intent.confidence,
+                       "explain": plan.explain, "via": "v4_followup"}
+                yield {"event": "v4_plan",
+                       "intent_hint": pres.plan.intent_hint or "v4_followup",
+                       "rationale": pres.plan.rationale,
+                       "steps": [{"id": s.id, "tool": s.tool,
+                                   "args": s.args, "needs": s.needs}
+                                  for s in pres.plan.steps],
+                       "render_hint": pres.plan.render_hint,
+                       "elapsed_s": round(pres.elapsed_s, 2),
+                       "attempts": pres.attempts}
+                for ev in rr_v4.events:
+                    if ev.kind == "step_start":
+                        yield {"event": "tool_call", "name": ev.tool,
+                               "args": ev.args}
+                    elif ev.kind == "step_done" and ev.result is not None:
+                        tr = ev.result
+                        yield {"event": "tool_result", "name": ev.tool,
+                               "ms": tr.runtime_ms, "ok": tr.ok,
+                               "summary": tr.to_llm_string(max_chars=240)}
+            elif pres is not None and pres.clarify:
+                v4_followup_report = pres
+                intent = int_mod.IntentMatch(
+                    label="clarify", confidence=0.5,
+                    matched_pattern="v4-followup-clarify",
+                )
+                entities = ent_mod.Entities()
+                plan = plan_mod.QueryPlan(
+                    intent="clarify", entities=entities, steps=[],
+                    needs_clarify=True,
+                    clarify_question=pres.clarify,
+                    explain="v4 LLM planner clarify on followup (stream)",
+                )
+
+    if not v4_followup_used and (v4_followup_report is None
+                                  or v4_followup_report.clarify is None):
+        intent = int_mod.classify(question)
+        entities = ent_mod.extract(question)
+        entities = history_mod.merge_with_history(entities, history, question)
+        if intent.label == "clarify":
+            inferred = history_mod.infer_followup_intent(question, history)
+            if inferred:
+                intent = int_mod.IntentMatch(label=inferred, confidence=0.75,
+                                             matched_pattern="followup-inferred")
+    # LLM fallback for free-form phrasings (Sprint 13/14). Skip when v4
+    # followup already produced something.
+    if (not v4_followup_used and v4_followup_report is None
+            and intent.label == "clarify"):
         try:
             from scripts.v2.planner import llm_intent
             full = llm_intent.classify_and_extract(question, history)
@@ -802,10 +925,14 @@ def ask_stream(
                 _merge_llm_entities(entities, full)
         except Exception:
             pass
-    plan = plan_mod.build(intent.label, entities)
+    if not v4_followup_used and (v4_followup_report is None
+                                  or v4_followup_report.clarify is None):
+        plan = plan_mod.build(intent.label, entities)
 
-    yield {"event": "intent", "label": intent.label,
-           "confidence": intent.confidence, "explain": plan.explain}
+    if not v4_followup_used:
+        # Don't double-emit «intent» when v4 followup already streamed it
+        yield {"event": "intent", "label": intent.label,
+               "confidence": intent.confidence, "explain": plan.explain}
 
     # v4 LLM planner — mirror the rag_v2.ask() wiring for the SSE path.
     # Stan 2026-05-19 discovered v4 wasn't firing on prod because chat-
@@ -913,9 +1040,9 @@ def ask_stream(
                "elapsed_sec": round(time.perf_counter() - t0, 2)}
         return
 
-    # Skip the v3 step-execution loop when v4 LLM planner already ran
+    # Skip the v3 step-execution loop when EITHER v4 path already ran
     # the DAG — `results` is already populated above.
-    if not v4_planner_used:
+    if not v4_planner_used and not v4_followup_used:
         yield {"event": "plan", "steps": [{"tool": s.tool, "args": s.args}
                                           for s in plan.steps]}
 

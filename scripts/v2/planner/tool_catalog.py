@@ -244,6 +244,64 @@ def few_shot_examples() -> list[dict]:
                 "expected_cost": "medium",
             },
         },
+        # --- Followup: translate prior word list ---
+        # Sprint 20+ — Stan chose v4 routing for all followups.
+        # The «Previous assistant response» block shows the table; LLM
+        # extracts column 1 and emits enrich_word steps per word.
+        {
+            "query": ("Previous user message: топ 100 любимых слов "
+                       "Конан Дойля\n\n"
+                       "Previous assistant response (truncated):\n"
+                       "Вот топ 100 слов Конан Дойля:\n"
+                       "| Word | Affinity |\n"
+                       "| blighter | 850 |\n"
+                       "| dashed | 720 |\n"
+                       "| ripping | 540 |\n"
+                       "| hullo | 410 |\n\n"
+                       "Current query: возьми эти слова и переведи на русский"),
+            "plan": {
+                "intent_hint": "translate_prior_words",
+                "rationale": ("user wants RU translations of the 4 words "
+                              "in the prior table; enrich_word per word"),
+                "steps": [
+                    {"id": "s1", "tool": "enrich_word",
+                     "args": {"word": "blighter", "target_lang": "ru"}},
+                    {"id": "s2", "tool": "enrich_word",
+                     "args": {"word": "dashed", "target_lang": "ru"}},
+                    {"id": "s3", "tool": "enrich_word",
+                     "args": {"word": "ripping", "target_lang": "ru"}},
+                    {"id": "s4", "tool": "enrich_word",
+                     "args": {"word": "hullo", "target_lang": "ru"}},
+                ],
+                "render_hint": "translation_table",
+                "expected_cost": "heavy",
+            },
+        },
+        # --- Followup: re-run with stricter proper-noun filter ---
+        {
+            "query": ("Previous user message: фирменные слова Дойла\n\n"
+                       "Previous assistant response (truncated):\n"
+                       "| Word | Affinity |\n"
+                       "| holmes | 320 |\n"
+                       "| watson | 280 |\n"
+                       "| blighter | 65 |\n\n"
+                       "Current query: убери из них имена собственные"),
+            "plan": {
+                "intent_hint": "author_vocab_strict_propn",
+                "rationale": ("re-run prior affinity with stricter min_corpus_count "
+                              "to drop character names that slipped through"),
+                "steps": [
+                    {"id": "s1", "tool": "resolve_author_name",
+                     "args": {"query": "Дойл"}},
+                    {"id": "s2", "tool": "affinity_by_author",
+                     "args": {"author_regex": "$s1.author_regex",
+                              "top": 30, "min_corpus_count": 5000},
+                     "needs": ["s1"]},
+                ],
+                "render_hint": "signature_words_table",
+                "expected_cost": "medium",
+            },
+        },
     ]
 
 
