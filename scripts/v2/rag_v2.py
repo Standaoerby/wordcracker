@@ -26,6 +26,7 @@ from typing import Iterator
 import requests
 
 from scripts.v2 import critic as critic_mod
+from scripts.v2 import numeric_audit as audit_mod
 from scripts.v2 import observability as obs_mod
 from scripts.v2.planner import entities as ent_mod
 from scripts.v2.planner import history as history_mod
@@ -59,6 +60,7 @@ RENDER_PROMPT = """Тебя зовут {name}. Ты — литературный
 8. Если coverage низкое или есть warning'и — упомяни это.
 9. **Если в payload есть поле `render_instructions` — это ПРИОРИТЕТНЫЕ правила, всегда им следуй.**
 10. **Если в data есть `_bio_source: "wordcracker hardcoded"` — bio years подтверждены, не сомневайся в них.**
+11. **Числа и счёты — буква-в-букву из tool data.** Если ответ говорит «top 10» — в списке ровно 10 элементов из data, не 8 и не 12. Если data показывает 47 — пиши «47», не «около 50» и не «больше 40». Округление в перифразе допустимо только если оно явное («примерно 50, точнее 47»). Никаких чисел из «знания мира» — если число не в data, его нет в ответе. Это включает количество книг, частоты, проценты, годы рождения/смерти, рейтинги, дистанции.
 
 Tool trace тебе передан как JSON. Каждая запись — {{tool, query, data, warnings, coverage}}. Возьми оттуда factual content. **Ничего вне этих данных.**"""
 
@@ -509,6 +511,13 @@ def ask(
     )
     answer = critic_mod.annotate_answer(answer, verdict)
 
+    # Sprint 16 Phase D — programmatic numeric audit. Runs after the
+    # critic LLM pass so its footer attaches to the same answer body.
+    audit_report = audit_mod.audit_numbers(
+        answer, critic_summary_records, intent=intent.label,
+    )
+    answer = audit_mod.annotate_with_audit(answer, audit_report)
+
     tool_calls = [
         {"name": r.tool, "args": r.query,
          "result_summary": r.to_llm_string(max_chars=240),
@@ -529,6 +538,7 @@ def ask(
         "total_elapsed_ms": elapsed_ms,
         "critic_verified": verdict.verified,
         "critic_unsupported_n": len(verdict.unsupported_claims),
+        "numeric_audit_mismatches": len(audit_report.mismatches),
         "answer_truncated": answer[:300],
     })
     return {
@@ -650,10 +660,17 @@ def ask_stream(
                                 intent=intent.label, ollama_host=ollama_host)
     answer = critic_mod.annotate_answer(answer, verdict)
 
+    # Sprint 16 Phase D — numeric audit (programmatic; no LLM call).
+    audit_report = audit_mod.audit_numbers(
+        answer, critic_records, intent=intent.label,
+    )
+    answer = audit_mod.annotate_with_audit(answer, audit_report)
+
     yield {"event": "critic",
            "verified": verdict.verified,
            "issues_flagged": verdict.has_issues(),
            "unsupported_claims_n": len(verdict.unsupported_claims),
+           "numeric_audit_mismatches": len(audit_report.mismatches),
            "summary": verdict.summary}
     yield {"event": "answer", "text": answer}
     yield {"event": "done", "tool_calls":
