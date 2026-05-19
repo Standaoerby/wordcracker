@@ -695,6 +695,26 @@ RULES: list[tuple[Pattern[str], str, float]] = [
          r"эмоции?\s+(в|of)\s+[\"'«“]?[A-ZА-Яa-zа-я]"),
      "book_emotion", 0.93),
     (_re(r"\bsentiment\s+(of|in)\s+"), "book_emotion", 0.9),
+    # Sprint 19+ — «эмоции и настроение в X», «настроение в X», «mood
+    # in X», «тон / тональность книги». «эмоции» с inserted conjunction
+    # («эмоции и настроение в», «эмоции, тон и атмосфера в») was missed
+    # by the strict «эмоции\s+в» rule. Allow up to ~40 chars of fill
+    # between the emotion-keyword and «в/of».
+    (_re(r"\b(эмоции?|настроени\w*|тон|тональност\w*|атмосфер\w*)\b"
+         r"[\w\s,]{0,40}\b(в|of|in)\s+[\"'«“]?[A-Za-zА-Яа-яЁё]"),
+     "book_emotion", 0.91),
+    (_re(r"\bmood\s+(in|of)\s+[\"'«“]?[A-Z]"),
+     "book_emotion", 0.9),
+    # Bare genitive: «тональность Frankenstein» / «атмосфера Hamlet»
+    # — Russian doesn't require a preposition for «mood of X» construct.
+    # Require capital letter after (proper noun) to avoid catching «тон
+    # героя» / «атмосфера комнаты» general-noun phrases.
+    # `(?-i:...)` disables IGNORECASE for the capital-letter check
+    # — _re() applies IGNORECASE globally, which would otherwise
+    # match «к» (lowercase) too and false-positive «атмосфера комнаты».
+    (_re(r"\b(тональност\w+|атмосфер\w+|настроени\w+)\s+"
+         r"[\"'«“]?(?-i:[A-ZА-ЯЁ])"),
+     "book_emotion", 0.85),
 
     # ===== book_archaic =====
     # Bare «архаизм*» used to fire here for any mention — including the
@@ -965,7 +985,12 @@ _SORTED_RULES: list[tuple] = sorted(
 def classify(text: str) -> IntentMatch:
     if not text or not text.strip():
         return IntentMatch("clarify", 0.0)
-    s = text.strip().lower()
+    # Sprint 19+ — preserve original case. Rules carry re.IGNORECASE
+    # by default via _re() helper, so case-insensitive matching still
+    # works. Lowercase-first broke inline `(?-i:[A-Z])` guards added
+    # for proper-noun discrimination («тональность Frankenstein» book
+    # vs «тональность голоса» general noun).
+    s = text.strip()
     best: IntentMatch | None = None
     best_pri: int | None = None
     for pat, intent, conf in _SORTED_RULES:
