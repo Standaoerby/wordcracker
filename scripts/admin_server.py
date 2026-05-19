@@ -29,12 +29,21 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import threading
 import time
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+# v2.10.1: admin shares the gutenberg-lab container's python process with
+# chat_server, but unlike chat_server it didn't add the repo root to
+# sys.path. So `from scripts.v2.observability import recent_failures` in
+# the /api/failed handler was raising ModuleNotFoundError → 500. Add the
+# same two entries chat_server uses so `scripts.v2.*` is importable.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 RAW_DIR     = Path("/workspace/raw_text")
 UPLOAD_ROOT = Path("/workspace/uploads")
@@ -885,13 +894,32 @@ class Handler(BaseHTTPRequestHandler):
         # eyeballs.
         if self.path in ("/api/failed", "/api/failed_queries"):
             try:
-                from scripts.v2.observability import recent_failures, top_failed_phrases
+                # _combined variants read in-memory ring buffer + on-disk
+                # JSONL. Admin runs as a separate `docker compose exec`
+                # python process from chat_server, so it sees an empty
+                # ring; on-disk reads pick up chat's logged failures.
+                from scripts.v2.observability import (
+                    recent_failures_combined, top_failed_phrases_combined,
+                )
                 return self._json(200, {
-                    "failed": recent_failures(limit=100),
-                    "top_phrases": top_failed_phrases(top_n=15),
+                    "failed": recent_failures_combined(limit=100),
+                    "top_phrases": top_failed_phrases_combined(top_n=15),
+                })
+            except ImportError as e:
+                return self._json(503, {
+                    "error": "observability module not available",
+                    "detail": str(e),
+                    "hint": ("admin_server didn't add repo root to "
+                             "sys.path — check imports"),
                 })
             except Exception as e:
-                return self._json(500, {"error": str(e)})
+                import traceback
+                return self._json(500, {
+                    "error": "failed-query log unavailable",
+                    "type": type(e).__name__,
+                    "detail": str(e),
+                    "trace": traceback.format_exc().splitlines()[-5:],
+                })
         if self.path == "/failed":
             return self._html(_render_failed_page())
         return self._html(PAGE)

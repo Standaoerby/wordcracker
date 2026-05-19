@@ -132,21 +132,96 @@ def recent_failures(limit: int = 50) -> list[dict]:
     return list(reversed(fails))[:limit]
 
 
-def top_failed_phrases(top_n: int = 10) -> list[dict]:
-    """Sprint 14: aggregate failed queries by normalized text. Returns
-    [{phrase, count, kinds, latest_intent}] sorted by count desc.
+def _read_jsonl_failures(days_back: int = 2,
+                          hard_limit: int = 2000) -> list[dict]:
+    """Read failure records from on-disk JSONL logs.
 
-    Normalization: lowercase + collapse whitespace. Same phrasing typed
-    in different cases / whitespaces collapses into one bucket. This is
-    the «top 10 things to fix» list for Stan's regex synthesis pass."""
+    v2.10.1: admin_server runs in a separate Python process from
+    chat_server even though both live inside gutenberg-lab. The
+    in-memory `_ring` only sees events that hit ITS process. The
+    JSONL log on disk is shared — admin can read it to surface
+    failures recorded by chat.
+
+    Walks the most recent `days_back` JSONL files (today + yesterday by
+    default), parses each line, keeps only `is_failure=True`. Returns
+    newest-first, capped at `hard_limit` to bound memory."""
+    files: list[Path] = []
+    if not LOG_DIR.exists():
+        return []
+    from datetime import timedelta
+    now = datetime.now(timezone.utc)
+    for d in range(days_back):
+        day = (now - timedelta(days=d)).strftime("%Y-%m-%d")
+        p = LOG_DIR / f"queries-{day}.jsonl"
+        if p.exists():
+            files.append(p)
+    rows: list[dict] = []
+    for p in files:
+        try:
+            # Read whole file then iterate — these files are append-only
+            # and small (one line per chat request).
+            with open(p, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        r = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if r.get("is_failure"):
+                        rows.append(r)
+        except OSError as e:
+            log.warning("read_jsonl_failures failed for %s: %s", p, e)
+    # Newest first by ts (ISO strings sort correctly)
+    rows.sort(key=lambda r: r.get("ts", ""), reverse=True)
+    return rows[:hard_limit]
+
+
+def recent_failures_combined(limit: int = 50) -> list[dict]:
+    """Union of in-memory ring buffer + on-disk JSONL. For admin /failed
+    page that reads from a separate process and would otherwise miss the
+    chat process's ring buffer."""
+    ring = recent_failures(limit=limit)
+    disk = _read_jsonl_failures(days_back=2, hard_limit=limit * 4)
+    seen = set()
+    out: list[dict] = []
+    for r in ring + disk:
+        rid = r.get("request_id") or (r.get("ts", "") + r.get("question_truncated", ""))
+        if rid in seen:
+            continue
+        seen.add(rid)
+        out.append(r)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def top_failed_phrases_combined(top_n: int = 10) -> list[dict]:
+    """Same as top_failed_phrases but reads from both in-memory ring
+    AND on-disk JSONL. For admin server which runs as a separate
+    process and would otherwise see an empty ring."""
+    return _aggregate_phrases(
+        recent_failures(limit=10_000)
+        + _read_jsonl_failures(days_back=3, hard_limit=10_000),
+        top_n=top_n,
+    )
+
+
+def _aggregate_phrases(fails: list[dict], top_n: int = 10) -> list[dict]:
+    """Bucket failures by normalized phrase. Used by both the in-memory
+    and combined variants."""
     import re
-    with _ring_lock:
-        records = list(_ring)
-    fails = [r for r in records if r.get("is_failure")]
     if not fails:
         return []
     buckets: dict[str, dict] = {}
+    seen_ids: set[str] = set()
     for r in fails:
+        rid = r.get("request_id") or ""
+        if rid and rid in seen_ids:
+            continue
+        if rid:
+            seen_ids.add(rid)
         raw = (r.get("question_truncated") or "").strip()
         if not raw:
             continue
@@ -175,6 +250,18 @@ def top_failed_phrases(top_n: int = 10) -> list[dict]:
         })
     rows.sort(key=lambda r: (-r["count"], r["latest_ts"] or ""))
     return rows[:top_n]
+
+
+def top_failed_phrases(top_n: int = 10) -> list[dict]:
+    """Sprint 14: aggregate failed queries by normalized text. Returns
+    [{phrase, count, kinds, latest_intent}] sorted by count desc.
+
+    In-memory-ring only. For the admin server (separate process), use
+    `top_failed_phrases_combined` which also reads on-disk JSONL."""
+    with _ring_lock:
+        records = list(_ring)
+    fails = [r for r in records if r.get("is_failure")]
+    return _aggregate_phrases(fails, top_n=top_n)
 
 
 def _reset() -> None:

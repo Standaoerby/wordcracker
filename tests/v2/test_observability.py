@@ -189,5 +189,71 @@ class RecentFailures(unittest.TestCase):
         self.assertEqual(len(fails), 10)
 
 
+class CombinedReadFromDisk(unittest.TestCase):
+    """v2.10.1: admin runs in a separate process from chat. The in-memory
+    ring is per-process; on-disk JSONL is shared. _combined helpers fuse
+    both sources so admin's /failed dashboard shows chat's failures."""
+
+    def setUp(self):
+        obs._reset()
+        self.tmp = tempfile.TemporaryDirectory()
+        self._orig_dir = obs.LOG_DIR
+        obs.LOG_DIR = Path(self.tmp.name)
+
+    def tearDown(self):
+        obs.LOG_DIR = self._orig_dir
+        self.tmp.cleanup()
+
+    def _write_jsonl(self, records, day=None):
+        from datetime import datetime, timezone
+        d = day or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        p = obs.LOG_DIR / f"queries-{d}.jsonl"
+        with open(p, "a", encoding="utf-8") as fh:
+            for r in records:
+                fh.write(json.dumps(r) + "\n")
+
+    def test_disk_only_failures_surface_in_combined(self):
+        # Simulate chat process having written failures to JSONL, while
+        # admin process has empty in-memory ring.
+        self._write_jsonl([
+            {"is_failure": True, "failure_kind": "clarify",
+             "question_truncated": "chat-process query",
+             "ts": "2026-05-19T01:00:00",
+             "request_id": "abc1"},
+        ])
+        # Admin's ring is empty (different process).
+        self.assertEqual(obs.recent_failures(), [])
+        # But _combined reads from disk too.
+        combined = obs.recent_failures_combined(limit=10)
+        self.assertEqual(len(combined), 1)
+        self.assertEqual(combined[0]["question_truncated"], "chat-process query")
+
+    def test_combined_dedupes_by_request_id(self):
+        # Same record in ring + on disk shouldn't double-count.
+        rec = {"is_failure": True, "failure_kind": "clarify",
+               "question_truncated": "dup", "ts": "2026-05-19T01:00:00",
+               "request_id": "rid-1"}
+        obs.log_request(rec)  # writes to both ring AND disk
+        combined = obs.recent_failures_combined(limit=10)
+        self.assertEqual(len(combined), 1)
+
+    def test_top_phrases_combined_aggregates_disk(self):
+        # Chat process buckets, admin process buckets — combined sees the union.
+        self._write_jsonl([
+            {"is_failure": True, "failure_kind": "clarify",
+             "question_truncated": "помоги", "ts": "2026-05-19T01:00:00",
+             "request_id": f"r{i}"} for i in range(3)
+        ])
+        top = obs.top_failed_phrases_combined(top_n=10)
+        self.assertEqual(len(top), 1)
+        self.assertEqual(top[0]["count"], 3)
+
+    def test_combined_resilient_when_log_dir_missing(self):
+        obs.LOG_DIR = Path("/nope/does/not/exist")
+        # ring empty, dir missing — return empty, not crash
+        self.assertEqual(obs.recent_failures_combined(), [])
+        self.assertEqual(obs.top_failed_phrases_combined(), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
