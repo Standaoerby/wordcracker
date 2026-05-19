@@ -906,6 +906,8 @@ tr:hover td { background: #1d2128; }
 <h1>wordcracker · library</h1>
 <div class=meta>
   <a href="/">← upload</a> · <a href="/failed">failed queries</a>
+  · <button class=btn onclick="triggerReindex()" style="margin-left:12px">↻ reindex Chroma</button>
+  <span id=reindex-status style="margin-left:8px; color:#888"></span>
 </div>
 <div class=summary id=summary>загружаем…</div>
 <table>
@@ -1011,6 +1013,25 @@ async function deleteBook(id) {
   const d = await r.json();
   alert(`${id}: ${JSON.stringify(d, null, 2)}`);
   loadLibrary();
+}
+async function triggerReindex() {
+  if (!confirm('Запустить полную переиндексацию ChromaDB? Может занять много минут.')) return;
+  const el = document.getElementById('reindex-status');
+  el.textContent = 'запускаем…';
+  try {
+    const r = await fetch('/reindex', {method: 'POST'});
+    const d = await r.json();
+    if (d.started) {
+      el.textContent = 'запущено в фоне (см. admin_reindex.log)';
+      el.style.color = '#7ed321';
+    } else {
+      el.textContent = d.reason || 'не запущено';
+      el.style.color = '#f5a623';
+    }
+  } catch (e) {
+    el.textContent = 'error: ' + e;
+    el.style.color = '#f08080';
+  }
 }
 loadLibrary();
 </script>
@@ -1150,6 +1171,14 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 from admin_library import reprocess_book
                 return self._json(200, reprocess_book(m.group(1)))
+            except Exception as e:
+                return self._json(500, {"error": str(e)})
+        # Sprint 19 — reindex trigger from library page (after delete /
+        # reprocess the admin can refresh Chroma without going through
+        # the upload tab).
+        if self.path == "/reindex":
+            try:
+                return self._json(200, _trigger_reindex_async())
             except Exception as e:
                 return self._json(500, {"error": str(e)})
 
