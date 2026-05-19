@@ -185,6 +185,20 @@ AUTHOR_ALIASES_CURATED: dict[str, str] = {
     "maturin":          "^Maturin,",
     "матюрин":          "^Maturin,",
     "матьюрин":         "^Maturin,",
+    # Sprint 19+ — Victorian novelists (Stan 2026-05-19 «Burrows Delta
+    # между Dickens и Trollope: кто ближе к Eliot» — neither in
+    # AUTHOR_ALIASES). Anthony Trollope + George Eliot (Mary Ann Evans).
+    "trollope":         "^Trollope, Anthony",  # disambiguate from F. Trollope
+    "anthony trollope": "^Trollope, Anthony",
+    "троллоп":          "^Trollope, Anthony",
+    "троллопа":         "^Trollope, Anthony",
+    "энтони троллоп":   "^Trollope, Anthony",
+    "eliot":            "^Eliot, George",      # disambiguate from T.S. Eliot
+    "george eliot":     "^Eliot, George",
+    "mary ann evans":   "^Eliot, George",
+    "элиот":            "^Eliot, George",
+    "элиота":           "^Eliot, George",
+    "джордж элиот":     "^Eliot, George",
 }
 
 

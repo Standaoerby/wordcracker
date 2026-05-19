@@ -213,6 +213,14 @@ RULES: list[tuple[Pattern[str], str, float]] = [
          r"\bdo\s+you\s+charge|"
          r"\bpricing|cost"),
      "introduction", 0.88),
+    # Sprint 19+ — architecture / pipeline question. «покажи (свою)
+    # схему», «как ты устроен», «что делает planner/router/renderer».
+    # The intro text describes the pipeline; route here.
+    (_re(r"\b(покажи\s+)?(свою\s+|твою\s+)?(схему|архитектур\w+|pipeline|"
+         r"архитектура|устройств\w+)|"
+         r"\bчто\s+делает\s+(planner|router|renderer|critic|пайплайн)|"
+         r"\bshow\s+(me\s+)?(your\s+)?(architecture|pipeline|schema)"),
+     "introduction", 0.9),
     # Sprint 18+ Round 9 N8 — «сколько страниц в КНИГЕ?». Pages не наш
     # metric (corpus stored as tokens). Route to corpus_stats_by_author
     # via book_vocab? Нет — нужен per-book token count. Route to
@@ -539,6 +547,17 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     # `book_lookup` intent → `find_book` tool.
     (_re(r"\b(найди|поищи|есть\s+ли\s+у\s+тебя)\s+книг\w*\s+"),
      "book_lookup", 0.93),
+    # Sprint 19+ — «метаданные книги PG1342» / «metadata of <book>» /
+    # «инфа по книге X». Entity extractor pulls the PG id; book_lookup
+    # tool surfaces title/author/downloads/year — exactly what
+    # «метаданные» asks for.
+    (_re(r"\b(метаданн\w+|метадат\w+|инфа|информаци\w+)\s+(книги|по\s+книге|book)"),
+     "book_lookup", 0.92),
+    (_re(r"\bmetadata\s+(of|for|about)\s+(the\s+)?book"),
+     "book_lookup", 0.9),
+    (_re(r"\b(что\s+ты\s+знаешь|info|инфо)\s+(о|про|about)\s+(книге?\s+)?"
+         r"PG\d+"),
+     "book_lookup", 0.9),
     # Sprint 18+ Round 9 N6 — «у тебя есть X?» / «есть ли у тебя X?»
     # availability check with X as a known book title. Triggers when
     # entity extractor resolved book_id/book_title — _plan_book_lookup

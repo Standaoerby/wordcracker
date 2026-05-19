@@ -671,6 +671,29 @@ def _plan_book_vocab(e: Entities) -> QueryPlan:
 
 @_with_copyright_check
 def _plan_book_readability(e: Entities) -> QueryPlan:
+    # Sprint 19+ — corpus-wide aggregation request misroutes here when
+    # «Flesch» / «readability» keyword fires book_readability but the
+    # user actually wants «распределение по корпусу». Redirect to the
+    # smart clarify recipe instead of bouncing to _need_book.
+    raw_lc = ((e.raw_misc or {}).get("raw_text") or "").lower()
+    if not e.book_id and not e.book_title:
+        distribution_markers = (
+            "распределение", "среднее", "медиана", "median", "average",
+            "distribution", "p10", "p90", "p95", "процентиль",
+        )
+        corpus_scope = ("корпус" in raw_lc or "corpus" in raw_lc or
+                         "all books" in raw_lc)
+        if any(m in raw_lc for m in distribution_markers) and corpus_scope:
+            recipe = _smart_clarify_recipe(e)
+            if recipe:
+                return QueryPlan(
+                    intent="clarify", entities=e, steps=[],
+                    needs_clarify=True,
+                    clarify_question=recipe,
+                    explain=("corpus-wide aggregation request — no "
+                             "single tool, recipe offered"),
+                )
+
     if e.book_id:
         return QueryPlan(
             intent="book_readability", entities=e,
@@ -1626,6 +1649,50 @@ def _smart_clarify_recipe(e: Entities) -> str | None:
     среди authors in period». The user should see a recipe, not a
     bare clarify.
     """
+    raw_lc = ((e.raw_misc or {}).get("raw_text") or "").lower()
+
+    # Sprint 19+ — triangulation pattern: «X между A и B, кто ближе к C».
+    # Multi-author comparison with a third reference. Recipe: pairwise
+    # compare_authors for each combo + Burrows Delta inspection.
+    if e.author_regex and e.multi_author_regex and (
+        "ближе к" in raw_lc or "closer to" in raw_lc or
+        "ближе" in raw_lc):
+        authors = [e.author_label or e.author_regex, *e.multi_author_regex]
+        return (
+            f"Triangulation запрос (кто из {authors[0]}/{authors[1]} "
+            f"ближе к третьему) — у меня нет single tool. Собери из 2 шагов:\n\n"
+            f"1. **compare_authors** для каждой пары:\n"
+            f"   «сравни {authors[0]} и {authors[-1]} по стилю»\n"
+            f"   «сравни {authors[1] if len(authors) > 1 else '?'} и "
+            f"{authors[-1]} по стилю»\n"
+            f"2. Сравни Burrows Delta distances — меньшее = ближе.\n"
+            f"\nИли используй **author_closest** напрямую: «на кого "
+            f"стилистически похож {authors[-1]}» — Burrows Delta ranks "
+            f"top-N candidates."
+        )
+
+    # Sprint 19+ — corpus-wide distribution. «распределение Flesch по
+    # корпусу», «среднее/медиана/p95 X в корпусе». No single tool
+    # aggregates per-book metrics; recipe: top-N + sample.
+    distribution_markers = (
+        "распределение", "среднее", "медиана", "median", "average",
+        "distribution", "p10", "p90", "p95", "процентиль",
+    )
+    has_distribution = any(m in raw_lc for m in distribution_markers)
+    has_corpus_scope = ("корпус" in raw_lc or "corpus" in raw_lc or
+                         "all books" in raw_lc)
+    if has_distribution and has_corpus_scope:
+        return (
+            "Corpus-wide агрегации (распределение/среднее/p10/p90) "
+            "пока нет как single tool — каждая metric (Flesch, FK, TTR, "
+            "vocab_size) считается per-book. Recipe:\n\n"
+            "1. **Sample**: «топ-20 книг по downloads» → берёшь представительную "
+            "выборку (популярные книги = большая часть real reads)\n"
+            "2. Для каждой — «уровень сложности <book>» (book_readability)\n"
+            "3. Усредняй вручную из ответов\n\n"
+            "В Sprint 20 backlog — corpus_stats_aggregate({metric})."
+        )
+
     rich_fields = sum([
         bool(e.country),
         bool(e.year_from or e.year_to),
