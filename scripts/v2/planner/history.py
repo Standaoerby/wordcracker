@@ -117,6 +117,51 @@ _PROPN_REMOVAL_PATTERNS = re.compile(
 def _is_propn_removal(text: str) -> bool:
     return bool(_PROPN_REMOVAL_PATTERNS.search(text))
 
+
+# Sprint 20 — translation-modifier follow-up. Stan 2026-05-19:
+#   «Возьми слова, которые ты мне выдал и переведи на русский»
+#   «Сделай перевод на русский всех слов»
+# After an author_vocab / book_vocab / learning turn, user wants the
+# words translated. Re-running with `learning_words` instead of
+# `affinity_by_author` gives words + per-word RU translation in one
+# pass (learning_words internally calls enrich_word with target_lang=ru).
+_TRANSLATE_PATTERNS = re.compile(
+    r"(?:переведи|переводи|сделай\s+перевод|дай\s+перевод|"
+    r"translate(?:\s+(?:these|them|the\s+words?|the\s+list))?|"
+    r"with\s+(?:russian|ru)\s+translations?)\s*"
+    r"(?:слов\w*\s+)?"
+    r"(?:на\s+русск\w+|to\s+russian|to\s+ru\b|на\s+ru\b)?",
+    re.IGNORECASE,
+)
+# Standalone «возьми слова которые ты мне выдал» — strong referring
+# phrase that signals "use prior assistant output". When combined with
+# a translate-pattern elsewhere in the same query, this triggers the
+# translation followup.
+_PRIOR_OUTPUT_REF = re.compile(
+    r"(?:возьми|take)\s+(?:слова|words?|эти|the\s+(?:words?|list))|"
+    r"которые\s+ты\s+(?:мне\s+)?(?:выдал|показал|дал|вернул)|"
+    r"which\s+you\s+(?:gave|returned|showed)",
+    re.IGNORECASE,
+)
+
+
+def _is_translate_followup(text: str) -> bool:
+    """True if the text asks to translate prior output to Russian.
+
+    Requires either an explicit "на русский / to russian" target OR
+    the prior-output reference pattern combined with any translate
+    verb. Both signals together: high precision, low recall on
+    edge phrasings.
+    """
+    has_translate = bool(_TRANSLATE_PATTERNS.search(text))
+    if not has_translate:
+        return False
+    s = text.lower()
+    has_target = ("на русск" in s or "to russian" in s
+                  or "to ru" in s or "на ru" in s)
+    has_prior_ref = bool(_PRIOR_OUTPUT_REF.search(text))
+    return has_target or has_prior_ref
+
 # Sprint 19+ — expansion patterns: «покажи все», «полный список»,
 # «все книги серии», «show all», «list all», «give me the full
 # list». User wants the prior intent re-run with a wider top_n
@@ -136,7 +181,8 @@ _EXPAND_PATTERNS = re.compile(
 
 def _looks_like_followup(text: str) -> bool:
     return bool(_REF_TRIGGERS.search(text) or _CONTEXT_SWAP_TRIGGERS.search(text)
-                or _PROPN_REMOVAL_PATTERNS.search(text))
+                or _PROPN_REMOVAL_PATTERNS.search(text)
+                or _is_translate_followup(text))
 
 
 def _is_context_swap(text: str) -> bool:
@@ -279,6 +325,30 @@ def infer_followup_intent(text: str,
             prior_intent = _classify(msg.get("content") or "")
             if prior_intent.label not in ("clarify", ""):
                 return prior_intent.label
+    # Sprint 20 — translation modifier («переведи на русский слова»).
+    # When the prior turn produced a word list (author_vocab /
+    # book_vocab / learning / word_etymology), re-route to `learning`
+    # intent — learning_words combines affinity-band + per-word
+    # enrich_word(target_lang='ru'), so the user gets the same words
+    # with translations in one re-run. The flag `_translate_to=ru`
+    # stamped by merge_with_history is informational; the intent
+    # switch itself does the work.
+    if _is_translate_followup(text) and history:
+        from scripts.v2.planner.intent import classify as _classify
+        for msg in reversed(history):
+            if msg.get("role") != "user":
+                continue
+            prior_intent = _classify(msg.get("content") or "")
+            if prior_intent.label in ("author_vocab", "book_vocab",
+                                        "learning", "word_etymology",
+                                        "author_top_words"):
+                return "learning"
+            if prior_intent.label not in ("clarify", ""):
+                # Prior wasn't a word-list intent (e.g. readability,
+                # compare_authors). Keep the prior intent — the
+                # renderer will see _translate_to=ru and can add
+                # translations to whatever text it generates.
+                return prior_intent.label
     # Sprint 19+ — expansion follow-up («покажи все», «полный список»).
     # Same re-classify-prior logic as rerank — same plan, but the
     # plan-builder will see e.top_n bumped (set in merge_with_history).
@@ -389,5 +459,15 @@ def merge_with_history(current: Entities, history: list[dict] | None,
     if _is_propn_removal(text):
         rm = dict(backfilled.raw_misc or {})
         rm["_propn_strict"] = True
+        backfilled.raw_misc = rm
+    # Sprint 20 — translate modifier: stamp _translate_to=ru so the
+    # renderer can add translations to whatever output the plan
+    # produces. The plan-rerouting to `learning` already covers the
+    # word-list case via learning_words(target_lang='ru'); this flag
+    # is for renderer-level translations (e.g. translate a name into
+    # Russian) and for observability.
+    if _is_translate_followup(text):
+        rm = dict(backfilled.raw_misc or {})
+        rm["_translate_to"] = "ru"
         backfilled.raw_misc = rm
     return backfilled

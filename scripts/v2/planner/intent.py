@@ -712,7 +712,14 @@ RULES: list[tuple[Pattern[str], str, float]] = [
          # «favourite words», «his go-to vocabulary».
          r"любим\w+\s+(слов\w*|лексик\w*|выражен\w*)|"
          r"favou?rite\s+(words|vocabulary|phrases)|"
-         r"go-?to\s+(vocabulary|words)"), "author_vocab", 0.85),
+         r"go-?to\s+(vocabulary|words)|"
+         # Sprint 20 — Stan 2026-05-19 «топ 100 аффинных слов Агаты
+         # Кристи». Technical term «аффинн*» / «affinity words» —
+         # power users skip «фирменные» / «характерные» and call them
+         # what the underlying metric is named.
+         r"аффинн\w+\s+слов\w*|"
+         r"\baffinity\s+words?\b|"
+         r"high-affinity\s+(words|vocabulary)"), "author_vocab", 0.85),
     # «Слова Толкина из LOTR», «лексика Свифта», — generic vocab queries
     # that name an author / book without a "characteristic" keyword.
     (_re(r"^\s*слова\s+[A-ZА-Я]\w+"), "author_vocab", 0.65),
