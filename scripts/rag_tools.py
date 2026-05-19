@@ -2126,7 +2126,9 @@ def find_book(title: str, author: str = "", top: int = 5,
             out = out.sort_values("id")
 
         keep_cols = [c for c in ("id", "title", "author", "downloads",
-                                 "authoryearofbirth", "language")
+                                 "authoryearofbirth", "language",
+                                 "pub_year")  # Sprint 16 Phase G — surface
+                                              # Open Library year if enriched
                      if c in out.columns]
         matches = []
         for _, row in out.head(top).iterrows():
@@ -2136,6 +2138,15 @@ def find_book(title: str, author: str = "", top: int = 5,
                     m["downloads"] = int(float(m["downloads"]))
                 except (TypeError, ValueError):
                     m["downloads"] = None
+            # Sprint 16 Phase G — pub_year is float in pandas (NaN for
+            # unenriched books). Normalize to int when present, None
+            # otherwise so the renderer doesn't quote «1837.0».
+            if "pub_year" in m:
+                try:
+                    py = float(m["pub_year"])
+                    m["pub_year"] = int(py) if py == py else None  # NaN guard
+                except (TypeError, ValueError):
+                    m["pub_year"] = None
             matches.append(m)
 
         _log(f"find_book(title={title_q!r}, author={author!r}) "

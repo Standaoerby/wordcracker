@@ -88,6 +88,7 @@ _INTENTS_REQUIRING_ENTITIES = {
     "book_emotion":      ("book_id", "book_title"),
     "book_compare":      ("book_id", "book_title"),
     "book_lookup":       ("book_title", "book_id"),
+    "book_pub_year":     ("book_id", "book_title"),  # Sprint 16 Phase G
     "word_contexts":     ("word",),
     "word_collocates":   ("word",),
     "word_timeline":     ("word",),

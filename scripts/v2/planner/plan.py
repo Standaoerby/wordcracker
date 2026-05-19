@@ -1109,6 +1109,35 @@ def _plan_out_of_scope(e: Entities) -> QueryPlan:
     )
 
 
+# ===== Sprint 16 Phase G — book_pub_year =====
+
+
+def _plan_book_pub_year(e: Entities) -> QueryPlan:
+    """«Когда была опубликована Война и мир» — surface pub_year from
+    Open Library enrichment via find_book (Sprint 9.7).
+
+    Render hint tells the LLM to look for `pub_year` in matches[0] —
+    not authoryearofbirth (a common renderer confusion: «1828» for the
+    author year vs «1869» for the book)."""
+    if e.book_id:
+        return QueryPlan(
+            intent="book_pub_year", entities=e,
+            steps=[PlanStep(tool="find_book",
+                            args={"title": e.book_title or e.book_id})],
+            expected_cost="cheap",
+            explain=f"book_pub_year → find_book({e.book_title or e.book_id})",
+        )
+    if e.book_title:
+        return QueryPlan(
+            intent="book_pub_year", entities=e,
+            steps=[PlanStep(tool="find_book",
+                            args={"title": e.book_title})],
+            expected_cost="cheap",
+            explain=f"book_pub_year → find_book({e.book_title!r})",
+        )
+    return _need_book(e)
+
+
 # ===== Sprint 16 Phase F — topic_book_search =====
 
 
@@ -1278,6 +1307,8 @@ PLAN_BUILDERS = {
     "book_extremum":        _plan_book_extremum,
     # Sprint 16 Phase F — semantic find_book by topic
     "topic_book_search":    _plan_topic_book_search,
+    # Sprint 16 Phase G — pub_year + RU genitive titles
+    "book_pub_year":        _plan_book_pub_year,
     "out_of_scope":         _plan_out_of_scope,
 }
 

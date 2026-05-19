@@ -62,6 +62,8 @@ INTENTS = frozenset({
     "corpus_extremum",    # «самый плодовитый / влиятельный автор»
     # Sprint 16 Phase F — semantic find_book by topic
     "topic_book_search",  # «найди книгу про X», «book about Y»
+    # Sprint 16 Phase G — publication year (Open Library enrichment)
+    "book_pub_year",      # «когда была опубликована X», «year of X»
     "out_of_scope",
     "clarify",
 })
@@ -91,6 +93,9 @@ PRIORITY = {
     # Sprint 16 Phase F — above book_recommendation (118) so a topical
     # «найди книгу про X» beats the generic «recommend» rule.
     "topic_book_search": 145,
+    # Sprint 16 Phase G — above book_lookup (122) so «когда вышла X»
+    # routes to pub_year, not generic title search.
+    "book_pub_year": 148,
     "vocab_passport": 150,
     "composite_compare": 145,
     "translation_quality": 140,
@@ -286,6 +291,21 @@ RULES: list[tuple[Pattern[str], str, float]] = [
      "topic_book_search", 0.85),
     (_re(r"\bчто\s+почитать\s+(про|о|об|на\s+тему|about)\s+"),
      "topic_book_search", 0.9),
+
+    # ===== Sprint 16 Phase G — book_pub_year =====
+    # «когда была опубликована Война и мир», «год издания Pride and
+    # Prejudice», «when was Dracula published». Surfaces pub_year via
+    # find_book (Sprint 9.7 Open Library enrichment).
+    (_re(r"\b(когда\s+(была\s+|был\s+)?"
+         r"(опубликован\w*|издан\w*|вышл\w*|написан\w*|появил\w*)|"
+         r"год\s+(публикаци\w*|издани\w*|выход\w*|написани\w*)|"
+         r"в\s+как(ом|ой)\s+году\s+(была\s+|был\s+)?"
+         r"(опубликован\w*|издан\w*|вышл\w*|написан\w*))"),
+     "book_pub_year", 0.93),
+    (_re(r"\bwhen\s+was\s+.{1,60}\s+(published|released|written)|"
+         r"\byear\s+of\s+publication|"
+         r"\bpublication\s+(year|date)"),
+     "book_pub_year", 0.92),
 
     # ===== corpus_meta =====
     # Stan round 5: «сколько у Толстого книг» wrongly routed to corpus_meta

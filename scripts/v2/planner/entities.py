@@ -189,15 +189,26 @@ KNOWN_BOOKS: dict[str, tuple[str, str]] = {
 
     # Russian classics (English translations in SPGC)
     "преступление и наказание":   ("PG2554", "Crime and Punishment"),
+    # Sprint 16 Phase G — RU declension variants. «слова в Преступлении и
+    # наказании» (prep), «герой Преступления и наказания» (gen) — both
+    # common in user questions. Match the nominative target.
+    "преступления и наказания":   ("PG2554", "Crime and Punishment"),  # gen
+    "преступлении и наказании":   ("PG2554", "Crime and Punishment"),  # prep
     "crime and punishment":       ("PG2554", "Crime and Punishment"),
     "war and peace":              ("PG2600", "War and Peace"),
     "война и мир":                ("PG2600", "War and Peace"),
+    "войны и мира":               ("PG2600", "War and Peace"),  # gen
+    "войне и мире":               ("PG2600", "War and Peace"),  # prep
 
     # English / American canon
     "pride and prejudice":        ("PG1342", "Pride and Prejudice"),
     "гордость и предубеждение":   ("PG1342", "Pride and Prejudice"),
+    "гордости и предубеждения":   ("PG1342", "Pride and Prejudice"),  # gen
+    "гордости и предубеждении":   ("PG1342", "Pride and Prejudice"),  # prep
     "dracula":                    ("PG345",  "Dracula"),
     "дракула":                    ("PG345",  "Dracula"),
+    "дракулы":                    ("PG345",  "Dracula"),  # gen
+    "дракуле":                    ("PG345",  "Dracula"),  # prep
     "alice's adventures in wonderland": ("PG11", "Alice's Adventures in Wonderland"),
     "alice in wonderland":        ("PG11",  "Alice's Adventures in Wonderland"),
     "frankenstein":               ("PG84",   "Frankenstein"),
@@ -244,6 +255,8 @@ KNOWN_BOOKS: dict[str, tuple[str, str]] = {
     # Stan round 3 Q14 — Anna Karenina has a Tolstoy translation in PG, NOT copyright
     "anna karenina":              ("PG1399", "Anna Karenina"),
     "анна каренина":              ("PG1399", "Anna Karenina"),
+    "анны карениной":             ("PG1399", "Anna Karenina"),  # gen (Sprint 16 Phase G)
+    "анне карениной":             ("PG1399", "Anna Karenina"),  # prep
     # Catcher in the Rye is copyright
     "catcher in the rye":         ("",      "The Catcher in the Rye"),
     "the catcher in the rye":     ("",      "The Catcher in the Rye"),
