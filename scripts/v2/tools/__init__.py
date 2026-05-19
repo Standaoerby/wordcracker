@@ -11,3 +11,6 @@ from scripts.v2.tools.words import (  # noqa: F401
 )
 from scripts.v2.tools.learning import learning_words, enrich  # noqa: F401
 from scripts.v2.tools.search import lexical, hybrid, semantic  # noqa: F401
+# v4 meta tools — entity resolvers for the LLM planner. Last import so
+# the registry already knows about all other tools when these load.
+from scripts.v2.tools import meta  # noqa: F401

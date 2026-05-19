@@ -1,4 +1,4 @@
-"""Tool Router — execute a QueryPlan step-by-step, deterministic.
+"""Tool Router — execute a plan step-by-step, deterministic.
 
 Contract: docs/v2/PLANNER.md §5.
 
@@ -6,6 +6,14 @@ The router doesn't talk to the LLM. It just runs the steps in order, threads
 prior `ToolResult.data` into later args, and stops on hard failures (unless
 the step is `optional`). This is what kills the "narrates plan, never calls
 tool" failure mode from v1.1.7 — there's no LLM in the loop here.
+
+Two entry points:
+    `execute(plan)`        — v3 path. `plan: QueryPlan` from `plan.py`.
+    `execute_spec(spec)`   — v4 path. `spec: PlanSpec` from `plan_spec.py`.
+
+Both produce a `RouterResult`. v4 plans support a DAG (not just a linear
+chain) via `$sN.field` references in args + explicit `needs` lists. The
+DAG is topologically ordered and resolved before each step dispatches.
 """
 from __future__ import annotations
 
@@ -14,6 +22,8 @@ from typing import Any, Iterator, Literal
 
 from scripts.v2.legacy_dispatch import dispatch_any
 from scripts.v2.planner.plan import PlanStep, QueryPlan
+from scripts.v2.planner import plan_spec as _spec_mod
+from scripts.v2.planner.plan_spec import PlanSpec
 from scripts.v2._types import ToolResult
 
 
@@ -108,6 +118,106 @@ def execute(plan: QueryPlan) -> RouterResult:
                         results=results, events=events)
 
 
+def execute_spec(spec: PlanSpec) -> RouterResult:
+    """Execute a v4 PlanSpec (DAG with `$sN.field` references).
+
+    Steps run in topological order. Before dispatch each step's args
+    are resolved against the result map (`step_id → ToolResult.data`).
+    Failures abort like the v3 path unless `optional=True`.
+
+    Returns a RouterResult with `results` aligned to the topological
+    order. The `plan` field is set to a stub QueryPlan with the same
+    intent_hint / clarify so existing callers that read `result.plan`
+    still get something usable.
+    """
+    # Clarify-only plan → emit clarify directly.
+    if spec.clarify and not spec.steps:
+        return RouterResult(
+            kind="clarify",
+            plan=_spec_stub_query_plan(spec),
+            message=spec.clarify,
+        )
+    if not spec.steps:
+        return RouterResult(
+            kind="no_steps",
+            plan=_spec_stub_query_plan(spec),
+            message=spec.rationale or "no steps in PlanSpec",
+        )
+
+    try:
+        ordered = _spec_mod.topological_order(spec)
+    except ValueError as e:
+        return RouterResult(
+            kind="clarify",
+            plan=_spec_stub_query_plan(spec),
+            message=f"invalid plan: {e}",
+        )
+
+    # results_by_id used both for $-ref resolution AND for the final
+    # `results` list — but the final list mirrors topological order so
+    # the renderer can iterate sequentially.
+    results_by_id: dict[str, Any] = {}
+    results_ordered: list[ToolResult] = []
+    events: list[StepEvent] = []
+
+    for idx, step in enumerate(ordered):
+        # Resolve any $sN.field refs in args against prior results.
+        resolved_args = _spec_mod.resolve_refs(step.args, results_by_id)
+        if not isinstance(resolved_args, dict):
+            resolved_args = {}
+        events.append(StepEvent(kind="step_start", step_idx=idx,
+                                 tool=step.tool, args=resolved_args))
+        result = dispatch_any(step.tool, resolved_args)
+        results_ordered.append(result)
+        # Make the result's data visible to later $-refs. We attach the
+        # whole `data` dict (most common case) under the step id; nested
+        # paths like `$s1.first_id` work via walk_path.
+        results_by_id[step.id] = (
+            result.data if (result and result.data is not None) else None
+        )
+        events.append(StepEvent(kind="step_done", step_idx=idx,
+                                 tool=step.tool, result=result))
+        if not result.ok and not step.optional:
+            return RouterResult(
+                kind="results",
+                plan=_spec_stub_query_plan(spec),
+                results=results_ordered, events=events,
+            )
+
+    return RouterResult(
+        kind="results",
+        plan=_spec_stub_query_plan(spec),
+        results=results_ordered, events=events,
+    )
+
+
+def _spec_stub_query_plan(spec: PlanSpec) -> QueryPlan:
+    """Adapt a PlanSpec into a QueryPlan stub.
+
+    Renderers + observability code currently read `result.plan.intent` /
+    `result.plan.steps`. Build a placeholder QueryPlan so we don't have
+    to fork the downstream code paths.
+    """
+    # Lazily import Entities so this module stays importable when
+    # entities.py is being tested in isolation.
+    from scripts.v2.planner.entities import Entities
+
+    steps = [
+        PlanStep(tool=s.tool, args=s.args, depends_on=[], inject_result_as=None,
+                  optional=s.optional)
+        for s in spec.steps
+    ]
+    qp = QueryPlan(
+        intent=spec.intent_hint or "v4_llm_plan",
+        entities=Entities(),
+        steps=steps,
+        needs_clarify=bool(spec.clarify and not spec.steps),
+        clarify_question=spec.clarify if spec.clarify else None,
+        explain=spec.rationale or "v4 LLM-emitted plan",
+    )
+    return qp
+
+
 def execute_stream(plan: QueryPlan) -> Iterator[dict]:
     """Generator variant for SSE wiring in chat_server.
 
@@ -137,6 +247,58 @@ def execute_stream(plan: QueryPlan) -> Iterator[dict]:
                "ok": tr.ok, "ms": tr.runtime_ms,
                "summary": tr.to_llm_string(max_chars=240),
                "step_idx": idx}
+        if not tr.ok and not step.optional:
+            yield {"event": "done", "kind": "results_partial"}
+            return
+
+    yield {"event": "done", "kind": "results"}
+
+
+def execute_spec_stream(spec: PlanSpec) -> Iterator[dict]:
+    """SSE-friendly streaming variant of `execute_spec`.
+
+    Emits the same event shape as `execute_stream` so chat_server's SSE
+    handler can pipe v4 plans without forking the protocol.
+    """
+    yield {"event": "intent", "label": spec.intent_hint or "v4_llm_plan",
+           "explain": spec.rationale,
+           "needs_clarify": bool(spec.clarify and not spec.steps),
+           "via": "v4_llm_planner"}
+    if spec.clarify and not spec.steps:
+        yield {"event": "clarify", "question": spec.clarify}
+        yield {"event": "done", "kind": "clarify"}
+        return
+    if not spec.steps:
+        yield {"event": "done", "kind": "no_steps"}
+        return
+
+    try:
+        ordered = _spec_mod.topological_order(spec)
+    except ValueError as e:
+        yield {"event": "clarify", "question": f"invalid plan: {e}"}
+        yield {"event": "done", "kind": "clarify"}
+        return
+
+    yield {"event": "plan", "steps": [
+        {"id": s.id, "tool": s.tool, "args": s.args, "needs": s.needs}
+        for s in ordered
+    ]}
+
+    results_by_id: dict[str, Any] = {}
+    for idx, step in enumerate(ordered):
+        resolved_args = _spec_mod.resolve_refs(step.args, results_by_id)
+        if not isinstance(resolved_args, dict):
+            resolved_args = {}
+        yield {"event": "tool_call", "name": step.tool, "args": resolved_args,
+               "step_idx": idx, "step_id": step.id}
+        tr = dispatch_any(step.tool, resolved_args)
+        results_by_id[step.id] = (
+            tr.data if (tr and tr.data is not None) else None
+        )
+        yield {"event": "tool_result", "name": step.tool,
+               "ok": tr.ok, "ms": tr.runtime_ms,
+               "summary": tr.to_llm_string(max_chars=240),
+               "step_idx": idx, "step_id": step.id}
         if not tr.ok and not step.optional:
             yield {"event": "done", "kind": "results_partial"}
             return

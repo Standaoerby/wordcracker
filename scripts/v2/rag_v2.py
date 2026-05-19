@@ -551,7 +551,39 @@ def ask(
             pass
     plan = plan_mod.build(intent.label, entities)
 
+    # v4 LLM planner — when rules-based path produces clarify AND the
+    # planner feature flag is on, try generating a DAG plan with the
+    # LLM. This handles compound queries (multi-book / triangulation /
+    # etymology-ratio) without hand-coded branches in
+    # `_smart_clarify_recipe`. See docs/v2/PLANNER.md §6 (v4).
+    v4_planner_used = False
+    v4_planner_report = None
     if plan.needs_clarify:
+        try:
+            from scripts.v2.planner import llm_planner as _llmp
+        except ImportError:
+            _llmp = None
+        if _llmp is not None and _llmp.LLM_PLANNER_ENABLED:
+            try:
+                pres = _llmp.plan_query(question, history=history)
+            except Exception:
+                log.exception("v4 LLM planner crashed")
+                pres = None
+            if pres is not None and pres.ok and pres.plan and pres.plan.steps:
+                v4_planner_used = True
+                v4_planner_report = pres
+                rr_v4 = router_mod.execute_spec(pres.plan)
+                # Adopt the v4 router result; downstream render/critic
+                # treats it like any other ToolResult set.
+                plan = rr_v4.plan
+                rr = rr_v4
+            elif pres is not None and pres.clarify:
+                # LLM declined — replace the generic clarify with the
+                # specific question it asked.
+                plan.clarify_question = pres.clarify
+                v4_planner_report = pres
+
+    if plan.needs_clarify and not v4_planner_used:
         clarify_answer = plan.clarify_question or "Уточни запрос."
         # v3.0 Phase A3: detect «unknown author candidate» in the query —
         # capitalized tokens that LOOK like an author surname but weren't
@@ -617,7 +649,9 @@ def ask(
             "intent_confidence": intent.confidence,
         }
 
-    rr = router_mod.execute(plan)
+    # Skip router if v4 LLM planner already produced results.
+    if not v4_planner_used:
+        rr = router_mod.execute(plan)
 
     render_meta: dict = {}
     if intent.label == "introduction":
@@ -695,6 +729,13 @@ def ask(
         # referenced a U-prefixed book id.
         "user_uploads_used":  _detect_user_uploads(rr.results)[0],
         "user_upload_count":  _detect_user_uploads(rr.results)[1],
+        # v4 — LLM planner usage + plan details so Stan can review
+        # the JSONL log and harvest patterns for promotion to rules.
+        "v4_planner_used": v4_planner_used,
+        "v4_planner_attempts": (v4_planner_report.attempts
+                                 if v4_planner_report else None),
+        "v4_planner_elapsed_s": (round(v4_planner_report.elapsed_s, 2)
+                                  if v4_planner_report else None),
         "answer_truncated": answer[:300],
     })
     return {

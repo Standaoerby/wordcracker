@@ -32,6 +32,17 @@
 >   ratio smart clarify branch, surname blocklist on affinity outputs
 >   (curated literary characters + PG-metadata authors). Affinity
 >   formula audited and verified. 637 unit tests.
+> - **v3.2.0-alpha1** — v4 architecture: hybrid pipeline with LLM
+>   planner emitting typed `PlanSpec` JSON DAGs for compound/
+>   living-language queries that the rules path drops to clarify.
+>   New modules: `plan_spec.py` (DAG + $sN.field refs + validator),
+>   `tool_catalog.py` (single-source-of-truth prompt from registry),
+>   `llm_planner.py` (one Ollama call, retry-once, cache), router DAG
+>   extension (`execute_spec` / `_stream`), entity resolvers as tools
+>   (`resolve_author_name`, `resolve_book_title`). Behind
+>   `WC_LLM_PLANNER=on` feature flag; v3 path unchanged when off.
+>   PLANNER.md §10 documents the full v4 contract. 718 unit tests
+>   (+81 v4-specific).
 
 ## TL;DR
 

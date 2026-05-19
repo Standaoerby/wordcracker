@@ -412,3 +412,178 @@ Front-end игнорирует unknown events → backward compatible.
 2. Stan тестит вручную против v1, обнаружим regressions.
 3. После 1 недели — flip default к v2, v1 как fallback.
 4. После 2 недель — удаляем v1 code, merge в main.
+
+---
+
+## 10. v4 — Hybrid LLM planner (Sprint 20)
+
+После v3.1.1 стала очевидна **граница rules-based архитектуры**: 203
+regex правила, 44 plan-функции, 18 hand-coded branches в
+`_smart_clarify_recipe`. Каждый Stan-screenshot добавляет правило.
+Naive-user pass-rate упёрся в ~30%, research-user — в ~60–70%
+(«сервис работает если ты знаешь как его прошепнуть»).
+
+**v4 hybrid pipeline** добавляет **LLM-планнер как slow-path** для
+запросов, которые rules-based path сбрасывает в clarify. Это **не**
+v1 agentic loop — один LLM-call (не iterative), strict JSON output,
+deterministic execution через router.
+
+```
+user query
+  │
+  ▼
+intent classifier (203 rules + LLM fallback)      ◀ v3 fast path, ≤50ms
+  │
+  ├── matched → entity extractor → plan.build()
+  │            │
+  │            ├── needs_clarify ──┐
+  │            │                    │
+  │            └── ok → router.execute(plan) → renderer ▶ user
+  │                                   │
+  ▼                                   │
+                                       │
+v4 LLM planner (slow path, ~1-2s)   ◀ v4: fires only on v3 clarify
+  ├── prompt = tool catalog + few-shot examples
+  ├── Ollama format=json → PlanSpec JSON
+  ├── validate (tool existence, args, $-refs, cycles)
+  └── retry once on invalid output → fallback clarify
+       │
+       ▼
+PlanSpec → router.execute_spec(spec) → renderer ▶ user
+```
+
+### 10.1 PlanSpec — typed DAG
+
+LLM emits a `PlanSpec` JSON object:
+
+```json
+{
+  "intent_hint": "etymology_ratio_compare",
+  "rationale": "compare germanic vs latinate signature words per book",
+  "steps": [
+    {"id": "s1", "tool": "resolve_book_title",
+      "args": {"query": "Beowulf"}},
+    {"id": "s2", "tool": "resolve_book_title",
+      "args": {"query": "Paradise Lost"}},
+    {"id": "s3", "tool": "find_words_by_etymology",
+      "args": {"scope": {"book": "$s1.pg_id"},
+                "family": "germanic", "top": 20},
+      "needs": ["s1"]},
+    {"id": "s4", "tool": "find_words_by_etymology",
+      "args": {"scope": {"book": "$s2.pg_id"},
+                "family": "germanic", "top": 20},
+      "needs": ["s2"]}
+  ],
+  "render_hint": "etymology_ratio_table"
+}
+```
+
+Key features:
+- **`$sN.field` references** — router resolves at exec time.
+  Supports nested dicts (`$s1.matches.0.id`) and arbitrary depth.
+- **`needs` declares deps** — combined with discovered $-refs to build
+  topological order. Cycles fail validation.
+- **`clarify` is a valid terminal** — when LLM genuinely can't plan,
+  it emits `{"clarify":"<question>"}` instead of inventing steps.
+
+See `scripts/v2/planner/plan_spec.py` for the dataclass + validator.
+
+### 10.2 Tool catalog — single source of truth
+
+`scripts/v2/planner/tool_catalog.py` serializes the registry into a
+compact prompt block (≤25KB). Adding a new `@tool` automatically
+makes it available to the planner — **zero prompt edits required**.
+Few-shot examples live alongside in code, organized by query
+pattern type (lookup / compound / triangulation / etymology-ratio /
+genuinely ambiguous).
+
+### 10.3 Entity resolvers — `resolve_author_name` / `resolve_book_title`
+
+New v4 tools that turn free-text phrasings into canonical
+`author_regex` / `pg_id`. Layered: curated alias dict → fuzzy match
+against SPGC metadata. The LLM planner uses them as the first step
+of any plan that touches entities, so new authors / books propagate
+without code changes.
+
+### 10.4 Router DAG — `execute_spec` / `execute_spec_stream`
+
+Router now has a v4 entry point. Topological sort by `needs` +
+discovered $-refs. Each step's args are resolved against prior
+results before dispatch. Failure handling, optional-step semantics,
+and the SSE stream mirror the v3 path exactly so chat_server doesn't
+need a protocol fork.
+
+### 10.5 Validation pipeline
+
+Before execution, every PlanSpec passes through
+`plan_spec.validate(plan, registry=REGISTRY)`:
+
+| Check | Severity |
+|---|---|
+| tool exists in registry | error |
+| required args present (or come from $-ref) | error |
+| `needs` references existing step ids | error |
+| no cycles | error |
+| $-ref targets known step | error |
+| step id matches `/^s\d+$/` | error |
+| step count ≤ `max_steps` (12) | error |
+| heavy-cost tool count ≤ `max_heavy` (6) | error |
+| arg not in `input_schema.properties` | warning |
+
+Validation runs both at LLM-output parse time (planner retries on
+failure) and as a defence in depth in the router.
+
+### 10.6 Feature flag
+
+`WC_LLM_PLANNER=on` enables the v4 path. **Off by default during
+alpha rollout** — the v3 path is completely unchanged when the flag
+is off. Stan can flip the flag per environment without code
+changes.
+
+### 10.7 Observability
+
+Every v4 plan attempt logs:
+- `v4_planner_used: true|false`
+- `v4_planner_attempts: 1|2` (retry count)
+- `v4_planner_elapsed_s: float`
+- the full PlanSpec is stored in the JSONL log so Stan can review
+  what the LLM generated for each query.
+
+The log is the **input dataset for promotion**: when a v4 plan
+pattern recurs, it can be promoted to a v3 rule (or stay in v4 if
+the pattern is too varied for regex).
+
+### 10.8 Why v4 will NOT regress to v1
+
+| | v1 (broken) | v4 (correct) |
+|---|---|---|
+| LLM calls per query | 1–5 iterations with drift | 1 plan emit + 1 render + 1 critic |
+| LLM picks tool in loop | yes | no — plan emitted ONCE |
+| Output format | free text + heuristic parse | strict JSON via `format=json` |
+| Hallucinated tool | runs (silently broken) | fails validation, never dispatched |
+| Trace visible | no | PlanSpec in observability log |
+| Critic / numeric audit | absent | unchanged from v3 |
+| Fallback | timeout fail | rules → LLM planner → graceful clarify |
+
+---
+
+## 11. v4 — Implementation map
+
+| Module | Responsibility |
+|---|---|
+| `planner/plan_spec.py` | PlanSpec dataclass, JSON roundtrip, $-ref resolver, validator, topo sort |
+| `planner/tool_catalog.py` | Catalog builder, prompt assembly, few-shot examples |
+| `planner/llm_planner.py` | Ollama call + retry + cache, returns `PlannerResult` |
+| `planner/router.py` (extended) | `execute_spec` / `execute_spec_stream` for PlanSpec DAGs |
+| `tools/meta/resolve_entity.py` | `resolve_author_name`, `resolve_book_title` @tool wrappers |
+| `rag_v2.py` (extended) | Calls LLM planner on v3-clarify with `WC_LLM_PLANNER=on` gate |
+
+**Tests (`tests/v2/`):**
+- `test_v4_plan_spec.py` — 26 tests (parsing, $-refs, validator, topo)
+- `test_v4_tool_catalog.py` — 13 tests (catalog + examples + prompt)
+- `test_v4_llm_planner.py` — 13 tests (Ollama mocked; retry, cache, history)
+- `test_v4_router_dag.py` — 11 tests (DAG ordering, failure modes, SSE)
+- `test_v4_resolve_entity.py` — 15 tests (curated aliases + tool registry)
+- `test_v4_rag_integration.py` — 3 tests (end-to-end with all mocks)
+
+Total: **81 new tests, 718 in suite, 0 failures.**
