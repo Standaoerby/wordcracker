@@ -391,6 +391,75 @@ class ChtoPochitatPosle(unittest.TestCase):
         self.assertEqual(m.label, "book_recommendation")
 
 
+class TokenObservability(unittest.TestCase):
+    """Sprint 17 — Ollama-side prompt_eval_count + eval_count flow into
+    obs_mod.log_request so the admin can answer «do we need more
+    num_ctx» from data, not guesses."""
+
+    def test_critic_verdict_carries_token_fields(self):
+        """CriticVerdict gained prompt_tokens / eval_tokens slots."""
+        from scripts.v2.critic import CriticVerdict
+        v = CriticVerdict.trust()
+        self.assertTrue(hasattr(v, "prompt_tokens"))
+        self.assertTrue(hasattr(v, "eval_tokens"))
+        # Trust path leaves them None — they're set only when the
+        # critic actually called the LLM.
+        self.assertIsNone(v.prompt_tokens)
+
+    def test_critic_review_captures_tokens_from_response(self):
+        """When the critic LLM responds, prompt_eval_count and
+        eval_count are surfaced on the verdict."""
+        import unittest.mock as _mock
+        from scripts.v2 import critic
+        fake_resp = _mock.MagicMock()
+        fake_resp.json.return_value = {
+            "message": {"content": '{"verified": true, "unsupported_claims": [], '
+                                    '"missing_caveats": [], "summary": "ok"}'},
+            "prompt_eval_count": 1234,
+            "eval_count": 56,
+        }
+        fake_resp.raise_for_status.return_value = None
+        with _mock.patch.object(critic, "CRITIC_ENABLED", True), \
+             _mock.patch("scripts.v2.critic.requests.post",
+                          return_value=fake_resp):
+            v = critic.review("answer", [{"tool": "x", "ok": True,
+                                           "data": {}, "coverage": None,
+                                           "warnings": []}],
+                              intent="author_metadata")
+        self.assertEqual(v.prompt_tokens, 1234)
+        self.assertEqual(v.eval_tokens, 56)
+        self.assertTrue(v.verified)
+
+    def test_llm_render_returns_tuple_with_meta(self):
+        """_llm_render now returns (text, meta) — meta carries
+        prompt_tokens / eval_tokens / durations."""
+        import unittest.mock as _mock
+        from scripts.v2 import rag_v2
+        from scripts.v2.planner.plan import QueryPlan
+        from scripts.v2.planner.entities import Entities
+        fake_resp = _mock.MagicMock()
+        fake_resp.json.return_value = {
+            "message": {"content": "the answer"},
+            "prompt_eval_count": 4096,
+            "eval_count": 128,
+            "total_duration": 3_500_000_000,
+            "load_duration": 100_000_000,
+        }
+        fake_resp.raise_for_status.return_value = None
+        plan = QueryPlan(intent="author_metadata", entities=Entities(),
+                          steps=[], explain="test")
+        with _mock.patch("scripts.v2.rag_v2.requests.post",
+                          return_value=fake_resp):
+            text, meta = rag_v2._llm_render(
+                "test question", plan, [],
+                model="x", ollama_host="http://localhost:0",
+            )
+        self.assertEqual(text, "the answer")
+        self.assertEqual(meta["prompt_tokens"], 4096)
+        self.assertEqual(meta["eval_tokens"], 128)
+        self.assertEqual(meta["total_duration_ns"], 3_500_000_000)
+
+
 class MidsummerKnownBook(unittest.TestCase):
     def test_nominative_resolves(self):
         e = ent_mod.extract("какие архаизмы в Сне в летнюю ночь")  # prep case

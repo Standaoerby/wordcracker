@@ -77,6 +77,11 @@ class CriticVerdict:
     missing_caveats: list[str]
     summary: str
     raw_text: str = ""  # for debug
+    # Sprint 17 — Ollama-side token counts so the admin dashboard can
+    # see «critic prompt size» distribution. None when critic didn't
+    # actually call the LLM (trust / skip paths).
+    prompt_tokens: int | None = None
+    eval_tokens: int | None = None
 
     @classmethod
     def trust(cls) -> "CriticVerdict":
@@ -209,14 +214,26 @@ def review(answer: str, tool_results_summary: list[dict], *,
         log.warning("critic call failed: %s", e)
         return CriticVerdict.trust()
 
-    content = ((resp.json() or {}).get("message") or {}).get("content", "")
+    body = resp.json() or {}
+    content = (body.get("message") or {}).get("content", "")
+    # Sprint 17 — surface Ollama prompt/eval token counts for the admin
+    # dashboard. Even when the verdict parses as trust, we keep the
+    # tokens (the call still cost VRAM + time).
+    critic_prompt_tokens = body.get("prompt_eval_count")
+    critic_eval_tokens = body.get("eval_count")
     if not content.strip():
-        return CriticVerdict.trust()
+        v = CriticVerdict.trust()
+        v.prompt_tokens = critic_prompt_tokens
+        v.eval_tokens = critic_eval_tokens
+        return v
     try:
         parsed = json.loads(content)
     except json.JSONDecodeError as e:
         log.warning("critic JSON parse failed: %s; raw=%r", e, content[:200])
-        return CriticVerdict.trust()
+        v = CriticVerdict.trust()
+        v.prompt_tokens = critic_prompt_tokens
+        v.eval_tokens = critic_eval_tokens
+        return v
 
     unsupported = list(parsed.get("unsupported_claims") or [])
     caveats = list(parsed.get("missing_caveats") or [])
@@ -237,6 +254,8 @@ def review(answer: str, tool_results_summary: list[dict], *,
             summary=(f"({len(unsupported)} weak flags suppressed — "
                      f"answer renders a table; treat numbers as data echo)"),
             raw_text=content[:500],
+            prompt_tokens=critic_prompt_tokens,
+            eval_tokens=critic_eval_tokens,
         )
     return CriticVerdict(
         verified=bool(parsed.get("verified", True)),
@@ -244,6 +263,8 @@ def review(answer: str, tool_results_summary: list[dict], *,
         missing_caveats=caveats,
         summary=str(parsed.get("summary") or "(no summary)"),
         raw_text=content[:500],
+        prompt_tokens=critic_prompt_tokens,
+        eval_tokens=critic_eval_tokens,
     )
 
 

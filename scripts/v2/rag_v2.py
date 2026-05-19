@@ -301,8 +301,13 @@ def _collect_render_instructions(results: list[ToolResult]) -> list[str]:
 def _llm_render(question: str, plan: plan_mod.QueryPlan,
                 results: list[ToolResult], *, model: str,
                 ollama_host: str,
-                history: list[dict] | None = None) -> str:
-    """Send one /api/chat call with the render prompt + tool data. No tools."""
+                history: list[dict] | None = None) -> tuple[str, dict]:
+    """Send one /api/chat call with the render prompt + tool data. No tools.
+
+    Sprint 17: returns (answer_text, meta) where meta carries Ollama's
+    prompt_eval_count + eval_count for observability. The token counts
+    feed obs_mod.log_request so the admin dashboard can answer «do we
+    need more num_ctx» data-driven instead of by guessing."""
     render_instructions = _collect_render_instructions(results)
     summary_payload = {
         "intent": plan.intent,
@@ -345,7 +350,15 @@ def _llm_render(question: str, plan: plan_mod.QueryPlan,
     }
     resp = requests.post(f"{ollama_host}/api/chat", json=payload, timeout=120)
     resp.raise_for_status()
-    return (resp.json().get("message", {}) or {}).get("content", "").strip()
+    body = resp.json() or {}
+    text = (body.get("message", {}) or {}).get("content", "").strip()
+    meta = {
+        "prompt_tokens": body.get("prompt_eval_count"),
+        "eval_tokens":   body.get("eval_count"),
+        "total_duration_ns": body.get("total_duration"),
+        "load_duration_ns":  body.get("load_duration"),
+    }
+    return text, meta
 
 
 # ---------- ask() — non-streaming ----------
@@ -483,14 +496,17 @@ def ask(
 
     rr = router_mod.execute(plan)
 
+    render_meta: dict = {}
     if intent.label == "introduction":
         # Skip LLM — return the static intro the user expects.
         answer = _intro_text()
     else:
         try:
-            answer = _llm_render(question, plan, rr.results,
-                                 model=model, ollama_host=ollama_host,
-                                 history=history)
+            answer, render_meta = _llm_render(
+                question, plan, rr.results,
+                model=model, ollama_host=ollama_host,
+                history=history,
+            )
         except Exception as e:
             log.exception("renderer LLM failed")
             answer = (f"[renderer error: {e}]\n\nRaw tool results:\n"
@@ -542,6 +558,12 @@ def ask(
         "critic_verified": verdict.verified,
         "critic_unsupported_n": len(verdict.unsupported_claims),
         "numeric_audit_mismatches": len(audit_report.mismatches),
+        # Sprint 17 — Ollama-side token counts (renderer + critic).
+        # Lets the admin dashboard answer «do we need more num_ctx».
+        "renderer_prompt_tokens": render_meta.get("prompt_tokens"),
+        "renderer_eval_tokens":   render_meta.get("eval_tokens"),
+        "critic_prompt_tokens":   verdict.prompt_tokens,
+        "critic_eval_tokens":     verdict.eval_tokens,
         "answer_truncated": answer[:300],
     })
     return {
@@ -675,13 +697,16 @@ def ask_stream(
             break
 
     # Renderer
+    render_meta: dict = {}
     if intent.label == "introduction":
         answer = _intro_text()
     else:
         try:
-            answer = _llm_render(question, plan, results,
-                                 model=model, ollama_host=ollama_host,
-                                 history=history)
+            answer, render_meta = _llm_render(
+                question, plan, results,
+                model=model, ollama_host=ollama_host,
+                history=history,
+            )
         except Exception as e:
             answer = f"[renderer error: {e}]"
 
@@ -722,6 +747,11 @@ def ask_stream(
         "critic_verified": verdict.verified,
         "critic_unsupported_n": len(verdict.unsupported_claims),
         "numeric_audit_mismatches": len(audit_report.mismatches),
+        # Sprint 17 — Ollama token counts (renderer + critic).
+        "renderer_prompt_tokens": render_meta.get("prompt_tokens"),
+        "renderer_eval_tokens":   render_meta.get("eval_tokens"),
+        "critic_prompt_tokens":   verdict.prompt_tokens,
+        "critic_eval_tokens":     verdict.eval_tokens,
         "answer_truncated": answer[:300],
         "via_stream": True,
     })
