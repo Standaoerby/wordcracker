@@ -1126,6 +1126,39 @@ def _plan_out_of_scope(e: Entities) -> QueryPlan:
     )
 
 
+# ===== Sprint 17 — book_similar =====
+
+
+def _plan_book_similar(e: Entities) -> QueryPlan:
+    """«Книги похожие на X», «продолжение X», «similar to X».
+
+    Strategy: use X's canonical title as the semantic topic for
+    find_book_by_topic. hybrid_search (semantic + lexical) finds
+    chunks thematically related to X, dedupe-by-pg_id surfaces top
+    candidate books. Result excludes X itself by post-filter (renderer
+    can also note «excluding the reference book»).
+
+    Requires a reference book. Without it the intent is meaningless —
+    fall back to clarify with a hint."""
+    if not e.book_id and not e.book_title:
+        return _need_book(e)
+    # Prefer the canonical English title — embeddings index is English,
+    # so «Преступление и наказание» as topic returns less than
+    # «Crime and Punishment».
+    topic = e.book_title or (e.raw_misc or {}).get("raw_text", "") or "books"
+    steps = [PlanStep(
+        tool="find_book_by_topic",
+        args={"topic": topic, "top": 8},
+    )]
+    return QueryPlan(
+        intent="book_similar", entities=e,
+        steps=steps,
+        expected_cost="medium",
+        explain=(f"book_similar → find_book_by_topic(topic={topic!r}) — "
+                 f"semantic neighbours of {e.book_title or e.book_id}"),
+    )
+
+
 # ===== Sprint 17 — book_readability_compare =====
 
 
@@ -1379,6 +1412,8 @@ PLAN_BUILDERS = {
     "book_pub_year":        _plan_book_pub_year,
     # Sprint 17 — readability comparison
     "book_readability_compare": _plan_book_readability_compare,
+    # Sprint 17 — books similar to a reference book
+    "book_similar":         _plan_book_similar,
     "out_of_scope":         _plan_out_of_scope,
 }
 

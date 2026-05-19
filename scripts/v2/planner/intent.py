@@ -66,6 +66,8 @@ INTENTS = frozenset({
     "book_pub_year",      # «когда была опубликована X», «year of X»
     # Sprint 17 — readability comparison
     "book_readability_compare",  # «что сложнее читать X или Y»
+    # Sprint 17 — books semantically similar to a reference book
+    "book_similar",      # «похожие на X», «продолжение X», «similar to X»
     "out_of_scope",
     "clarify",
 })
@@ -101,6 +103,10 @@ PRIORITY = {
     # Sprint 17 — readability compare. Above book_compare (110) so
     # «сложнее читать X или Y» wins over generic compare.
     "book_readability_compare": 152,
+    # Sprint 17 — «похожие на X» / «продолжение X». Above
+    # book_recommendation (118) and book_compare (110) so a specific
+    # similar-to-reference query wins over generic «что почитать».
+    "book_similar": 146,
     "vocab_passport": 150,
     "composite_compare": 145,
     "translation_quality": 140,
@@ -296,6 +302,45 @@ RULES: list[tuple[Pattern[str], str, float]] = [
      "topic_book_search", 0.85),
     (_re(r"\bчто\s+почитать\s+(про|о|об|на\s+тему|about)\s+"),
      "topic_book_search", 0.9),
+
+    # ===== Sprint 17 — book_similar =====
+    # «книги похожие на X», «продолжение X», «similar to X», «like X».
+    # Distinct from author_closest («кто похож на Doyle» — author probe)
+    # — book_similar rules REQUIRE explicit book context («книг/роман/
+    # произведен» word, OR «по жанру/стилю» qualifier, OR a quoted title,
+    # OR an explicit «similar to + capitalized X» where X is later
+    # resolved to a book entity). Without that constraint, «похож на» is
+    # too broad and steals author_closest queries.
+    #
+    # Critical: catches renderer's own follow-up suggestion «хочу по
+    # жанру похожему на X» — Stan 2026-05-19 was clicking on it only to
+    # land in clarify (UX trap: system suggesting a phrasing it can't
+    # itself classify).
+    (_re(r"\b(книг\w*|роман\w*|произведен\w*)\s+(похож\w*|подобн\w*)\s+на\s+"),
+     "book_similar", 0.93),
+    (_re(r"\bпохож\w*\s+по\s+(жанру|стилю|тематике)"),
+     "book_similar", 0.92),
+    (_re(r"\b(похож\w*|подобн\w*)\s+на\s+[«\"„]"),    # quoted target
+     "book_similar", 0.92),
+    (_re(r"\b(хочу|посоветуй|подскажи)\s+"
+         r"(?:книг\w*|роман\w*|произведен\w*)\s+"
+         r"(?:по\s+(жанру|стилю|тематике)\s+)?"
+         r"(похож\w*|подобн\w*)"),
+     "book_similar", 0.9),
+    # «продолжение X» — bare title accepted. The «продолжение» trigger
+    # is a strong book signal (never used for authors). Requires only a
+    # capitalized token after.
+    (_re(r"\bпродолжени\w+\s+(?:[«\"„])?[A-ZА-ЯЁ]"),
+     "book_similar", 0.88),
+    # English: «(recommend|find|suggest) books similar to/like X». The
+    # «books/novels» token is required to avoid stealing «authors similar
+    # to» phrasings.
+    (_re(r"\b(recommend|suggest|find)\s+(?:me\s+|a\s+)?"
+         r"(?:books?|novels?)\s+(?:similar|like)\s+(?:to\s+)?"),
+     "book_similar", 0.92),
+    (_re(r"\b(books?|novels?)\s+(similar\s+to|like|in\s+the\s+style\s+of)\s+"
+         r"[\"«]?[A-Z]"),
+     "book_similar", 0.9),
 
     # ===== Sprint 16 Phase G — book_pub_year =====
     # «когда была опубликована Война и мир», «год издания Pride and

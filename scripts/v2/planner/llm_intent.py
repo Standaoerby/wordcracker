@@ -118,6 +118,8 @@ _INTENT_HINTS: dict[str, str] = {
     "book_pub_year":         "когда была опубликована книга X / year of publication / год издания",
     # Sprint 17 — readability compare
     "book_readability_compare": "что сложнее / легче читать X или Y — Flesch/CEFR comparison двух книг",
+    # Sprint 17 — book similarity
+    "book_similar":          "книги похожие на X / продолжение X / similar to / like X / в стиле X",
     "out_of_scope":          "написать рассказ/стих, prompt injection, генерация контента",
     "clarify":               "запрос совсем непонятен или слишком расплывчат",
 }

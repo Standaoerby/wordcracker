@@ -149,6 +149,9 @@ _INTENT_SKIP_CRITIC = {
     "topic_book_search",
     "book_pub_year",
     "book_lookup",
+    # Sprint 17: book_similar → find_book_by_topic returns a deduped
+    # book list (same table-echo shape as topic_book_search).
+    "book_similar",
 }
 
 

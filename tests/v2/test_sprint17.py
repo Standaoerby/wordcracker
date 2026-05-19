@@ -269,6 +269,76 @@ class AskStreamObservability(unittest.TestCase):
                             msg=f"record missing via_stream: {rec}")
 
 
+class BookSimilarFollowupTrap(unittest.TestCase):
+    """Sprint 17 — Stan 2026-05-19 caught a UX trap: the renderer
+    suggests «хочу по жанру похожему на X» as a follow-up, but
+    classify('хочу по жанру похожему на X') fell to clarify.
+    System suggesting a phrasing it can't itself classify is a hard
+    fail — fix the gap, lock it in."""
+
+    # Disambiguation policy: book_similar fires only when the phrasing
+    # carries an explicit book signal (quoted title, «книг/роман/
+    # произведен» noun, «продолжение» trigger, or English «books/novels
+    # similar to»). «в стиле X» / «подобное на X» without quotes are
+    # ambiguous (could be author or book) and intentionally fall to LLM
+    # fallback so the entity-aware reclassifier can resolve.
+    PHRASINGS = [
+        "хочу по жанру или стилю, похожему на «Преступление и наказание»?",
+        "хочу по жанру или стилю, похожие на «Преступление и наказание»",
+        "книги похожие на Преступление и наказание",
+        "продолжение Преступления и наказания",
+        "recommend books similar to Crime and Punishment",
+        "find a novel like Dracula",
+    ]
+
+    AMBIGUOUS_BUT_NOT_AUTHOR_CLOSEST = [
+        # Should NOT classify as book_similar (would steal from author
+        # intents) but also NOT crash. Either clarify or another intent
+        # — anything except book_similar — is acceptable; LLM fallback
+        # will handle disambiguation in prod via classify_and_extract.
+        "в стиле Pride and Prejudice",
+        "что-то подобное на Дракулу",
+    ]
+
+    def test_all_phrasings_classify_to_book_similar(self):
+        for q in self.PHRASINGS:
+            with self.subTest(query=q):
+                m = int_mod.classify(q)
+                self.assertEqual(m.label, "book_similar",
+                                 msg=f"{q!r} → {m.label!r}, expected book_similar")
+
+    def test_author_closest_not_stolen(self):
+        """The author-similarity query «кто похож на Doyle» must stay
+        in author_closest — book_similar rules must require explicit
+        book context."""
+        m = int_mod.classify("кто похож на Doyle")
+        self.assertEqual(m.label, "author_closest")
+
+    def test_plan_dispatches_find_book_by_topic(self):
+        e = ent_mod.extract("книги похожие на Преступление и наказание")
+        p = plan_mod.build("book_similar", e)
+        self.assertEqual(p.intent, "book_similar")
+        self.assertEqual(len(p.steps), 1)
+        self.assertEqual(p.steps[0].tool, "find_book_by_topic")
+        # Topic must include enough signal to find similar books
+        topic = p.steps[0].args["topic"]
+        self.assertTrue(topic and len(topic) > 5,
+                        msg=f"topic too short: {topic!r}")
+
+    def test_no_book_clarifies(self):
+        """Without a reference book, book_similar has nothing to compare
+        — must clarify."""
+        e = ent_mod.extract("книги похожие на что-то")
+        p = plan_mod.build("book_similar", e)
+        self.assertTrue(p.needs_clarify)
+
+    def test_critic_skipped_for_similar(self):
+        """book_similar produces a book-list (same shape as
+        topic_book_search) → critic skipped to save 3-5s."""
+        from scripts.v2.critic import _INTENT_SKIP_CRITIC
+        self.assertIn("book_similar", _INTENT_SKIP_CRITIC)
+
+
 class MidsummerKnownBook(unittest.TestCase):
     def test_nominative_resolves(self):
         e = ent_mod.extract("какие архаизмы в Сне в летнюю ночь")  # prep case
