@@ -706,7 +706,13 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     # ===== author_vocab =====
     (_re(r"фирменн\w+\s+слов\w*|характерн\w+\s+(слов\w*|прилаг\w*|глагол\w*)|"
          r"signature words|маркер\w*\s+(стиля|автор)|"
-         r"distinctive (vocabulary|words)"), "author_vocab", 0.85),
+         r"distinctive (vocabulary|words)|"
+         # Sprint 20 — Stan 2026-05-19 «сто любимых слов Дойла». Living-
+         # language phrasings: «любимые слова», «любимая лексика»,
+         # «favourite words», «his go-to vocabulary».
+         r"любим\w+\s+(слов\w*|лексик\w*|выражен\w*)|"
+         r"favou?rite\s+(words|vocabulary|phrases)|"
+         r"go-?to\s+(vocabulary|words)"), "author_vocab", 0.85),
     # «Слова Толкина из LOTR», «лексика Свифта», — generic vocab queries
     # that name an author / book without a "characteristic" keyword.
     (_re(r"^\s*слова\s+[A-ZА-Я]\w+"), "author_vocab", 0.65),

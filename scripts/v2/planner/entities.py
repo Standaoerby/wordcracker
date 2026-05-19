@@ -1091,22 +1091,72 @@ def _find_pos(text: str) -> list[str] | None:
 _TOPN_RE = re.compile(
     r"\b(?:топ[\s-]?(\d{1,4})|top[\s-]?(\d{1,4})|"
     r"(?:первые|первых|first)\s+(\d{1,4})|"
-    r"(\d{1,4})\s+(?:слов|word|примеров|examples?))\b",
+    # Allow a single intervening adjective: «100 любимых слов»,
+    # «50 favourite phrases», «20 archaic words».
+    r"(\d{1,4})\s+(?:\w+\s+)?(?:слов\w*|words?|примеров|examples?|"
+    r"фраз\w*|выраж\w*|phrases))\b",
+    re.IGNORECASE,
+)
+
+
+# Sprint 20 — Stan «сто любимых слов Дойла» (2026-05-19). Russian
+# numeral *words* in nominative/genitive/accusative case + common
+# English numeral words. Stops at obvious magnitudes — finer-grained
+# (двадцать пять / twenty-five) isn't worth the regex tower; users
+# wanting precise N usually type digits.
+_NUMERAL_WORDS: dict[str, int] = {
+    # RU — base + genitive endings the parser sees in queries
+    "десять": 10, "десяти": 10,
+    "двадцать": 20, "двадцати": 20,
+    "тридцать": 30, "тридцати": 30,
+    "сорок": 40, "сорока": 40,
+    "пятьдесят": 50, "пятидесяти": 50,
+    "сто": 100, "ста": 100,
+    "двести": 200, "двухсот": 200,
+    "триста": 300, "трёхсот": 300, "трехсот": 300,
+    "пятьсот": 500, "пятисот": 500,
+    "тысяча": 1000, "тысячу": 1000, "тысячи": 1000,
+    # EN
+    "ten": 10, "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+    "hundred": 100, "two hundred": 200, "five hundred": 500,
+    "thousand": 1000,
+}
+
+# Word-boundary regex for the numeral-word path. Longest-first so
+# «two hundred» wins over «two» alone. Allows one optional adjective
+# between numeral and noun («сто любимых слов», «fifty favorite words»).
+_NUMERAL_WORD_RE = re.compile(
+    r"\b(" + "|".join(sorted(
+        (re.escape(k) for k in _NUMERAL_WORDS),
+        key=len, reverse=True,
+    )) + r")\s+(?:\w+\s+)?(?:слов\w*|words?|примеров|examples?)\b",
     re.IGNORECASE,
 )
 
 
 def _find_top_n(text: str) -> int | None:
+    """Extract a top_n hint from the query.
+
+    Tries digit-based patterns first («топ-N», «N слов»), then falls
+    back to numeral-word patterns («сто слов», «two hundred words»).
+    Caps at 1000 — anything larger is almost certainly a typo or a
+    long tail the user doesn't actually want to render.
+    """
     m = _TOPN_RE.search(text)
-    if not m:
-        return None
-    for g in m.groups():
-        if g:
-            try:
-                n = int(g)
-                return min(max(n, 1), 1000)
-            except ValueError:
-                continue
+    if m:
+        for g in m.groups():
+            if g:
+                try:
+                    n = int(g)
+                    return min(max(n, 1), 1000)
+                except ValueError:
+                    continue
+    m2 = _NUMERAL_WORD_RE.search(text)
+    if m2:
+        key = m2.group(1).lower()
+        n = _NUMERAL_WORDS.get(key)
+        if n is not None:
+            return min(max(n, 1), 1000)
     return None
 
 
