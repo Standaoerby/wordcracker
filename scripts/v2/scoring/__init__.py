@@ -37,6 +37,7 @@ Adding a new plugin
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 
@@ -336,6 +337,198 @@ class Ensemble:
                 f"(voted by {m}/{len(self.members)} metrics)")
 
 
+# ---------- Word-pair scoring (collocations) ----------
+#
+# All three plugins below share the same input contract — the v2
+# word_collocates wrapper does one I/O pass over counts files and
+# packages everything the math needs into a single ScoringQuery:
+#
+#   target        = target word (e.g. "fog")
+#   candidates    = [{"word": w, "c_pair": int, "c_neighbor": int}, ...]
+#   options       = {"c_target": int, "N": int (total tokens), "window": int}
+#
+# Math notation:
+#   N       = total tokens in scope
+#   W       = 2 * window (size of each side-pooled window around target)
+#   c(t)    = target word frequency in scope
+#   c(w)    = neighbor word frequency in scope
+#   c(t,w)  = observed co-occurrence count (w appears within ±window of t)
+#   E(t,w)  = c(t) * W * c(w) / N    — expected co-occurrences if independent
+#
+# All metrics filter out pairs with c(t,w) < min_cooccurrence at the
+# wrapper level (Plugin compute() doesn't filter — that's caller policy).
+
+
+def _wordpair_unpack(query: ScoringQuery) -> tuple[float, int, int, int] | None:
+    """Pull N, c_target, window, count of candidates from query.options.
+    Return None when prerequisites missing — plugin should then return []."""
+    opts = query.options or {}
+    N = opts.get("N")
+    c_target = opts.get("c_target")
+    window = opts.get("window", 4)
+    if not isinstance(N, (int, float)) or N <= 0:
+        return None
+    if not isinstance(c_target, (int, float)) or c_target <= 0:
+        return None
+    if not isinstance(window, (int, float)) or window <= 0:
+        return None
+    W = 2 * int(window)
+    return float(N), int(c_target), int(W), len(query.candidates)
+
+
+def _candidate_counts(cand: Any) -> tuple[str, int, int] | None:
+    """Normalize a candidate row: returns (word, c_pair, c_neighbor) or None."""
+    if not isinstance(cand, dict):
+        return None
+    word = cand.get("word") or cand.get("neighbor")
+    c_pair = cand.get("c_pair") or cand.get("count")
+    c_neighbor = cand.get("c_neighbor") or cand.get("scope_count")
+    if not isinstance(word, str) or not word:
+        return None
+    if not isinstance(c_pair, (int, float)) or c_pair <= 0:
+        return None
+    if not isinstance(c_neighbor, (int, float)) or c_neighbor <= 0:
+        return None
+    return word, int(c_pair), int(c_neighbor)
+
+
+class PMI:
+    """Pointwise Mutual Information (log2). Standard collocation strength
+    metric — high PMI = the pair is much more common than chance.
+
+    Caveat: PMI overestimates rare pairs (a single co-occurrence of two
+    1-count words gives huge PMI). Apply min_cooccurrence at the caller
+    to suppress this; NPMI also normalizes it away.
+    """
+    name = "pmi"
+    kinds = ("word_pair",)
+    cost = "cheap"
+
+    def compute(self, query: ScoringQuery) -> list[ScoredItem]:
+        if query.kind != "word_pair":
+            return []
+        unpacked = _wordpair_unpack(query)
+        if unpacked is None:
+            return []
+        N, c_target, W, _ = unpacked
+        out: list[ScoredItem] = []
+        for cand in query.candidates:
+            nc = _candidate_counts(cand)
+            if nc is None:
+                continue
+            word, c_pair, c_neighbor = nc
+            expected = c_target * W * c_neighbor / N
+            if expected <= 0:
+                continue
+            pmi = math.log2(c_pair / expected)
+            out.append(ScoredItem(
+                id=word, score=pmi, direction="higher_better",
+                extra={"c_pair": c_pair, "c_neighbor": c_neighbor,
+                       "expected": round(expected, 3)},
+            ))
+        out.sort(key=lambda s: s.score, reverse=True)
+        return out
+
+    def explain(self, scored: ScoredItem) -> str:
+        return (f"PMI {scored.score:.2f} bit "
+                f"(c_pair={scored.extra.get('c_pair')}, "
+                f"E={scored.extra.get('expected')})")
+
+
+class NPMI:
+    """Normalized PMI ∈ [-1, 1]. NPMI = PMI / -log2(p(t,w)).
+
+    -1 = never co-occur. 0 = independence. 1 = always co-occur.
+    Bouma 2009. Much more stable for ranking than raw PMI.
+    """
+    name = "npmi"
+    kinds = ("word_pair",)
+    cost = "cheap"
+
+    def compute(self, query: ScoringQuery) -> list[ScoredItem]:
+        if query.kind != "word_pair":
+            return []
+        unpacked = _wordpair_unpack(query)
+        if unpacked is None:
+            return []
+        N, c_target, W, _ = unpacked
+        # Total #pairs in scope = N * W (each token has W neighbors).
+        total_pairs = N * W
+        out: list[ScoredItem] = []
+        for cand in query.candidates:
+            nc = _candidate_counts(cand)
+            if nc is None:
+                continue
+            word, c_pair, c_neighbor = nc
+            expected = c_target * W * c_neighbor / N
+            if expected <= 0 or c_pair <= 0:
+                continue
+            p_pair = c_pair / total_pairs
+            if p_pair <= 0 or p_pair >= 1:
+                continue
+            pmi = math.log2(c_pair / expected)
+            denom = -math.log2(p_pair)
+            if denom == 0:
+                continue
+            npmi = pmi / denom
+            # Clamp into [-1, 1] for cosmetic robustness against
+            # numerical edge cases when c_pair=1 and expected~p_pair.
+            npmi = max(-1.0, min(1.0, npmi))
+            out.append(ScoredItem(
+                id=word, score=npmi, direction="higher_better",
+                extra={"c_pair": c_pair, "c_neighbor": c_neighbor,
+                       "pmi_bits": round(pmi, 3)},
+            ))
+        out.sort(key=lambda s: s.score, reverse=True)
+        return out
+
+    def explain(self, scored: ScoredItem) -> str:
+        return (f"NPMI {scored.score:.3f} "
+                f"(c_pair={scored.extra.get('c_pair')}, "
+                f"PMI={scored.extra.get('pmi_bits')} bit)")
+
+
+class Dice:
+    """Dice coefficient = 2*c(t,w) / (c(t)*W + c(w)).
+
+    Geometric similarity-style metric. Less sensitive than PMI to rare
+    words: a 1/1/1 pair gets a low Dice score, unlike PMI. Good when
+    PMI ranking is noisy.
+    """
+    name = "dice"
+    kinds = ("word_pair",)
+    cost = "cheap"
+
+    def compute(self, query: ScoringQuery) -> list[ScoredItem]:
+        if query.kind != "word_pair":
+            return []
+        unpacked = _wordpair_unpack(query)
+        if unpacked is None:
+            return []
+        _N, c_target, W, _ = unpacked
+        out: list[ScoredItem] = []
+        for cand in query.candidates:
+            nc = _candidate_counts(cand)
+            if nc is None:
+                continue
+            word, c_pair, c_neighbor = nc
+            denom = c_target * W + c_neighbor
+            if denom <= 0:
+                continue
+            dice = 2 * c_pair / denom
+            out.append(ScoredItem(
+                id=word, score=dice, direction="higher_better",
+                extra={"c_pair": c_pair, "c_neighbor": c_neighbor},
+            ))
+        out.sort(key=lambda s: s.score, reverse=True)
+        return out
+
+    def explain(self, scored: ScoredItem) -> str:
+        return (f"Dice {scored.score:.4f} "
+                f"(c_pair={scored.extra.get('c_pair')}, "
+                f"c_neighbor={scored.extra.get('c_neighbor')})")
+
+
 # ---------- Registry ----------
 
 REGISTRY: dict[str, ScoringPlugin] = {
@@ -343,6 +536,9 @@ REGISTRY: dict[str, ScoringPlugin] = {
     "jaccard_top200": JaccardTop200(),
     "ensemble":       Ensemble(),
     "bge_reranker":   BGEReranker(),  # heavy, lazy-loads on first .compute()
+    "pmi":            PMI(),
+    "npmi":           NPMI(),
+    "dice":           Dice(),
 }
 
 

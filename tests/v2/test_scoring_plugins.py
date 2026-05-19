@@ -182,6 +182,111 @@ class BGERerankerPlugin(unittest.TestCase):
                 candidates=[("id1", "text1")])), [])
 
 
+class WordPairPlugins(unittest.TestCase):
+    """PMI / NPMI / Dice — pure math, deterministic, no I/O."""
+
+    def _q(self, candidates, c_target=100, N=10_000, window=4):
+        from scripts.v2.scoring import ScoringQuery
+        return ScoringQuery(
+            kind="word_pair", target="fog", candidates=candidates,
+            options={"c_target": c_target, "N": N, "window": window},
+        )
+
+    def test_pmi_strong_association_outranks_weak(self):
+        """A pair seen far more than chance should beat a pair seen at chance."""
+        from scripts.v2.scoring import PMI
+        # In a 10k-token scope, fog occurs 100x, window=4 (W=8).
+        # Expected co-occurrence of "fog" with "thick" (c=80) = 100*8*80/10000=6.4
+        # Observed = 50 → strong positive PMI.
+        # Compare with "the" (c=600, expected=48, observed=48 → PMI ≈ 0)
+        results = PMI().compute(self._q([
+            {"word": "thick", "c_pair": 50, "c_neighbor": 80},
+            {"word": "neutral", "c_pair": 48, "c_neighbor": 600},
+        ]))
+        self.assertEqual(results[0].id, "thick")
+        self.assertGreater(results[0].score, results[1].score)
+        self.assertAlmostEqual(results[1].score, 0, delta=0.5)
+
+    def test_pmi_wrong_kind_returns_empty(self):
+        from scripts.v2.scoring import PMI, ScoringQuery
+        self.assertEqual(PMI().compute(ScoringQuery(
+            kind="author_similarity", target="^Doyle,")), [])
+
+    def test_pmi_missing_options_returns_empty(self):
+        from scripts.v2.scoring import PMI, ScoringQuery
+        # No c_target → can't compute
+        self.assertEqual(PMI().compute(ScoringQuery(
+            kind="word_pair", target="fog",
+            candidates=[{"word": "thick", "c_pair": 5, "c_neighbor": 10}],
+            options={"N": 1000, "window": 4})), [])
+
+    def test_pmi_skips_malformed_candidates(self):
+        from scripts.v2.scoring import PMI
+        results = PMI().compute(self._q([
+            {"word": "good", "c_pair": 30, "c_neighbor": 50},
+            {"word": "", "c_pair": 10, "c_neighbor": 10},     # empty word
+            {"word": "bad", "c_pair": 0, "c_neighbor": 10},   # zero c_pair
+            {"word": "bad2", "c_pair": 10, "c_neighbor": 0},  # zero c_neighbor
+            "not a dict",                                       # wrong type
+        ]))
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].id, "good")
+
+    def test_npmi_in_minus_one_to_one_range(self):
+        from scripts.v2.scoring import NPMI
+        results = NPMI().compute(self._q([
+            {"word": "perfect_pair", "c_pair": 100, "c_neighbor": 100},
+            {"word": "weak",         "c_pair": 5,   "c_neighbor": 500},
+            {"word": "balanced",     "c_pair": 30,  "c_neighbor": 200},
+        ]))
+        self.assertEqual(len(results), 3)
+        for r in results:
+            self.assertGreaterEqual(r.score, -1.0)
+            self.assertLessEqual(r.score, 1.0)
+
+    def test_npmi_clear_winner(self):
+        """Pair that always co-occurs with target should score near 1."""
+        from scripts.v2.scoring import NPMI
+        # Very specific pair: target=100 occurrences, "marsh" co-occurs 95 times
+        # → tightly bound. Compare with random="the" (large word, weak link).
+        results = NPMI().compute(self._q([
+            {"word": "marsh", "c_pair": 95, "c_neighbor": 100},
+            {"word": "the",   "c_pair": 30, "c_neighbor": 1000},
+        ]))
+        self.assertEqual(results[0].id, "marsh")
+        # marsh should dominate, the should be much lower
+        self.assertGreater(results[0].score - results[1].score, 0.1)
+
+    def test_dice_symmetric_and_bounded(self):
+        from scripts.v2.scoring import Dice
+        results = Dice().compute(self._q([
+            {"word": "tight",  "c_pair": 80, "c_neighbor": 100},
+            {"word": "loose",  "c_pair": 10, "c_neighbor": 1000},
+        ]))
+        self.assertEqual(results[0].id, "tight")
+        for r in results:
+            self.assertGreaterEqual(r.score, 0.0)
+            self.assertLessEqual(r.score, 1.0)
+
+    def test_dice_uses_c_neighbor_in_denom(self):
+        """A pair with same c_pair but larger c_neighbor should score lower —
+        Dice penalizes neighbor's overall commonality."""
+        from scripts.v2.scoring import Dice
+        results = Dice().compute(self._q([
+            {"word": "rare_pair", "c_pair": 20, "c_neighbor": 50},
+            {"word": "common_pair", "c_pair": 20, "c_neighbor": 5000},
+        ]))
+        rare = next(r for r in results if r.id == "rare_pair")
+        common = next(r for r in results if r.id == "common_pair")
+        self.assertGreater(rare.score, common.score)
+
+    def test_all_three_register_correctly(self):
+        from scripts.v2.scoring import REGISTRY
+        for name in ("pmi", "npmi", "dice"):
+            self.assertIn(name, REGISTRY)
+            self.assertIn("word_pair", REGISTRY[name].kinds)
+
+
 class EnsemblePlugin(unittest.TestCase):
     def test_borda_count_combines_metrics(self):
         from scripts.v2.scoring import Ensemble
