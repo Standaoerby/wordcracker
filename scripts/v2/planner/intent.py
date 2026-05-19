@@ -907,8 +907,14 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     # Round 3 R5 «найди упоминания битой посуды» — chat placeholder!
     # Routes to hybrid_search via word_contexts (which falls through to
     # hybrid_search in plan when no author scope).
+    # Sprint 20 — broadened to cover bare «упоминания X», «вхождения X»,
+    # «occurrences of X», «mentions of X» without the «найди» trigger.
     (_re(r"\bнайди\s+упоминани\w+|найди\s+(где\s+)?(говорится|описыва\w+)\s+"
-         r"(про|о|об)\s+|find\s+mentions?\s+of"), "word_contexts", 0.9),
+         r"(про|о|об)\s+|find\s+mentions?\s+of|"
+         r"\bупоминани\w+\s+\w+|\bвхождени\w+\s+(?:слова\s+)?\w+|"
+         r"\bвстречаемост\w+\s+\w+|"
+         r"\b(?:mentions?|occurrences?)\s+of\s+\w+"),
+     "word_contexts", 0.9),
     (_re(r"у\s+разных\s+авторов\b.{0,40}\bобъясни\s+оттенки"),
      "word_contexts", 0.95),
     (_re(r"в\s+необычных\s+контекстах|обычными\s+сейчас\b.{0,40}\bконтекст"),

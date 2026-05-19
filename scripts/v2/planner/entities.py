@@ -859,6 +859,12 @@ _WORD_AFTER_KEY = re.compile(
 # trigger keywords without weakening the «слово X» case.
 _WORD_AFTER_VERB = re.compile(
     r"\b(?:этимолог\w*|происхожден\w*|соседств\w*|"
+    # Sprint 20 — Stan 2026-05-19 «найди упоминания burger у Дойла»:
+    # «упоминания» / «вхождения» / «mentions of» / «occurrences of»
+    # weren't trigger words, so the word stayed unextracted even
+    # though the intent rule fired correctly.
+    r"упоминан\w*|вхождени\w*|встречаемост\w*|"
+    r"mentions?\s+of|occurrences?\s+of|"
     r"collocates?\s+of|etymology\s+of|contexts?\s+of)\s+"
     r"(?:слова\s+|word\s+)?"
     r"[\"'«“]?([a-zA-Zа-яё-]{3,30})[\"'»”]?",
