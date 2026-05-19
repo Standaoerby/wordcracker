@@ -615,9 +615,13 @@ def ask(
     # LLM. This handles compound queries (multi-book / triangulation /
     # etymology-ratio) without hand-coded branches in
     # `_smart_clarify_recipe`. See docs/v2/PLANNER.md §6 (v4).
+    #
+    # Skip when the followup branch above already ran the LLM planner
+    # — otherwise we double-dispatch the same query against Ollama
+    # (cache usually hits but still wastes a lookup).
     v4_planner_used = False
     v4_planner_report = None
-    if plan.needs_clarify:
+    if plan.needs_clarify and not v4_followup_used and v4_followup_report is None:
         try:
             from scripts.v2.planner import llm_planner as _llmp
         except ImportError:
@@ -665,6 +669,17 @@ def ask(
             "is_failure": True,
             "failure_kind": "clarify",
             "failure_reason": plan.explain or "no specific reason",
+            # v4 attempt visibility on clarify-falls — Stan can tell from
+            # the log whether a v4 path was tried and gave up, vs never
+            # attempted at all.
+            "v4_followup_used": v4_followup_used,
+            "v4_followup_attempts": (v4_followup_report.attempts
+                                      if v4_followup_report else None),
+            "v4_followup_elapsed_s": (round(v4_followup_report.elapsed_s, 2)
+                                       if v4_followup_report else None),
+            "v4_planner_attempted": v4_planner_report is not None,
+            "v4_planner_attempts": (v4_planner_report.attempts
+                                     if v4_planner_report else None),
             **({"unknown_author_candidates": unknown_authors}
                if unknown_authors else {}),
         })
@@ -796,6 +811,14 @@ def ask(
                                  if v4_planner_report else None),
         "v4_planner_elapsed_s": (round(v4_planner_report.elapsed_s, 2)
                                   if v4_planner_report else None),
+        # v4 followup path — Stan's Sprint 20+ routing for post-followup
+        # queries. Tells the dashboard whether the LLM-planner-first
+        # gate fired (separate from the clarify-rescue v4 path above).
+        "v4_followup_used": v4_followup_used,
+        "v4_followup_attempts": (v4_followup_report.attempts
+                                  if v4_followup_report else None),
+        "v4_followup_elapsed_s": (round(v4_followup_report.elapsed_s, 2)
+                                   if v4_followup_report else None),
         "answer_truncated": answer[:300],
     })
     return {
@@ -940,9 +963,11 @@ def ask_stream(
     # clarify AND WC_LLM_PLANNER=on, ask the LLM for a DAG plan and
     # stream its execution. Otherwise the original clarify event flows
     # through as before.
+    # Skip when followup branch already ran (avoid double Ollama call).
     v4_planner_used = False
     v4_planner_report = None
-    if plan.needs_clarify:
+    if (plan.needs_clarify and not v4_followup_used
+            and v4_followup_report is None):
         try:
             from scripts.v2.planner import llm_planner as _llmp
         except ImportError:
@@ -1011,6 +1036,11 @@ def ask_stream(
                                      if v4_planner_report else None),
             "v4_planner_elapsed_s": (round(v4_planner_report.elapsed_s, 2)
                                       if v4_planner_report else None),
+            "v4_followup_used": v4_followup_used,
+            "v4_followup_attempts": (v4_followup_report.attempts
+                                      if v4_followup_report else None),
+            "v4_followup_elapsed_s": (round(v4_followup_report.elapsed_s, 2)
+                                       if v4_followup_report else None),
             **({"unknown_author_candidates": unknown_authors}
                if unknown_authors else {}),
         })
@@ -1128,6 +1158,12 @@ def ask_stream(
                                  if v4_planner_report else None),
         "v4_planner_elapsed_s": (round(v4_planner_report.elapsed_s, 2)
                                   if v4_planner_report else None),
+        # v4 followup path (Sprint 20+)
+        "v4_followup_used": v4_followup_used,
+        "v4_followup_attempts": (v4_followup_report.attempts
+                                  if v4_followup_report else None),
+        "v4_followup_elapsed_s": (round(v4_followup_report.elapsed_s, 2)
+                                   if v4_followup_report else None),
         "answer_truncated": answer[:300],
         "via_stream": True,
     })
