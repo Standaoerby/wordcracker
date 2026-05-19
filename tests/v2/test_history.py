@@ -185,5 +185,72 @@ class HighTranslitCorpusFloor(unittest.TestCase):
         self.assertEqual(_auto_min_corpus_count(extract("слова Wodehouse")), 500)
 
 
+class ContextSwapFollowup(unittest.TestCase):
+    """Stan round 5 critical: «теперь у Диккенса» / «а у пушкина?» /
+    «давай теперь Толстого» — context-swap follow-ups that mention a new
+    entity but inherit the previous turn's intent."""
+
+    def test_teper_u_X(self):
+        from scripts.v2.planner.history import (
+            _looks_like_followup, _is_context_swap, infer_followup_intent,
+        )
+        history = [
+            {"role": "user", "content": "архаизмы в Dracula"},
+            {"role": "assistant", "content": "..."},
+        ]
+        self.assertTrue(_looks_like_followup("теперь у Диккенса"))
+        self.assertTrue(_is_context_swap("теперь у Диккенса"))
+        self.assertEqual(infer_followup_intent("теперь у Диккенса", history),
+                          "book_archaic")
+
+    def test_a_u_X(self):
+        from scripts.v2.planner.history import infer_followup_intent
+        history = [{"role": "user", "content": "фирменные слова Doyle"},
+                   {"role": "assistant", "content": "..."}]
+        self.assertEqual(infer_followup_intent("а у пушкина?", history),
+                          "author_vocab")
+
+    def test_davai_teper(self):
+        from scripts.v2.planner.history import infer_followup_intent
+        history = [{"role": "user", "content": "сравни Doyle и Wodehouse"},
+                   {"role": "assistant", "content": "..."}]
+        self.assertEqual(
+            infer_followup_intent("давай теперь Толстого", history),
+            "author_compare",
+        )
+
+    def test_no_history_no_inheritance(self):
+        from scripts.v2.planner.history import infer_followup_intent
+        self.assertIsNone(infer_followup_intent("теперь у Диккенса", history=None))
+        self.assertIsNone(infer_followup_intent("теперь у Диккенса", history=[]))
+
+
+class PoPrepositionCollision(unittest.TestCase):
+    """Stan round 5 corner-stone bug: «по» preposition collided with the
+    «по» alias of «Poe», 100% of «дай статистику по X» returned Poe."""
+
+    def test_po_preposition_not_extracted_as_author(self):
+        from scripts.v2.planner.entities import extract
+        # When «по» is followed by an author name or noun, it's a
+        # preposition, not the author Poe.
+        e = extract("дай статистику по Wodehouse")
+        self.assertEqual(e.author_regex, "^Wodehouse,",
+                          msg="«по» preposition shouldn't pick Poe over Wodehouse")
+        e = extract("дай статистику по Чехову")
+        self.assertEqual(e.author_regex, "^Chekhov,")
+        e = extract("статистика по корпусу")
+        self.assertIsNone(e.author_regex)
+        e = extract("найди слова по теме природы")
+        self.assertIsNone(e.author_regex)
+
+    def test_real_poe_still_works(self):
+        from scripts.v2.planner.entities import extract
+        # Real Poe references — capitalized or clearly proper-noun
+        self.assertEqual(extract("фирменные слова По").author_regex, "^Poe,")
+        self.assertEqual(extract("сравни По и Лавкрафта").author_regex, "^Poe,")
+        self.assertEqual(extract("Эдгар Аллан По").author_regex, "^Poe,")
+        self.assertEqual(extract("poe").author_regex, "^Poe,")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

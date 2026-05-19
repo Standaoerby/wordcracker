@@ -201,10 +201,17 @@ RULES: list[tuple[Pattern[str], str, float]] = [
          r"translation\s+(mistake|losses|quality)"), "translation_quality", 0.85),
 
     # ===== corpus_meta =====
-    (_re(r"\b(сколько|how many)\s.{0,20}(книг|book)"), "corpus_meta", 0.95),
-    # Round 2 R2: «слушай а сколько у тебя книжек в базе вообще» — diminutive
-    # «книжек» + filler opener «слушай а». Broaden to catch diminutive +
-    # «у тебя».
+    # Stan round 5: «сколько у Толстого книг» wrongly routed to corpus_meta
+    # (total) instead of author_metadata. Added negative lookahead — if the
+    # «сколько...книг» phrase has a capitalized name in between, it's an
+    # author-specific question and author_metadata's more specific rule
+    # should win (also bumped its conf above 0.95). The lookahead handles
+    # «сколько у Толстого книг», «сколько у X книг» staying out of
+    # corpus_meta.
+    (_re(r"\bсколько\s+(книг|book)\b"
+         r"(?!\w*\s+(у|of)\s+[А-ЯA-ZЁ])"), "corpus_meta", 0.95),
+    (_re(r"\bhow many (книг|book)"), "corpus_meta", 0.95),
+    # Diminutive form — «книжек» is corpus_meta (asking-the-system)
     (_re(r"\bсколько\s+(у\s+тебя\s+)?книж(ек|ка)\b"), "corpus_meta", 0.92),
     (_re(r"прогресс\s+индексаци\w*|index progress|reindex"), "corpus_meta", 0.92),
     (_re(r"\bпрогресс\b"), "corpus_meta", 0.6),

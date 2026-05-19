@@ -2236,6 +2236,14 @@ ETYMOLOGY_FAMILY_GROUPS = {
     "norse":           {"old_norse"},
     "romance":         {"latin", "old_french", "middle_french", "french",
                         "spanish", "italian", "portuguese", "old_portuguese"},
+    # Stan rounds 3-5: `latin` and `french` are listed in the v2 entity
+    # extractor (ETYMOLOGY_FAMILIES → "latin" / "french") and в README'е
+    # как отдельные families, но раньше отвергались здесь с «unknown
+    # family». Добавлены как narrow groups внутри Romance umbrella.
+    "latin":           {"latin"},
+    "french":          {"old_french", "middle_french", "french"},
+    "spanish":         {"spanish"},
+    "italian":         {"italian"},
     "greek":           {"ancient_greek", "greek"},
     "celtic":          {"celtic", "proto_celtic", "old_irish", "middle_breton"},
     "slavic":          {"slavic", "proto_slavic"},

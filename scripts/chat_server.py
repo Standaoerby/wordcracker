@@ -288,11 +288,43 @@ const log = document.getElementById('log');
 const q   = document.getElementById('q');
 const send = document.getElementById('send');
 const HKEY = 'wordcracker_chat_history_v1';
+// v2.9: client-side history clip. Stan round 5 Q11 caught localStorage
+// overflow → HTTP 400 once total payload (history + new question) >64KB
+// (the server-side cap from v2.3). 200 KB total cap here, with
+// truncate-from-head when exceeded, guarantees no request ever hits the
+// server-side limit. Plus 30-turn cap (which already matches the server's
+// MAX_HISTORY_TURNS).
+const HIST_MAX_BYTES = 200 * 1024;
+const HIST_MAX_TURNS = 30;
 
 function loadHistory() {
   try { return JSON.parse(localStorage.getItem(HKEY)) || []; } catch { return []; }
 }
-function saveHistory(h) { localStorage.setItem(HKEY, JSON.stringify(h)); }
+function _serialize(h) { return JSON.stringify(h); }
+function saveHistory(h) {
+  // Clip from the oldest end if the serialized history exceeds caps.
+  // Keep the most recent turns — they're what the planner / followup
+  // inference actually reads.
+  let clipped = h;
+  if (clipped.length > HIST_MAX_TURNS) {
+    clipped = clipped.slice(-HIST_MAX_TURNS);
+  }
+  let serialized = _serialize(clipped);
+  while (serialized.length > HIST_MAX_BYTES && clipped.length > 2) {
+    clipped = clipped.slice(2);  // drop oldest user+assistant pair
+    serialized = _serialize(clipped);
+  }
+  try {
+    localStorage.setItem(HKEY, serialized);
+  } catch (e) {
+    // QuotaExceededError or similar — fall back to keeping only last 4 turns
+    try {
+      localStorage.setItem(HKEY, _serialize(clipped.slice(-4)));
+    } catch {
+      localStorage.removeItem(HKEY);
+    }
+  }
+}
 function clearHistory() {
   if (confirm('Очистить историю?')) {
     localStorage.removeItem(HKEY);

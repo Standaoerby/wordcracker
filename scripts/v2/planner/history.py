@@ -31,17 +31,26 @@ _REF_TRIGGERS = re.compile(
     r"предыдущ\w*|"
     r"еще|ещё|"
     r"приведи (примеры|три|пример)|"
-    # «отсортируй / переразложи / в другом виде / по убыванию» — user is
-    # asking us to re-format the data the assistant just returned, not
-    # start a new query. Caught from Stan's 2026-05-18 round («дай
-    # фирменные слова пушкина» → table → «отсортируй их по количеству
-    # упоминаний» used to clarify-out).
+    # «отсортируй / переразложи / в другом виде / по убыванию» — re-rank.
     r"отсортируй|сортируй|пересортируй|перегруппируй|перестрой|"
     r"в другом (виде|формате|порядке)|"
     r"по убывани\w+|по возрастани\w+|"
     r"sort (them|by)|re-?rank|"
     r"of (this|these|those|that)|"
     r"more (examples|of these))\b",
+    re.IGNORECASE,
+)
+
+# Stan round 5 critical finding: «теперь у Диккенса» / «а у X» / «давай
+# теперь Толстого» — explicit context-swap follow-up that the main
+# `\b...\b` alternation pattern can't catch because trailing `\b`
+# requires word boundary RIGHT AFTER the trigger, but the new author
+# name follows immediately. Separate regex without trailing-anchor.
+_CONTEXT_SWAP_TRIGGERS = re.compile(
+    r"\b(теперь|сейчас|давай(\s+теперь)?|"
+    r"а\s+(у|во?|про|по)\s+\w|"
+    r"how\s+about|switch\s+to|change\s+to|"
+    r"now\s+(with|for|let'?s))",
     re.IGNORECASE,
 )
 
@@ -59,7 +68,14 @@ _RERANK_PATTERNS = re.compile(
 
 
 def _looks_like_followup(text: str) -> bool:
-    return bool(_REF_TRIGGERS.search(text))
+    return bool(_REF_TRIGGERS.search(text) or _CONTEXT_SWAP_TRIGGERS.search(text))
+
+
+def _is_context_swap(text: str) -> bool:
+    """True iff this is an author/book swap follow-up («теперь у X»,
+    «а у X»). Used to inherit prior intent while overriding entities
+    with what the new turn explicitly named."""
+    return bool(_CONTEXT_SWAP_TRIGGERS.search(text))
 
 
 def _scan_history_for_entities(history: list[dict]) -> Entities | None:
@@ -168,6 +184,19 @@ def infer_followup_intent(text: str,
     if _RERANK_PATTERNS.search(text) and history:
         # Re-classify the most recent user message that had a non-clarify
         # intent — that's the data we want re-rendered.
+        from scripts.v2.planner.intent import classify as _classify
+        for msg in reversed(history):
+            if msg.get("role") != "user":
+                continue
+            prior_intent = _classify(msg.get("content") or "")
+            if prior_intent.label not in ("clarify", ""):
+                return prior_intent.label
+    # Stan round 5: «теперь у Диккенса» / «а у пушкина?» — context-swap
+    # follow-ups. The current text has the NEW entity (Диккенс/пушкин)
+    # but no explicit intent, just a referring particle. Inherit intent
+    # from the prior user message so the new entity is queried with the
+    # same operation. Without this, every «теперь у X» falls to clarify.
+    if _is_context_swap(text) and history:
         from scripts.v2.planner.intent import classify as _classify
         for msg in reversed(history):
             if msg.get("role") != "user":
