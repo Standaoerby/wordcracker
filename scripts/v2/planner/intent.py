@@ -185,6 +185,34 @@ RULES: list[tuple[Pattern[str], str, float]] = [
          r"\bsurprise\s+me|"
          r"\btell\s+me\s+something\s+(cool|interesting)"),
      "introduction", 0.85),
+    # Sprint 19+ — meta-questions about the service itself. Stan
+    # 2026-05-19: naïve users ask «что за сервис», «кому ты подойдёшь»,
+    # «это бесплатный?», «как работает» — all fell to clarify. Same
+    # answer surface as «привет / что ты умеешь» — render the intro
+    # with capabilities + value prop + 4 starter examples.
+    (_re(r"\bчто\s+(это\s+|здесь\s+)?(за\s+)?сервис|"
+         r"\bкак\s+(ты|это|вы|сервис)\s+(работ\w+|устрое\w+)|"
+         r"\b(для\s+)?кого\s+(ты|вы|сервис)|"
+         r"\bкому\s+(ты\s+)?(подойд\w+|нужен|полезен)|"
+         r"\bдля\s+чего\s+(ты\s+)?(нужен|полезен|сделан)|"
+         r"\bзачем\s+(ты\s+|этот\s+)?(нужен|сервис)|"
+         r"\bwhat\s+(is\s+)?(this|that)\s+(service|tool|chatbot|app|bot)|"
+         r"\bwho\s+(is\s+)?this\s+(for|service)|"
+         r"\bhow\s+do(es)?\s+(this|you|it)\s+work|"
+         r"\bwhat\s+do\s+you\s+do\b"),
+     "introduction", 0.9),
+    # Sprint 19+ — pricing / freeness. Treat as introduction (a single
+    # honest sentence: «бесплатный исследовательский проект, поднят
+    # для личного использования, доступ через Basic Auth») fits into
+    # the intro text naturally. No separate pricing intent yet — keep
+    # the surface small.
+    (_re(r"\b(это\s+)?(бесплатн\w+|платн\w+)\s+(сервис|чат|инструмент|тул|tool|service|bot)|"
+         r"\bсколько\s+стоит\s+(использование|сервис|это)|"
+         r"\bplatish?\s+ли|"
+         r"\bis\s+(this|it)\s+free\b|"
+         r"\bdo\s+you\s+charge|"
+         r"\bpricing|cost"),
+     "introduction", 0.88),
     # Sprint 18+ Round 9 N8 — «сколько страниц в КНИГЕ?». Pages не наш
     # metric (corpus stored as tokens). Route to corpus_stats_by_author
     # via book_vocab? Нет — нужен per-book token count. Route to
@@ -493,7 +521,13 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     # bounces to _need_author with the curated suggestion list.
     (_re(r"\bкто\s+так(ой|ая|ие)\s+\w"),
      "author_metadata", 0.92),
-    (_re(r"\bwho\s+(is|was)\s+[A-Z]\w+"),
+    # Sprint 19+ — case-sensitive proper-noun guard, plus negative
+    # lookahead for service-meta words («this / that / it / here /
+    # the service / this for / this bot») which shouldn't trigger
+    # author_metadata (caught by introduction's meta-question rules).
+    (_re(r"\bwho\s+(is|was)\s+"
+         r"(?!(?:this|that|it|here|the|free|a)\b)"
+         r"(?-i:[A-Z])\w+"),
      "author_metadata", 0.88),
 
     # ===== book_lookup (Q2 from demon round) =====
