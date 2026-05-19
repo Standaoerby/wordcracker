@@ -320,23 +320,30 @@ def _plan_book_lookup(e: Entities) -> QueryPlan:
     """Q2 (Stan's 2026-05-18 demon round): «найди книгу X» = pure resolution
     query. Run `find_book` directly. If extractor already pinned a PG id
     via KNOWN_BOOKS substring scan, just return that — no tool call
-    needed."""
+    needed.
+
+    Sprint 19+: respect e.top_n — when set (typically by expansion
+    follow-up like «покажи все книги серии»), pass through to find_book
+    so the user gets the wider set."""
+    top_n = e.top_n or 5
     if e.book_id:
         # Synthesize a find_book-shape response from KNOWN_BOOKS so the
         # renderer has structured data to talk about.
         return QueryPlan(
             intent="book_lookup", entities=e, steps=[
                 PlanStep(tool="find_book",
-                         args={"title": e.book_title or e.book_id})],
+                         args={"title": e.book_title or e.book_id,
+                               "top": top_n})],
             expected_cost="cheap",
-            explain=f"find_book({e.book_title or e.book_id}) — known book {e.book_id}",
+            explain=f"find_book({e.book_title or e.book_id}, top={top_n}) — known book {e.book_id}",
         )
     if e.book_title:
         return QueryPlan(
             intent="book_lookup", entities=e, steps=[
-                PlanStep(tool="find_book", args={"title": e.book_title})],
+                PlanStep(tool="find_book",
+                         args={"title": e.book_title, "top": top_n})],
             expected_cost="cheap",
-            explain=f"find_book({e.book_title})",
+            explain=f"find_book({e.book_title}, top={top_n})",
         )
     # User said «найди книгу» but didn't name one — extract the rest of
     # the sentence after the trigger as the title query.
@@ -348,9 +355,9 @@ def _plan_book_lookup(e: Entities) -> QueryPlan:
         return _need_book(e)
     return QueryPlan(
         intent="book_lookup", entities=e, steps=[
-            PlanStep(tool="find_book", args={"title": title})],
+            PlanStep(tool="find_book", args={"title": title, "top": top_n})],
         expected_cost="cheap",
-        explain=f"find_book({title}) — extracted from trigger",
+        explain=f"find_book({title}, top={top_n}) — extracted from trigger",
     )
 
 

@@ -37,7 +37,19 @@ _REF_TRIGGERS = re.compile(
     r"по убывани\w+|по возрастани\w+|"
     r"sort (them|by)|re-?rank|"
     r"of (this|these|those|that)|"
-    r"more (examples|of these))\b",
+    r"more (examples|of these)|"
+    # Sprint 19+ — «покажи все / полный список / все книги серии /
+    # show all / list all» — expansion follow-ups. Prior intent gets
+    # re-run with bumped top_n to widen the result set. Stan caught
+    # this 2026-05-19: after «у тебя есть Harry Potter» returned 5
+    # of 7, «покажи все книги серии» dropped to clarify.
+    r"покажи\s+все\b|"
+    r"полный\s+список|"
+    r"все\s+(книги?|произведен\w+|works)|"
+    r"список\s+(всех|всё)|"
+    r"show\s+(all|me\s+all)|"
+    r"list\s+all|"
+    r"give\s+me\s+the\s+full)\b",
     re.IGNORECASE,
 )
 
@@ -80,6 +92,22 @@ _RERANK_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+# Sprint 19+ — expansion patterns: «покажи все», «полный список»,
+# «все книги серии», «show all», «list all», «give me the full
+# list». User wants the prior intent re-run with a wider top_n
+# limit. Distinct from rerank (same data, different order) and from
+# context-swap («теперь у X», new entity).
+_EXPAND_PATTERNS = re.compile(
+    r"покажи\s+(все|всё|всех)\b|"
+    r"полный\s+список|"
+    r"все\s+(книги?|произведен\w+|works)|"
+    r"список\s+(всех|всё)|"
+    r"show\s+(all|me\s+all)|"
+    r"list\s+all|"
+    r"give\s+me\s+the\s+full",
+    re.IGNORECASE,
+)
+
 
 def _looks_like_followup(text: str) -> bool:
     return bool(_REF_TRIGGERS.search(text) or _CONTEXT_SWAP_TRIGGERS.search(text))
@@ -90,6 +118,14 @@ def _is_context_swap(text: str) -> bool:
     «а у X»). Used to inherit prior intent while overriding entities
     with what the new turn explicitly named."""
     return bool(_CONTEXT_SWAP_TRIGGERS.search(text))
+
+
+def is_expansion_followup(text: str) -> bool:
+    """Sprint 19+ — «покажи все / полный список / show all»: user wants
+    the prior intent re-run with a wider top_n. Caller (plan builder
+    or rag_v2 pre-pass) reads this signal and bumps e.top_n
+    accordingly before re-running the prior plan."""
+    return bool(_EXPAND_PATTERNS.search(text))
 
 
 def _scan_history_for_entities(history: list[dict]) -> Entities | None:
@@ -205,6 +241,17 @@ def infer_followup_intent(text: str,
             prior_intent = _classify(msg.get("content") or "")
             if prior_intent.label not in ("clarify", ""):
                 return prior_intent.label
+    # Sprint 19+ — expansion follow-up («покажи все», «полный список»).
+    # Same re-classify-prior logic as rerank — same plan, but the
+    # plan-builder will see e.top_n bumped (set in merge_with_history).
+    if _EXPAND_PATTERNS.search(text) and history:
+        from scripts.v2.planner.intent import classify as _classify
+        for msg in reversed(history):
+            if msg.get("role") != "user":
+                continue
+            prior_intent = _classify(msg.get("content") or "")
+            if prior_intent.label not in ("clarify", ""):
+                return prior_intent.label
     # Stan round 5: «теперь у Диккенса» / «а у пушкина?» — context-swap
     # follow-ups. The current text has the NEW entity (Диккенс/пушкин)
     # but no explicit intent, just a referring particle. Inherit intent
@@ -289,4 +336,11 @@ def merge_with_history(current: Entities, history: list[dict] | None,
         backfilled.year_to = prior.year_to
     if backfilled.country is None and prior.country:
         backfilled.country = prior.country
+    # Sprint 19+ — expansion follow-up bumps top_n so the re-run plan
+    # gets a wider result set. «покажи все» after «у тебя есть HP»
+    # (top=5 → 7 matches existed) now re-runs with top=30 to surface
+    # the full set.
+    if is_expansion_followup(text) and (backfilled.top_n is None
+                                          or backfilled.top_n < 20):
+        backfilled.top_n = 30
     return backfilled
