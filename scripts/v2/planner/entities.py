@@ -564,8 +564,24 @@ def _find_book(text: str) -> tuple[str | None, str | None]:
             return None, title
         # Single short token (no spaces, < 12 chars) is almost certainly a
         # word, not a book title. Defer to _find_word; book_title stays None.
+        #
+        # Sprint 19 — context-aware override (Stan 2026-05-19 «эмоциональный
+        # профиль "Politics" Аристотеля» and «"Leviathan"» fell here and
+        # bounced to clarify). When the query has an explicit BOOK-context
+        # trigger («профиль / архаизм / уровень сложности / стиль / vocab /
+        # signature / readability / emotion»), keep the short quoted token
+        # as a book title — it can chain through find_book downstream.
         if " " not in title and len(title) < 12:
-            continue
+            low_text = text.lower()
+            book_context_triggers = (
+                "эмоциональн", "профил", "архаизм",
+                "уровень сложн", "сложности", "ridability", "readability",
+                "стил", "лексик", "словар", "vocab", "signature",
+                "характерн", "фирменн", "emotion", "архаичн",
+                "сравн", "compare",
+            )
+            if not any(t in low_text for t in book_context_triggers):
+                continue
         # Q10-style: «второго уровня» / «третьего уровня» / «второй» — these
         # are scope keywords in Russian, not book titles. Cyrillic-only
         # phrases shorter than ~25 chars almost never name a book (real
