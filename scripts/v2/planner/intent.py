@@ -56,6 +56,10 @@ INTENTS = frozenset({
     "topic_words",
     "translation_quality",
     "vocab_passport",
+    # Sprint 16 Phase E — meta-query intents
+    "author_lookup",      # «какие книги у X»
+    "book_extremum",      # «самая длинная / самая популярная книга»
+    "corpus_extremum",    # «самый плодовитый / влиятельный автор»
     "out_of_scope",
     "clarify",
 })
@@ -74,6 +78,14 @@ def _re(pattern: str) -> Pattern[str]:
 
 PRIORITY = {
     "out_of_scope": 200,
+    # Sprint 16 Phase E — meta-query intents above corpus_meta so the
+    # generic «корпус» rules don't swallow specific «какие книги у X».
+    # Above author_metadata (55) so «какие книги у Doyle» doesn't get
+    # eaten by the «сколько у X книг» rule (which is books_matched, not
+    # the actual list).
+    "author_lookup":   160,
+    "book_extremum":   158,
+    "corpus_extremum": 155,
     "vocab_passport": 150,
     "composite_compare": 145,
     "translation_quality": 140,
@@ -200,6 +212,58 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"транслит\w*|потер[ия]\s+(в|при)\s+перевод|"
          r"translation\s+(mistake|losses|quality)"), "translation_quality", 0.85),
 
+    # ===== Sprint 16 Phase E — meta-query intents =====
+    # Per-user-need pattern: «какие книги у X» / «список книг X» / «what
+    # books does X have» — wants the catalog of an author's works, not stats.
+    # Routed via author_metadata which already returns `sample_titles` +
+    # books_matched.
+    #
+    # Why explicit preposition is REQUIRED: IGNORECASE neutralizes the
+    # [A-Z] character class, so a no-prep rule «...книг + Capital + \w+»
+    # also matches «...произведения подойдут...» (B2 reading level Q30
+    # bug — false positive on common verbs after «произведения»).
+    # Forcing the preposition kills that ambiguity. Genitive-only
+    # phrasings like «Перечисли произведения Doyle» are routed by the
+    # LLM fallback (classify_and_extract) which sees the surname token.
+    (_re(r"\b(какие|каких|сколько\s+разных|перечисли|список|"
+         r"покажи\s+(все|список|книги)?)\s+"
+         r"(книг|произведен|роман|works)\w*\s+"
+         r"(у\s+|при\s+|of\s+|by\s+|написал\w*\s+)"),
+     "author_lookup", 0.92),
+    (_re(r"\bwhat\s+(books?|works?|novels?)\s+(does|did|by|of)\s+"
+         r"[A-Z]\w+"),
+     "author_lookup", 0.9),
+    (_re(r"\b(что|чё)\s+(есть|у\s+тебя\s+есть)\s+(у|от|of)\s+"
+         r"[A-ZА-ЯЁ]\w+\s*(в\s+корпус|в\s+базе)?"),
+     "author_lookup", 0.85),
+
+    # Single-book superlatives — «самая длинная книга», «самая короткая»,
+    # «самая популярная книга» (singular!), «book with the highest …».
+    # Plural «топ книг» → top_authors_books, not book_extremum.
+    (_re(r"\b(сам(ая|ый|ое)|какая\s+самая)\s+"
+         r"(длинн|больш|коротк|маленьк|популярн|"
+         r"скачиваем|сложн|прост|редк|архаичн|"
+         r"богат\w*\s+(словар|vocabular)|"
+         r"древн)\w*\s+(книг|роман|произведен)"),
+     "book_extremum", 0.92),
+    (_re(r"\bthe\s+(longest|shortest|most\s+(popular|downloaded|complex)|"
+         r"simplest|rarest|oldest)\s+(book|novel|work)\b"),
+     "book_extremum", 0.9),
+
+    # Single-author corpus superlative — «самый плодовитый автор», «самый
+    # популярный автор», «who is the most prolific author». Singular.
+    (_re(r"\b(сам(ый|ая|ое)|какой\s+самый)\s+"
+         r"(плодовит|популярн|читаем|скачиваем|известн|"
+         r"древн|молод|представительн)\w*\s+автор"),
+     "corpus_extremum", 0.92),
+    (_re(r"\b(who|кто)\s+(is|был|была)\s+the\s+"
+         r"most\s+(prolific|popular|read|downloaded|famous)\s+"
+         r"(author|writer|поэт|prose)"),
+     "corpus_extremum", 0.9),
+    (_re(r"\bкто\s+(самый|самая)\s+"
+         r"(плодовит|популярн|читаем|известн)\w*\s+автор"),
+     "corpus_extremum", 0.9),
+
     # ===== corpus_meta =====
     # Stan round 5: «сколько у Толстого книг» wrongly routed to corpus_meta
     # (total) instead of author_metadata. Added negative lookahead — if the
@@ -287,7 +351,8 @@ RULES: list[tuple[Pattern[str], str, float]] = [
      "top_authors_books", 0.85),
     (_re(r"(самые\s+попул\w*|самые\s+скачив\w*|most popular|most downloaded)"
          r"\b.{0,40}\b(автор\w*|book|книг)"), "top_authors_books", 0.9),
-    (_re(r"\b(топ|top)\s*\d*\s*(скачив\w*|downloaded|книг|book)"),
+    (_re(r"\b(топ[- ]?\d*|top[- ]?\d*)\s+(?:.{0,40}?\s+)?"
+         r"(скачив\w*|downloaded|книг|book)"),
      "top_authors_books", 0.7),
 
     # ===== book_compare (Q24 / Q27 / Q5-style — two or more books contrast) =====

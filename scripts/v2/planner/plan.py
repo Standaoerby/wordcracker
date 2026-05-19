@@ -1109,6 +1109,86 @@ def _plan_out_of_scope(e: Entities) -> QueryPlan:
     )
 
 
+# ===== Sprint 16 Phase E — meta-query plan builders =====
+
+
+def _plan_author_lookup(e: Entities) -> QueryPlan:
+    """«Какие книги у X» / «list books by X» — reuses author_metadata which
+    already returns `sample_titles` (up to 10) + `books_matched` count.
+    Renderer formats the list; the LLM prompt's strict-facts rule keeps
+    it bounded to actual data."""
+    if not e.author_regex:
+        return _need_author(e)
+    return QueryPlan(
+        intent="author_lookup", entities=e,
+        steps=[PlanStep(tool="author_metadata",
+                        args={"author_regex": e.author_regex})],
+        expected_cost="cheap",
+        explain=f"author_lookup → author_metadata({e.author_regex}) "
+                "for sample_titles + books_matched",
+    )
+
+
+def _plan_corpus_extremum(e: Entities) -> QueryPlan:
+    """«Самый плодовитый/популярный автор» — singleton case of top_authors_by.
+
+    Picks the metric from raw query text since classifier rules trigger on
+    «плодовитый» (books), «популярный» (downloads), «читаемый» (downloads).
+    """
+    raw = (e.raw_misc or {}).get("raw_text", "") or ""
+    raw_lc = raw.lower()
+    if any(w in raw_lc for w in ("плодовит", "написал", "prolific", "books")):
+        metric = "books"
+    elif any(w in raw_lc for w in ("популярн", "читаем", "скачиваем",
+                                    "popular", "downloaded", "read")):
+        metric = "downloads"
+    else:
+        metric = "books"   # safe default
+    return QueryPlan(
+        intent="corpus_extremum", entities=e,
+        steps=[PlanStep(tool="top_authors_by",
+                        args={"metric": metric, "top": 1})],
+        expected_cost="medium",
+        explain=f"corpus_extremum → top_authors_by(metric={metric}, top=1)",
+    )
+
+
+def _plan_book_extremum(e: Entities) -> QueryPlan:
+    """«Самая популярная книга» → top_books_by_downloads(top=1).
+    Other superlatives (longest, simplest, oldest) don't have a single
+    universal tool — route to clarify with a targeted hint until v3.1.
+
+    Stan's Phase E brief: focus on routing the most-common queries; the
+    long tail of «самая редкая» / «самая древняя» is deferred."""
+    raw = (e.raw_misc or {}).get("raw_text", "") or ""
+    raw_lc = raw.lower()
+    if any(w in raw_lc for w in ("популярн", "скачиваем", "читаем",
+                                  "popular", "downloaded", "most read")):
+        return QueryPlan(
+            intent="book_extremum", entities=e,
+            steps=[PlanStep(tool="top_books_by_downloads",
+                            args={"top": 1})],
+            expected_cost="medium",
+            explain="book_extremum → top_books_by_downloads(top=1)",
+        )
+    # For length/complexity/rarity extremums we don't have a one-shot tool.
+    # Route to clarify with a useful menu of options. The Phase G long-tail
+    # work can land specific tools later.
+    return QueryPlan(
+        intent="clarify", entities=e, steps=[],
+        needs_clarify=True,
+        clarify_question=(
+            "Single-book superlatives кроме «самая популярная» пока требуют "
+            "точного критерия. Попробуй:\n"
+            "• «топ-10 самых популярных книг» → top_books_by_downloads\n"
+            "• «самая длинная книга у Doyle» → сравнение книг автора (book_compare)\n"
+            "• «топ-5 книг по readability» → пока вручную через book_readability\n"
+            "\nНадо вычислить экстремум по другому полю? Скажи конкретнее."
+        ),
+        explain="book_extremum → clarify (no single-book extremum tool yet)",
+    )
+
+
 # ===== dispatch table =====
 
 
@@ -1148,6 +1228,10 @@ PLAN_BUILDERS = {
     "vocab_passport":       _plan_vocab_passport,
     "word_dialogue":        _plan_word_dialogue,
     "word_movement":        _plan_word_movement,
+    # Sprint 16 Phase E — meta-query intents
+    "author_lookup":        _plan_author_lookup,
+    "corpus_extremum":      _plan_corpus_extremum,
+    "book_extremum":        _plan_book_extremum,
     "out_of_scope":         _plan_out_of_scope,
 }
 

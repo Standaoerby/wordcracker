@@ -78,6 +78,7 @@ _INTENTS_REQUIRING_ENTITIES = {
     "author_closest":    ("author_regex",),
     "author_influences": ("author_regex",),
     "author_metadata":   ("author_regex",),
+    "author_lookup":     ("author_regex",),  # Sprint 16 Phase E
     "country_vocab":     ("author_regex",),
     "vocab_passport":    ("author_regex",),
     "lexical_wealth":    (),  # global query, no entity required
