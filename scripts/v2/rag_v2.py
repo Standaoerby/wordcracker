@@ -193,6 +193,70 @@ def _merge_llm_entities(entities, llm_full: dict) -> None:
             entities.country = country.upper()
 
 
+# ---------- Sprint 16 Phase A3: unknown author candidate telemetry ----------
+
+
+# Common-word stoplist: capitalized tokens at sentence start, English
+# nouns / titles that shouldn't trigger «unknown author» false alarms.
+_AUTHOR_CANDIDATE_STOPLIST = frozenset({
+    # Sentence starters (RU) — title case typo / Russian first-letter
+    "Какие", "Какой", "Какая", "Когда", "Почему", "Где", "Кто", "Что",
+    "Найди", "Покажи", "Дай", "Сравни", "Топ", "Сколько", "Слово",
+    "Слова", "Топ", "Что", "Список", "Пример", "Примеры",
+    # Sentence starters (EN)
+    "What", "Who", "When", "Where", "Why", "How", "Show", "Find", "Give",
+    "List", "Top", "Compare", "Words", "Word", "The",
+    # Common literary terms that get capitalized
+    "Romance", "Gothic", "Victorian", "Edwardian", "Russian", "English",
+    "American", "British", "French", "German", "Italian",
+    # Days / months / years caught accidentally
+    "January", "February", "March", "April", "May", "June", "July",
+    "August", "September", "October", "November", "December",
+    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+    "Sunday",
+    # Common short proper-noun-ish tokens
+    "AI", "PG", "LLM", "ChromaDB", "OK", "FAQ", "Anki",
+})
+
+
+def _detect_unknown_author_candidates(text: str, entities) -> list[str]:
+    """Return capitalized 4+ char tokens in `text` that look like author
+    surnames but weren't matched by entities.extract().
+
+    Heuristics:
+    - Token starts with uppercase letter
+    - Length 4-25 chars
+    - All letters (no digits/punctuation in middle)
+    - Not in stoplist (common starters / nouns)
+    - Not already matched as author by regex extractor (would shadow)
+    - At most 3 candidates returned per query — beyond that = noise
+
+    Goal: Stan sees «query: 'что у вас про Уолпол?' → no_author_extracted,
+    candidate: Уолпол» in admin /failed and knows what to add to aliases
+    next time. Foundation for «promote to alias» button (Phase H3, deferred).
+    """
+    if not text or entities.author_regex:
+        return []
+    import re
+    # Find capitalized tokens 4-25 chars, alphabetic + apostrophe + hyphen
+    tokens = re.findall(
+        r"\b([A-ZА-ЯЁ][a-zа-яё.''-]{3,24})\b",
+        text,
+    )
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in tokens:
+        if t in _AUTHOR_CANDIDATE_STOPLIST:
+            continue
+        if t.lower() in seen:
+            continue
+        seen.add(t.lower())
+        out.append(t)
+        if len(out) >= 3:
+            break
+    return out
+
+
 # ---------- LLM call (renderer only) ----------
 
 
@@ -348,6 +412,13 @@ def ask(
 
     if plan.needs_clarify:
         clarify_answer = plan.clarify_question or "Уточни запрос."
+        # v3.0 Phase A3: detect «unknown author candidate» in the query —
+        # capitalized tokens that LOOK like an author surname but weren't
+        # matched by AUTHOR_ALIASES. These are the candidates Stan should
+        # add to AUTHOR_ALIASES_CURATED OR trigger a rebuild of the
+        # generated layer. Surfaces in `/admin/failed` as a separate
+        # signal from generic clarifies.
+        unknown_authors = _detect_unknown_author_candidates(question, entities)
         # v2.7: log failed query so admin UI can show «what users asked
         # but didn't get a tool answer for». Reason = why the planner
         # bounced out (no author / no book / no word / etc).
@@ -362,6 +433,8 @@ def ask(
             "is_failure": True,
             "failure_kind": "clarify",
             "failure_reason": plan.explain or "no specific reason",
+            **({"unknown_author_candidates": unknown_authors}
+               if unknown_authors else {}),
         })
         return {
             "answer": clarify_answer,

@@ -145,5 +145,48 @@ class MergeLLMEntities(unittest.TestCase):
         self.assertIsNone(e.author_regex)
 
 
+class UnknownAuthorCandidates(unittest.TestCase):
+    """Sprint 16 Phase A3: detect capitalized tokens that look like an
+    unknown author surname in queries that fell to clarify with no author
+    extracted. Surfaces in admin /failed as «what authors to add»."""
+
+    def test_unknown_walpole_detected(self):
+        from scripts.v2.rag_v2 import _detect_unknown_author_candidates
+        e = Entities()
+        candidates = _detect_unknown_author_candidates(
+            "Что ты знаешь про Уолпола?", e)
+        self.assertIn("Уолпола", candidates)
+
+    def test_known_author_not_flagged(self):
+        from scripts.v2.rag_v2 import _detect_unknown_author_candidates
+        e = Entities(author_regex="^Doyle,")
+        # Already matched — return nothing
+        self.assertEqual(_detect_unknown_author_candidates("слова у Doyle", e), [])
+
+    def test_stoplist_filters_starters(self):
+        from scripts.v2.rag_v2 import _detect_unknown_author_candidates
+        e = Entities()
+        # «Какие», «Покажи» — starters, not authors
+        candidates = _detect_unknown_author_candidates(
+            "Какие слова у автора Бредбери?", e)
+        self.assertNotIn("Какие", candidates)
+        self.assertIn("Бредбери", candidates)
+
+    def test_short_tokens_ignored(self):
+        from scripts.v2.rag_v2 import _detect_unknown_author_candidates
+        e = Entities()
+        # «Of», «By» short — never authors
+        candidates = _detect_unknown_author_candidates("Of By At", e)
+        self.assertEqual(candidates, [])
+
+    def test_max_3_per_query(self):
+        from scripts.v2.rag_v2 import _detect_unknown_author_candidates
+        e = Entities()
+        text = ("Хочу узнать про Smith, Jones, Robinson, Williams, "
+                "Anderson, Brown, Wilson")
+        candidates = _detect_unknown_author_candidates(text, e)
+        self.assertLessEqual(len(candidates), 3)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
