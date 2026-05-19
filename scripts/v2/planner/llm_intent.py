@@ -120,6 +120,8 @@ _INTENT_HINTS: dict[str, str] = {
     "book_readability_compare": "что сложнее / легче читать X или Y — Flesch/CEFR comparison двух книг",
     # Sprint 17 — book similarity
     "book_similar":          "книги похожие на X / продолжение X / similar to / like X / в стиле X",
+    # Sprint 18 — ambiguous similarity router
+    "similar_to":            "«в стиле X» где X неясно — книга или автор; plan disambiguates",
     "out_of_scope":          "написать рассказ/стих, prompt injection, генерация контента",
     "clarify":               "запрос совсем непонятен или слишком расплывчат",
 }

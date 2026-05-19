@@ -549,6 +549,14 @@ def _plan_author_closest(e: Entities) -> QueryPlan:
 
 
 def _plan_author_attribution(e: Entities) -> QueryPlan:
+    # Sprint 18 — bibliographic «who wrote X» / «кто автор Дракулы»
+    # falls through to book_lookup. The original «кто автор» rule was
+    # tagged author_attribution but stylometric attribution requires
+    # the passage text, not a book title. When a book is explicitly
+    # named, the user wants the book's author from metadata — that's
+    # book_lookup territory.
+    if e.book_id or e.book_title:
+        return _plan_book_lookup(e)
     text = (e.raw_misc or {}).get("attribution_text")
     if not text:
         return QueryPlan(
@@ -768,6 +776,52 @@ def _plan_word_collocates(e: Entities) -> QueryPlan:
     )
 
 
+_MULTI_WORD_TIMELINE_RE = None
+
+
+def _detect_multi_word_timeline(raw: str, primary: str | None) -> list[str]:
+    """Sprint 18 — Round 8 C5: «timeline telephone+automobile+aeroplane»
+    or «timeline telephone, automobile, aeroplane» — capture all bare
+    lowercase Latin tokens chained by «+» or «,». Cap at 5 to bound
+    wall-clock. Returns deduped list ordered by appearance, with the
+    primary entity word first if present."""
+    import re
+    global _MULTI_WORD_TIMELINE_RE
+    if _MULTI_WORD_TIMELINE_RE is None:
+        # Triggers: «timeline X+Y+Z», «X, Y и Z по эпохам», «частота X+Y»
+        _MULTI_WORD_TIMELINE_RE = re.compile(
+            r"\b([a-z]{3,30})(?:\s*[+,]\s*([a-z]{3,30}))+",
+            re.IGNORECASE,
+        )
+    if not raw:
+        return [primary] if primary else []
+    # Find the «X+Y» or «X, Y» span anywhere in the query
+    m = _MULTI_WORD_TIMELINE_RE.search(raw)
+    if not m:
+        return [primary] if primary else []
+    # Walk the matched span and split on + / , — captures every token
+    span = m.group(0)
+    tokens = re.split(r"\s*[+,]\s*", span)
+    out: list[str] = []
+    seen: set[str] = set()
+    if primary and primary not in seen:
+        out.append(primary.lower())
+        seen.add(primary.lower())
+    for t in tokens:
+        t = t.strip().lower()
+        if not t or t in seen:
+            continue
+        if len(t) < 3 or len(t) > 30:
+            continue
+        if not t.isascii() or not t.isalpha():
+            continue
+        out.append(t)
+        seen.add(t)
+        if len(out) >= 5:
+            break
+    return out
+
+
 def _plan_word_timeline(e: Entities) -> QueryPlan:
     if e.year_from and not e.year_to:
         return QueryPlan(
@@ -776,6 +830,23 @@ def _plan_word_timeline(e: Entities) -> QueryPlan:
                             args={"year": e.year_from - 1, "top": e.top_n or 25})],
             expected_cost="medium",
             explain=f"words_disappearing_after({e.year_from - 1})",
+        )
+    # Sprint 18 — multi-word timeline (Round 8 C5). Emit N parallel
+    # word_freq_timeline calls; renderer plots them side by side.
+    raw = (e.raw_misc or {}).get("raw_text") or ""
+    multi_words = _detect_multi_word_timeline(raw, e.word)
+    if len(multi_words) > 1:
+        steps = [PlanStep(
+            tool="word_freq_timeline",
+            args={"word": w, "bucket_years": 25},
+            optional=(i > 0),  # primary required, secondaries best-effort
+        ) for i, w in enumerate(multi_words[:5])]
+        return QueryPlan(
+            intent="word_timeline", entities=e,
+            steps=steps,
+            expected_cost="medium",
+            explain=(f"word_freq_timeline × {len(multi_words[:5])} "
+                     f"({', '.join(multi_words[:5])})"),
         )
     if e.word:
         return QueryPlan(
@@ -1162,6 +1233,35 @@ def _plan_out_of_scope(e: Entities) -> QueryPlan:
     )
 
 
+# ===== Sprint 18 — similar_to (ambiguous similarity router) =====
+
+
+def _plan_similar_to(e: Entities) -> QueryPlan:
+    """«в стиле X» / «типа X» — X may be a book OR an author. Resolve
+    by which entity slot the extractor filled, then delegate to the
+    appropriate concrete plan. Mostly hits when neither book_similar
+    nor author_closest's specific rules matched first (priority 130
+    keeps it below those)."""
+    if e.book_id or e.book_title:
+        return _plan_book_similar(e)
+    if e.author_regex:
+        # Reuse author_closest semantics — «похож по стилю» = closest
+        # stylistic neighbours via author_influences/Burrows Delta.
+        return _plan_author_closest(e)
+    # Neither resolved → clarify with both-options hint
+    return QueryPlan(
+        intent="clarify", entities=e, steps=[],
+        needs_clarify=True,
+        clarify_question=(
+            "«В стиле X» — X это книга или автор? Уточни:\n"
+            "• «в стиле книги "
+            "«Pride and Prejudice»» → похожие книги\n"
+            "• «в стиле автора Doyle» → похожие авторы по Burrows Delta"
+        ),
+        explain="similar_to — entity not resolved",
+    )
+
+
 # ===== Sprint 17 — book_similar =====
 
 
@@ -1460,6 +1560,8 @@ PLAN_BUILDERS = {
     "book_readability_compare": _plan_book_readability_compare,
     # Sprint 17 — books similar to a reference book
     "book_similar":         _plan_book_similar,
+    # Sprint 18 — ambiguous similarity router («в стиле X»)
+    "similar_to":           _plan_similar_to,
     "out_of_scope":         _plan_out_of_scope,
 }
 

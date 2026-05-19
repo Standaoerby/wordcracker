@@ -68,6 +68,10 @@ INTENTS = frozenset({
     "book_readability_compare",  # «что сложнее читать X или Y»
     # Sprint 17 — books semantically similar to a reference book
     "book_similar",      # «похожие на X», «продолжение X», «similar to X»
+    # Sprint 18 — ambiguous similarity («в стиле X»). Plan-time
+    # disambiguator routes to book_similar OR author_closest based on
+    # which entity (book or author) was resolved.
+    "similar_to",
     "out_of_scope",
     "clarify",
 })
@@ -107,6 +111,11 @@ PRIORITY = {
     # book_recommendation (118) and book_compare (110) so a specific
     # similar-to-reference query wins over generic «что почитать».
     "book_similar": 146,
+    # Sprint 18 — ambiguous similarity router. Below book_similar so
+    # the explicit-book rules win; only kicks in when neither
+    # book_similar nor author_closest matched directly. Above
+    # book_recommendation 118.
+    "similar_to": 130,
     "vocab_passport": 150,
     "composite_compare": 145,
     "translation_quality": 140,
@@ -341,13 +350,24 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"\b(books?|novels?)\s+(similar\s+to|like|in\s+the\s+style\s+of)\s+"
          r"[\"«]?[A-Z]"),
      "book_similar", 0.9),
+    # Sprint 18 — ambiguous similarity. «в стиле X» / «подобное на X» /
+    # «типа X» without explicit book/author marker. Routes to similar_to;
+    # plan disambiguates by extracted entity (book → book_similar,
+    # author → author_closest). Avoids regex IGNORECASE neutralizing
+    # the capital-letter check.
+    (_re(r"\b(в\s+стиле|in\s+the\s+style\s+of|типа\s+как)\s+\w"),
+     "similar_to", 0.83),
 
     # ===== Sprint 16 Phase G — book_pub_year =====
     # «когда была опубликована Война и мир», «год издания Pride and
     # Prejudice», «when was Dracula published». Surfaces pub_year via
     # find_book (Sprint 9.7 Open Library enrichment).
+    # Sprint 18: dropped «появил\w*» from the rule — too generic, was
+    # eating «когда появилось слово radio» (word_timeline) and «когда
+    # появились telephone, automobile» (multi-word timeline). The
+    # remaining verbs (опубликован/издан/вышл/написан) are book-specific.
     (_re(r"\b(когда\s+(была\s+|был\s+)?"
-         r"(опубликован\w*|издан\w*|вышл\w*|написан\w*|появил\w*)|"
+         r"(опубликован\w*|издан\w*|вышл\w*|написан\w*)|"
          r"год\s+(публикаци\w*|издани\w*|выход\w*|написани\w*)|"
          r"в\s+как(ом|ой)\s+году\s+(была\s+|был\s+)?"
          r"(опубликован\w*|издан\w*|вышл\w*|написан\w*))"),
@@ -520,6 +540,15 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     # ===== author_attribution =====
     (_re(r"кто автор|определи автора|attribute (this )?text|authorship of"),
      "author_attribution", 0.9),
+    # Sprint 18 — bibliographic «who wrote X» / «кто написал X». Plan
+    # dispatches via _plan_author_attribution which now routes to
+    # book_lookup if a book entity is present. Pure stylometry queries
+    # («angle: passage») still hit the «кто автор» / «определи автора»
+    # path above.
+    (_re(r"\b(who\s+wrote|кто\s+написал)\s+[«\"„]?[A-ZА-ЯЁ]"),
+     "author_attribution", 0.92),
+    (_re(r"\bwho\s+is\s+the\s+author\s+of\s+[«\"„]?[A-ZА-ЯЁ]"),
+     "author_attribution", 0.91),
     # Sprint 17 Round 8 C7: «угадай автора отрывка X» / «whose passage
     # is this» — natural phrasings the existing «кто автор» rule misses.
     (_re(r"\b(угадай|отгада[йт]|определи|пойми|identify|guess|determine)\s+"
@@ -699,6 +728,24 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"почти\s+исчезают\s+после"), "word_timeline", 0.95),
     (_re(r"популярны\s+у\s+викторианск\w*\b.{0,30}\bисчезл"),
      "word_timeline", 0.9),
+    # Sprint 18 Round 8 C5 — multi-word timeline. «timeline telephone+
+    # automobile+aeroplane» / «частота radio+television по эпохам» /
+    # «когда появились telephone, automobile, aeroplane». Bare lowercase
+    # English tokens chained by + or , inside a timeline-trigger context.
+    (_re(r"\b(timeline|частота|когда\s+появил\w*)\b.{0,40}"
+         r"\b[a-z]{3,}\s*[+,]\s*[a-z]{3,}"),
+     "word_timeline", 0.92),
+    (_re(r"\b[a-z]{3,}\s*[+,]\s*[a-z]{3,}\b.{0,40}\b"
+         r"(timeline|по\s+эпох|over\s+(time|years|decades))"),
+     "word_timeline", 0.9),
+    # Sprint 18 — single-word origin queries. «когда появилось слово
+    # radio» / «когда появилось radio в текстах». Distinct from
+    # book_pub_year (which is «когда опубликована/издана КНИГА»).
+    # Trigger «появил» + «слов» or bare lowercase token.
+    (_re(r"\bкогда\s+появил\w*\s+слов\w*"),
+     "word_timeline", 0.93),
+    (_re(r"\bкогда\s+появил\w*\s+[a-z]{3,30}"),
+     "word_timeline", 0.88),
 
     # ===== word_collocates =====
     (_re(r"соседств\w*|collocates?|collocations?"), "word_collocates", 0.9),
