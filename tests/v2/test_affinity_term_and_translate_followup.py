@@ -135,7 +135,9 @@ class TranslateFollowupRouting(unittest.TestCase):
         self.assertEqual(merged.author_regex, "^Christie,")
         self.assertEqual((merged.raw_misc or {}).get("_translate_to"), "ru")
 
-    def test_full_plan_surfaces_honest_clarify(self):
+    def test_full_plan_chains_enrich_when_words_extractable(self):
+        """Sprint 20+: prior assistant content has a comma-list — words
+        ARE extractable, plan chains enrich_word per word, no clarify."""
         q = "Возьми слова, которые ты мне выдал и переведи на русский"
         m = int_mod.classify(q)
         inferred = history_mod.infer_followup_intent(q, self.history)
@@ -143,13 +145,30 @@ class TranslateFollowupRouting(unittest.TestCase):
         e = ent_mod.extract(q)
         e = history_mod.merge_with_history(e, self.history, q)
         plan = plan_mod.build(intent_label, e)
-        # Honest clarify — no learning_words fake list
-        self.assertTrue(plan.needs_clarify)
         self.assertEqual(plan.intent, "translate_word_list")
-        # Actionable advice in the clarify question
-        msg = plan.clarify_question or ""
-        self.assertIn("перечислить слова явно", msg)
-        self.assertIn("WC_LLM_PLANNER", msg)
+        # Words extracted from prior assistant comma list
+        self.assertFalse(plan.needs_clarify)
+        # Each step is enrich_word with target_lang=ru
+        self.assertGreater(len(plan.steps), 0)
+        self.assertEqual(plan.steps[0].tool, "enrich_word")
+        self.assertEqual(plan.steps[0].args["target_lang"], "ru")
+        self.assertTrue(plan.steps[0].optional)  # Wiktionary miss not fatal
+
+    def test_clarify_when_prior_extraction_fails(self):
+        """If prior assistant message has nothing parseable, surface
+        honest clarify with actionable advice."""
+        empty_history = [
+            {"role": "user", "content": "фирменные слова Дойла"},
+            {"role": "assistant", "content": "Вот что я нашёл по Дойлю."},
+        ]
+        q = "переведи эти слова на русский"
+        m = int_mod.classify(q)
+        inferred = history_mod.infer_followup_intent(q, empty_history)
+        e = ent_mod.extract(q)
+        e = history_mod.merge_with_history(e, empty_history, q)
+        plan = plan_mod.build(inferred or m.label, e)
+        self.assertTrue(plan.needs_clarify)
+        self.assertIn("WC_LLM_PLANNER", plan.clarify_question or "")
 
 
 class TranslateFollowupNonWordlistPrior(unittest.TestCase):
@@ -182,14 +201,11 @@ class StanThreeScenariosE2E(unittest.TestCase):
         self.assertEqual(p.steps[0].args["author_regex"], "^Christie,")
 
     def test_query_2_translation_with_explicit_author(self):
-        """Sprint 20 retrospective: translate-followup now surfaces
-        honest clarify instead of routing to learning_words. The
-        explicit-author detection (Christie wins over prior Wodehouse)
-        still works — it goes into entities.author_regex and is shown
-        in the clarify message for context."""
+        """Sprint 20+: with extractable prior words AND explicit author,
+        plan chains enrich_word over the prior list."""
         history = [
             {"role": "user", "content": "фирменные слова Wodehouse"},
-            {"role": "assistant", "content": "blighter, dashed, ripping…"},
+            {"role": "assistant", "content": "blighter, dashed, ripping, hullo, jolly"},
         ]
         q = ("Сделай перевод на русский всех слов. В переводе дай то "
              "значение, которое используется у Агаты кристи")
@@ -200,15 +216,18 @@ class StanThreeScenariosE2E(unittest.TestCase):
         e = history_mod.merge_with_history(e, history, q)
         plan = plan_mod.build(intent_label, e)
         self.assertEqual(plan.intent, "translate_word_list")
-        self.assertTrue(plan.needs_clarify)
+        self.assertFalse(plan.needs_clarify)
         # The entity still has the explicit Christie reference for any
         # future renderer to use
         self.assertEqual(e.author_regex, "^Christie,")
+        # Each step is enrich_word with target_lang=ru
+        self.assertGreater(len(plan.steps), 0)
+        self.assertEqual(plan.steps[0].tool, "enrich_word")
 
     def test_query_3_take_words_and_translate(self):
         history = [
             {"role": "user", "content": "фирменные слова Wodehouse"},
-            {"role": "assistant", "content": "blighter, dashed, ripping…"},
+            {"role": "assistant", "content": "blighter, dashed, ripping, hullo, jolly"},
         ]
         q = "Возьми слова, которые ты мне выдал и переведи на русский"
         m = int_mod.classify(q)
@@ -218,9 +237,12 @@ class StanThreeScenariosE2E(unittest.TestCase):
         e = history_mod.merge_with_history(e, history, q)
         plan = plan_mod.build(intent_label, e)
         self.assertEqual(plan.intent, "translate_word_list")
-        self.assertTrue(plan.needs_clarify)
+        self.assertFalse(plan.needs_clarify)
         # Wodehouse backfilled from prior, available in entity
         self.assertEqual(e.author_regex, "^Wodehouse,")
+        # enrich_word chain on prior words
+        self.assertGreater(len(plan.steps), 0)
+        self.assertEqual(plan.steps[0].tool, "enrich_word")
 
 
 if __name__ == "__main__":

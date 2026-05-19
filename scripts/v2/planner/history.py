@@ -126,11 +126,13 @@ def _is_propn_removal(text: str) -> bool:
 # `affinity_by_author` gives words + per-word RU translation in one
 # pass (learning_words internally calls enrich_word with target_lang=ru).
 _TRANSLATE_PATTERNS = re.compile(
-    r"(?:переведи|переводи|сделай\s+перевод|дай\s+перевод|"
+    r"(?:переведи|переводи|"
+    r"(?:сделай|дай|покажи)\s+перевод\w*|"
     r"translate(?:\s+(?:these|them|the\s+words?|the\s+list))?|"
-    r"with\s+(?:russian|ru)\s+translations?)\s*"
-    r"(?:слов\w*\s+)?"
-    r"(?:на\s+русск\w+|to\s+russian|to\s+ru\b|на\s+ru\b)?",
+    r"with\s+(?:russian|ru)\s+translations?)"
+    # Optional intermediate words («N слов», «этих слов», «фраз»)
+    r"(?:\s+\w+){0,4}?"
+    r"(?:\s+(?:на\s+русск\w+|to\s+russian|to\s+ru\b|на\s+ru\b))?",
     re.IGNORECASE,
 )
 # Standalone «возьми слова которые ты мне выдал» — strong referring
@@ -140,7 +142,11 @@ _TRANSLATE_PATTERNS = re.compile(
 _PRIOR_OUTPUT_REF = re.compile(
     r"(?:возьми|take)\s+(?:слова|words?|эти|the\s+(?:words?|list))|"
     r"которые\s+ты\s+(?:мне\s+)?(?:выдал|показал|дал|вернул)|"
-    r"which\s+you\s+(?:gave|returned|showed)",
+    r"which\s+you\s+(?:gave|returned|showed)|"
+    # «этих слов / эти слова / тех слов / эти» — Russian demonstrative
+    # references to the prior list. Strong signal that the followup
+    # is about the previous assistant message's word list.
+    r"\b(?:эт(?:их|и|ими)|т(?:ех|ем|еми))\s+слов",
     re.IGNORECASE,
 )
 
@@ -226,13 +232,30 @@ def _last_word_list_from_assistant(history: list[dict]) -> list[str]:
     Looks for the most recent assistant message and extracts capitalized or
     quoted/bracketed tokens that look like vocabulary entries. Crude but
     enough for «приведи три примера» to use the same N words the user just
-    saw."""
+    saw.
+
+    Sprint 20 — extended to parse markdown tables (column 1) so
+    translate-followup can chain enrich_word over the prior list. Word-
+    list-shaped tables look like:
+
+        | Слово    | count_X | count_Y | affinity |
+        |----------|---------|---------|----------|
+        | tuppence | 613     | 1230    | 5230.24  |
+        | priors   | 8       | 1463    | 57.39    |
+    """
     for msg in reversed(history):
         if msg.get("role") != "assistant":
             continue
         content = msg.get("content") or ""
         if not content:
             continue
+
+        # Sprint 20 — markdown table column 1. Catches «Word | count | …»
+        # patterns. Skip header row (text like «Слово», «Word», etc).
+        table_words = _extract_table_column1(content)
+        if len(table_words) >= 3:
+            return table_words
+
         # Grab tokens inside **bold**, `code`, [ALL CAPS], or in
         # comma-separated lowercase lists ("wicket, blighter, hullo").
         candidates = re.findall(
@@ -268,6 +291,58 @@ def _last_word_list_from_assistant(history: list[dict]) -> list[str]:
         if out:
             return out
     return []
+
+
+_TABLE_ROW_RE = re.compile(r"^\s*\|(.+?)\|", re.MULTILINE)
+_TABLE_HEADER_CELLS = frozenset({
+    # Skip the header row (column titles, not data)
+    "слово", "word", "лексема", "lemma",
+    "слово (англ.)", "слово (англ)", "english word", "english",
+    "название", "title", "term", "термин", "название (англ.)",
+    # Separator-like cells: «-----», «:---:», etc — handled by regex too
+})
+
+
+def _extract_table_column1(content: str) -> list[str]:
+    """Sprint 20 — Stan 2026-05-19: parse markdown table column 1 from
+    a rendered assistant message. Used by translate-followup to grab
+    the same words the user just saw and chain enrich_word over them.
+
+    Returns a list of cleaned word tokens (lowercase, ≤30 chars, alpha
+    only, deduped, capped at 50). Skips header row + separator row.
+    Returns [] if no table or fewer than 3 data rows found.
+    """
+    if "|" not in content:
+        return []
+    words: list[str] = []
+    seen: set[str] = set()
+    for m in _TABLE_ROW_RE.finditer(content):
+        # First pipe-separated cell value. Markdown tables look like:
+        # «| cell1 | cell2 | … |» — the regex captures up to but not
+        # including the second pipe.
+        cell = m.group(1).strip()
+        # Drop separator rows like `:---:` / `---`
+        if not cell or set(cell) <= set("-: "):
+            continue
+        # Drop header-like cells
+        if cell.lower() in _TABLE_HEADER_CELLS:
+            continue
+        # Drop numbered-row indices «1», «12.» — these are decorative
+        if re.fullmatch(r"\d+\.?", cell):
+            continue
+        # Strip leading «**», `` ` ``, etc.
+        token = re.sub(r"[\*`\[\]]+", "", cell).strip()
+        # Keep alpha-only tokens 2-30 chars (English vocab words)
+        if not re.fullmatch(r"[A-Za-z][A-Za-z'\-]{1,29}", token):
+            continue
+        token_lc = token.lower()
+        if token_lc in seen:
+            continue
+        seen.add(token_lc)
+        words.append(token_lc)
+        if len(words) >= 50:
+            break
+    return words
 
 
 # Map follow-up phrasing → inferred intent. The user is responding to a
@@ -475,14 +550,20 @@ def merge_with_history(current: Entities, history: list[dict] | None,
         rm = dict(backfilled.raw_misc or {})
         rm["_propn_strict"] = True
         backfilled.raw_misc = rm
-    # Sprint 20 — translate modifier: stamp _translate_to=ru so the
-    # renderer can add translations to whatever output the plan
-    # produces. The plan-rerouting to `learning` already covers the
-    # word-list case via learning_words(target_lang='ru'); this flag
-    # is for renderer-level translations (e.g. translate a name into
-    # Russian) and for observability.
+    # Sprint 20 — translate modifier: stamp _translate_to=ru AND
+    # extract the prior assistant's word list (typically a markdown
+    # table column 1) so the plan-builder can chain enrich_word steps
+    # over those exact words. v3 finally gets prior-result hand-off for
+    # this specific use case — without waiting on v4 LLM planner.
     if _is_translate_followup(text):
         rm = dict(backfilled.raw_misc or {})
         rm["_translate_to"] = "ru"
+        prior_words = _last_word_list_from_assistant(history)
+        if prior_words:
+            # Cap at 10 — enrich_word is ~1.5s per Wiktionary call;
+            # 10 × 1.5s = 15s, fits comfortably under chat timeout
+            # alongside resolver + render + critic.
+            rm["_prior_words"] = prior_words[:10]
+            rm["_prior_words_total"] = len(prior_words)
         backfilled.raw_misc = rm
     return backfilled

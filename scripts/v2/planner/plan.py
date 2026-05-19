@@ -1665,49 +1665,69 @@ PLAN_BUILDERS = {
 
 
 def _plan_translate_word_list(e: Entities) -> QueryPlan:
-    """Sprint 20 — honest fallback for translate-followup.
+    """Sprint 20 — translate-followup with prior-words handoff.
 
-    Stan 2026-05-19 prod: «Возьми слова которые ты мне выдал и переведи
-    на русский» — user expects translation of the PRIOR turn's 96
-    affinity words. v3 rules-path can't pass tool results between turns
-    (prior assistant message is rendered Markdown, not structured), and
-    96 sequential enrich_word(Wiktionary 1.5s each) calls = ~150s, way
-    over the 90s chat timeout.
+    Stan 2026-05-19 prod: «дай переводы этих слов из контекста
+    оригинальных книг» after a word-list turn. The prior assistant
+    message rendered a markdown table — `history.merge_with_history`
+    extracts column 1 and stashes the words on `e.raw_misc._prior_words`
+    (capped at 10 to fit chat timeout: 10 × 1.5s Wiktionary lookup ≈
+    15s + render + critic ≈ comfortably under 90s).
 
-    Routing to learning_words gave a *different* word list (CEFR band-
-    pass, not affinity-ranked) — Stan saw character names again,
-    feature wasn't useful.
+    Plan: one enrich_word step per word, each with target_lang='ru' so
+    the v1 enrich pipeline returns IPA + part-of-speech + definition +
+    Russian translation. Renderer combines them into a translation
+    table aligned with the user's original list.
 
-    Honest answer: surface a clarify with actionable advice — user
-    must list specific words explicitly («переведи tuppence, stitching,
-    embroidery»), 5-10 words fit in chat timeout. v4 LLM-planner sees
-    conversation context and could compose this DAG automatically;
-    that's the real fix, behind WC_LLM_PLANNER=on.
+    If extraction failed (no markdown table / opaque format), fall
+    back to the honest clarify telling user to list words explicitly.
     """
-    author = e.author_label or _regex_to_canonical(e.author_regex) \
-        if e.author_regex else None
-    raw = (e.raw_misc or {}).get("raw_text", "") or ""
+    prior_words = (e.raw_misc or {}).get("_prior_words") or []
+    total = (e.raw_misc or {}).get("_prior_words_total") or len(prior_words)
+
+    if not prior_words:
+        # Extraction failed — surface honest clarify.
+        return QueryPlan(
+            intent="translate_word_list", entities=e, steps=[],
+            needs_clarify=True,
+            clarify_question=(
+                "Хочешь перевод слов из предыдущего ответа? Я не смог "
+                "автоматически вытащить их из текста (формат не "
+                "распознался).\n\n"
+                "Скопируй 5-10 слов из списка и спроси: «переведи "
+                "tuppence, stitching, embroidery, strychnine, vavasour» "
+                "— я подготовлю переводы с IPA и определением.\n\n"
+                "Совет: спроси админа включить `WC_LLM_PLANNER=on` — "
+                "v4 LLM-планнер видит conversation и решает это "
+                "автоматически."
+            ),
+            explain="translate_word_list — extraction failed, surfacing clarify",
+        )
+
+    # Build N enrich_word steps. Each is independent (no deps), so a
+    # failure in one (Wiktionary 404) doesn't kill the rest — router
+    # collects partials.
+    steps = [
+        PlanStep(
+            tool="enrich_word",
+            args={"word": w, "target_lang": "ru"},
+            optional=True,  # one Wiktionary miss != kill the whole batch
+        )
+        for w in prior_words[:10]
+    ]
+    # Inform renderer that this is a translate-followup over a prior
+    # word list, NOT a fresh tool search. Renderer should:
+    #   - present results in original list order
+    #   - show enrich data per word (translation + IPA + definition)
+    #   - mention if N was capped (10 of 96)
+    explain = (f"translate_word_list: enrich_word × {len(steps)} from "
+               f"prior assistant message")
+    if total > len(steps):
+        explain += f" (capped at {len(steps)} of {total} for chat timeout)"
     return QueryPlan(
-        intent="translate_word_list", entities=e, steps=[],
-        needs_clarify=True,
-        clarify_question=(
-            "Хочешь перевод слов из предыдущего ответа? Я не могу "
-            "автоматически вытащить их из текста — нужно перечислить "
-            "слова явно.\n\n"
-            "Скопируй 5-10 слов из списка и спроси: "
-            "«переведи tuppence, stitching, embroidery, strychnine, "
-            "vavasour» — за этими словами есть данные по контексту "
-            "у Christie, я подготовлю переводы.\n\n"
-            "Почему так:\n"
-            "• в проде сейчас rules-based pipeline без передачи tool "
-            "results между ходами\n"
-            "• 96 enrich_word calls по Wiktionary занимают ~150 сек, "
-            "не влезают в 90с chat timeout\n"
-            "• `WC_LLM_PLANNER=on` (alpha v4) видит conversation и "
-            "может построить DAG автоматически — спроси админа когда "
-            "переключит"
-        ),
-        explain="translate_word_list — honest clarify (v3 cannot pass results between turns)",
+        intent="translate_word_list", entities=e, steps=steps,
+        expected_cost="heavy",
+        explain=explain,
     )
 
 
