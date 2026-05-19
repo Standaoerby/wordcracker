@@ -156,5 +156,84 @@ class IntentClassifierCorrectness(unittest.TestCase):
                                   msg=f"classify({q!r}) → {m.label!r}, expected {expected!r}")
 
 
+class ReadabilityCompareClarifyDrop(unittest.TestCase):
+    """Stan's 2026-05-19 prod test:
+    «что сложнее читать, преступление и наказание или Сон в летнюю ночь?»
+    Fell to clarify with 0 calls. Two bugs:
+      (1) No intent rule for readability-compare phrasing
+      (2) Only first book in KNOWN_BOOKS extracted; «Сон в летнюю ночь»
+          was missing AND there was no multi-book collection."""
+
+    EXACT_QUERY = "что сложнее читать, преступление и наказание или Сон в летнюю ночь?"
+
+    def test_intent_classifies_correctly(self):
+        m = int_mod.classify(self.EXACT_QUERY)
+        self.assertEqual(m.label, "book_readability_compare")
+
+    def test_both_books_extracted(self):
+        e = ent_mod.extract(self.EXACT_QUERY)
+        # Primary
+        self.assertEqual(e.book_id, "PG2554")  # Crime and Punishment
+        # Secondary
+        self.assertIn("PG1514", e.multi_book_ids)  # Midsummer Night's Dream
+
+    def test_end_to_end_plan(self):
+        e = ent_mod.extract(self.EXACT_QUERY)
+        p = plan_mod.build("book_readability_compare", e)
+        self.assertFalse(p.needs_clarify)
+        self.assertEqual(len(p.steps), 2)
+        ids = [s.args.get("pg_id") for s in p.steps]
+        self.assertIn("PG2554", ids)
+        self.assertIn("PG1514", ids)
+
+    def test_english_variants_classify(self):
+        for q in [
+            "which is harder to read, Dracula or Hamlet?",
+            "is Dracula easier to read or Hamlet?",
+        ]:
+            with self.subTest(query=q):
+                m = int_mod.classify(q)
+                self.assertEqual(m.label, "book_readability_compare")
+
+    def test_single_book_falls_through(self):
+        """«сложнее читать X» (no «или Y») → single-book readability."""
+        e = ent_mod.extract("сложнее читать Преступление и наказание")
+        # No second book → fall through to single-book readability plan
+        p = plan_mod.build("book_readability_compare", e)
+        self.assertEqual(p.intent, "book_readability")
+        self.assertEqual(len(p.steps), 1)
+
+    def test_no_book_clarifies(self):
+        e = ent_mod.extract("что сложнее читать или попроще")  # no titles
+        p = plan_mod.build("book_readability_compare", e)
+        self.assertTrue(p.needs_clarify)
+
+    def test_caps_at_3_books(self):
+        """If user mentions 4 books, we cap to bound wall-clock."""
+        e = ent_mod.extract(
+            "что легче читать, Pride and Prejudice или Dracula "
+            "или Hamlet или Frankenstein?"
+        )
+        p = plan_mod.build("book_readability_compare", e)
+        # No more than 3 book_readability calls (find_book chains
+        # might add a wrapper step but we cap at 3 readability calls)
+        readability_steps = [s for s in p.steps if s.tool == "book_readability"]
+        self.assertLessEqual(len(readability_steps), 3)
+
+
+class MidsummerKnownBook(unittest.TestCase):
+    def test_nominative_resolves(self):
+        e = ent_mod.extract("какие архаизмы в Сне в летнюю ночь")  # prep case
+        self.assertEqual(e.book_id, "PG1514")
+
+    def test_english_resolves(self):
+        e = ent_mod.extract("affinity for A Midsummer Night's Dream")
+        self.assertEqual(e.book_id, "PG1514")
+
+    def test_hamlet_resolves(self):
+        e = ent_mod.extract("уровень сложности Гамлета")
+        self.assertEqual(e.book_id, "PG1524")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

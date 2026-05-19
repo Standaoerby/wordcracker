@@ -200,6 +200,23 @@ KNOWN_BOOKS: dict[str, tuple[str, str]] = {
     "войны и мира":               ("PG2600", "War and Peace"),  # gen
     "войне и мире":               ("PG2600", "War and Peace"),  # prep
 
+    # Shakespeare — Sprint 17 (Stan readability-compare bug, «Сон в летнюю
+    # ночь»). PG1514 is the canonical Project Gutenberg id for A Midsummer
+    # Night's Dream; add nominative + genitive + EN apostrophe variants.
+    "a midsummer night's dream":  ("PG1514", "A Midsummer Night's Dream"),
+    "midsummer night's dream":    ("PG1514", "A Midsummer Night's Dream"),
+    "midsummer nights dream":     ("PG1514", "A Midsummer Night's Dream"),  # no apostrophe
+    "сон в летнюю ночь":          ("PG1514", "A Midsummer Night's Dream"),
+    "сна в летнюю ночь":          ("PG1514", "A Midsummer Night's Dream"),  # gen
+    "сне в летнюю ночь":          ("PG1514", "A Midsummer Night's Dream"),  # prep
+    "hamlet":                     ("PG1524", "Hamlet"),
+    "гамлет":                     ("PG1524", "Hamlet"),
+    "гамлета":                    ("PG1524", "Hamlet"),  # gen/acc
+    "romeo and juliet":           ("PG1112", "Romeo and Juliet"),
+    "ромео и джульетта":          ("PG1112", "Romeo and Juliet"),
+    "macbeth":                    ("PG2264", "Macbeth"),
+    "макбет":                     ("PG2264", "Macbeth"),
+
     # English / American canon
     "pride and prejudice":        ("PG1342", "Pride and Prejudice"),
     "гордость и предубеждение":   ("PG1342", "Pride and Prejudice"),
@@ -322,6 +339,13 @@ class Entities:
     top_n: int | None = None
     top_metric: Literal["books", "downloads", "tokens"] | None = None
     multi_author_regex: list[str] = field(default_factory=list)  # «Мелвилла, Конрада и Стивенсона»
+    # Sprint 17 — multi-book extraction for compare queries («сложнее
+    # читать X или Y», «слова в X и Y, но редко в Z»). multi_book_ids is
+    # the secondary list (primary stays in book_id); each entry is a PG/U
+    # id when resolved via KNOWN_BOOKS, otherwise None and the canonical
+    # title lives at the same index in multi_book_titles.
+    multi_book_ids: list[str | None] = field(default_factory=list)
+    multi_book_titles: list[str] = field(default_factory=list)
     raw_misc: dict = field(default_factory=dict)
 
 
@@ -530,6 +554,60 @@ def _find_book(text: str) -> tuple[str | None, str | None]:
                 return pg, canon
             return None, canon
     return None, None
+
+
+# Sprint 17 — multi-book extractor for «X или Y» / «X и Y» / «X vs Y»
+# compare queries. Returns ALL distinct books mentioned in `text`, ordered
+# by first appearance, deduped by canonical title. Primary is index 0.
+def _find_all_books(text: str) -> list[tuple[str | None, str]]:
+    out: list[tuple[str | None, str]] = []
+    seen_canonicals: set[str] = set()
+
+    # Explicit PG/U ids first
+    for m in _BOOK_PG_ID.finditer(text):
+        pg = m.group(1).upper()
+        canon_key = pg  # no canonical title for raw ids
+        if canon_key not in seen_canonicals:
+            out.append((pg, pg))
+            seen_canonicals.add(canon_key)
+
+    # KNOWN_BOOKS scan — longest-first per existing convention, but
+    # collect ALL distinct canonicals, not just the first match. Two
+    # different alias keys («война и мир» / «war and peace») resolve to
+    # the same canonical title — count those as ONE book.
+    low = text.lower()
+    # Track which character ranges are already claimed by a longer key
+    # so «sons and lovers» doesn't also claim «sons» as a separate book.
+    claimed_ranges: list[tuple[int, int]] = []
+    for key in sorted(KNOWN_BOOKS, key=len, reverse=True):
+        start = low.find(key)
+        if start < 0:
+            continue
+        end = start + len(key)
+        if any(s <= start < e for s, e in claimed_ranges):
+            continue
+        pg, canon = KNOWN_BOOKS[key]
+        pg_id = pg if (pg.startswith("PG") and pg != "PG") else None
+        if canon in seen_canonicals:
+            continue
+        seen_canonicals.add(canon)
+        claimed_ranges.append((start, end))
+        out.append((pg_id, canon))
+    # Sort by first-appearance position so user's left-to-right order
+    # is preserved in the result.
+    def _pos(item):
+        pg_id, canon = item
+        # explicit PG id — find its position in original text
+        if pg_id and pg_id == canon:
+            m = _BOOK_PG_ID.search(text)
+            return m.start() if m else 1 << 30
+        # KNOWN_BOOKS hit — locate matching key in low
+        for key in sorted(KNOWN_BOOKS, key=len, reverse=True):
+            if KNOWN_BOOKS[key][1] == canon and key in low:
+                return low.find(key)
+        return 1 << 30
+    out.sort(key=_pos)
+    return out
 
 
 # ---------- word ----------
@@ -831,6 +909,22 @@ def extract(text: str) -> Entities:
     multi = [r for _, r in author_hits[1:]] if len(author_hits) > 1 else []
 
     book_id, book_title = _find_book(text)
+    # Sprint 17 — collect all books mentioned (for «X или Y» compare).
+    # Primary stays in book_id/book_title; secondaries go into the multi_*
+    # fields. We dedupe against the primary so the same book doesn't
+    # appear in both slots.
+    all_books = _find_all_books(text)
+    multi_book_ids: list[str | None] = []
+    multi_book_titles: list[str] = []
+    for pg, canon in all_books:
+        # Skip the primary (already captured)
+        if pg and pg == book_id:
+            continue
+        if canon and canon == book_title:
+            continue
+        multi_book_ids.append(pg)
+        multi_book_titles.append(canon)
+
     year_from, year_to = _find_year_range(text)
 
     word = _find_word(text)
@@ -857,5 +951,7 @@ def extract(text: str) -> Entities:
         top_n=_find_top_n(text),
         top_metric=_find_top_metric(text),
         multi_author_regex=multi,
+        multi_book_ids=multi_book_ids,
+        multi_book_titles=multi_book_titles,
         raw_misc={"raw_text": text},
     )

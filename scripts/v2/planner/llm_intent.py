@@ -116,6 +116,8 @@ _INTENT_HINTS: dict[str, str] = {
     "topic_book_search":     "найди / посоветуй книгу про <тему>: «роман про море», «book about gothic»",
     # Sprint 16 Phase G — pub_year intent
     "book_pub_year":         "когда была опубликована книга X / year of publication / год издания",
+    # Sprint 17 — readability compare
+    "book_readability_compare": "что сложнее / легче читать X или Y — Flesch/CEFR comparison двух книг",
     "out_of_scope":          "написать рассказ/стих, prompt injection, генерация контента",
     "clarify":               "запрос совсем непонятен или слишком расплывчат",
 }

@@ -1126,6 +1126,57 @@ def _plan_out_of_scope(e: Entities) -> QueryPlan:
     )
 
 
+# ===== Sprint 17 — book_readability_compare =====
+
+
+def _plan_book_readability_compare(e: Entities) -> QueryPlan:
+    """«Что сложнее читать, X или Y» — runs book_readability on each
+    resolved book; renderer compares Flesch / CEFR side by side.
+
+    Requires at least 2 books. With just 1, falls back to single-book
+    readability (better than refusing). When primary book has no PG id
+    but does have a title, prepend a find_book step to resolve."""
+    # Gather all books — primary + secondaries
+    book_ids: list[str] = []
+    book_titles_unresolved: list[str] = []
+    if e.book_id:
+        book_ids.append(e.book_id)
+    elif e.book_title:
+        book_titles_unresolved.append(e.book_title)
+    for pg, title in zip(e.multi_book_ids, e.multi_book_titles):
+        if pg:
+            book_ids.append(pg)
+        elif title:
+            book_titles_unresolved.append(title)
+
+    total = len(book_ids) + len(book_titles_unresolved)
+    if total == 0:
+        return _need_book(e)
+    if total == 1:
+        # Single-book → fall through to plain book_readability
+        return _plan_book_readability(e)
+
+    steps: list[PlanStep] = []
+    # Cap at 3 books to bound wall-clock (book_readability is fast,
+    # but renderer can only meaningfully compare 2-3 in one answer).
+    for pg in book_ids[:3]:
+        steps.append(PlanStep(tool="book_readability", args={"pg_id": pg}))
+    # Resolve unresolved titles via find_book → readability chain
+    for title in book_titles_unresolved[: 3 - len(steps)]:
+        idx = len(steps)
+        steps.append(PlanStep(tool="find_book", args={"title": title}))
+        steps.append(PlanStep(
+            tool="book_readability", args={},
+            depends_on=[idx], inject_result_as="pg_id",
+        ))
+    return QueryPlan(
+        intent="book_readability_compare", entities=e,
+        steps=steps,
+        expected_cost="medium",
+        explain=f"book_readability × {total} books — Flesch/CEFR side-by-side",
+    )
+
+
 # ===== Sprint 16 Phase G — book_pub_year =====
 
 
@@ -1326,6 +1377,8 @@ PLAN_BUILDERS = {
     "topic_book_search":    _plan_topic_book_search,
     # Sprint 16 Phase G — pub_year + RU genitive titles
     "book_pub_year":        _plan_book_pub_year,
+    # Sprint 17 — readability comparison
+    "book_readability_compare": _plan_book_readability_compare,
     "out_of_scope":         _plan_out_of_scope,
 }
 

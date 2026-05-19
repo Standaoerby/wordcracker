@@ -64,6 +64,8 @@ INTENTS = frozenset({
     "topic_book_search",  # «найди книгу про X», «book about Y»
     # Sprint 16 Phase G — publication year (Open Library enrichment)
     "book_pub_year",      # «когда была опубликована X», «year of X»
+    # Sprint 17 — readability comparison
+    "book_readability_compare",  # «что сложнее читать X или Y»
     "out_of_scope",
     "clarify",
 })
@@ -96,6 +98,9 @@ PRIORITY = {
     # Sprint 16 Phase G — above book_lookup (122) so «когда вышла X»
     # routes to pub_year, not generic title search.
     "book_pub_year": 148,
+    # Sprint 17 — readability compare. Above book_compare (110) so
+    # «сложнее читать X или Y» wins over generic compare.
+    "book_readability_compare": 152,
     "vocab_passport": 150,
     "composite_compare": 145,
     "translation_quality": 140,
@@ -306,6 +311,23 @@ RULES: list[tuple[Pattern[str], str, float]] = [
          r"\byear\s+of\s+publication|"
          r"\bpublication\s+(year|date)"),
      "book_pub_year", 0.92),
+
+    # ===== Sprint 17 — book_readability_compare =====
+    # «что сложнее читать, X или Y» / «легче читать X или Y» — Stan's
+    # 2026-05-19 audit caught this falling to clarify because no rule
+    # covered the readability-compare pattern. We anchor on
+    # «сложнее/легче/проще/труднее ... читать» + «или» — the «или»
+    # disambiguates from single-book readability («сложно читать X»).
+    (_re(r"\b(сложнее|сложней|труднее|трудней|легче|проще)\s+"
+         r"(?:будет\s+)?(?:это\s+)?читать\b.{0,80}\b(или|vs|против)\b"),
+     "book_readability_compare", 0.94),
+    (_re(r"\bчто\s+(сложнее|труднее|легче|проще)\s+читать\b"),
+     "book_readability_compare", 0.92),
+    (_re(r"\b(harder|easier|simpler|more\s+difficult|more\s+complex)\s+to\s+read\b"
+         r".{0,60}\bor\b"),
+     "book_readability_compare", 0.92),
+    (_re(r"\b(which|what)\s+is\s+(harder|easier|simpler)\s+to\s+read\b"),
+     "book_readability_compare", 0.9),
 
     # ===== corpus_meta =====
     # Stan round 5: «сколько у Толстого книг» wrongly routed to corpus_meta
