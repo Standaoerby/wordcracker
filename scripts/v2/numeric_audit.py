@@ -345,25 +345,40 @@ def _audit_count_claims(answer: str, records: Iterable[dict]) -> AuditReport:
     if not deltas:
         return rep
 
+    # ANY count claim that doesn't match top_returned is suspect when
+    # a delta is present. Two failure modes seen in prod:
+    #   (a) claimed == top_requested but data filtered to top_returned
+    #       — Stan 2026-05-19 first screenshot («50 слов» when data=19,
+    #       request was 50).
+    #   (b) claimed is neither top_requested nor top_returned — Stan's
+    #       follow-up («50 слов» when request was 100 and data=19).
+    #       Pure hallucination; renderer pulled a v1 default from
+    #       somewhere or just made it up.
+    # Both fail the same audit: claim must equal top_returned (truth)
+    # to escape the flag. Surface both deltas in the report so the
+    # user sees the full picture.
+    returned_set = {int(ret) for _req, ret in deltas}
     for m in _COUNT_CLAIM_RE.finditer(answer):
         try:
             claimed = float(m.group(1))
         except ValueError:
             continue
-        for req, ret in deltas:
-            if claimed == req and claimed != ret:
-                # Build context window around the claim
-                start = max(0, m.start() - 35)
-                end = min(len(answer), m.end() + 25)
-                ctx = answer[start:end]
-                rep.mismatches.append(NumericMismatch(
-                    value=claimed,
-                    formatted=m.group(0),
-                    context=ctx.strip(),
-                    nearest_in_data=ret,
-                    nearest_distance_pct=abs(claimed - ret) / claimed * 100,
-                ))
-                break
+        if int(claimed) in returned_set:
+            continue  # truth — let it pass
+        # Pick the closest (req, ret) pair for the report. Diagnostic
+        # quality: nearest_in_data points at the actual returned count;
+        # context shows the offending phrase.
+        req, ret = min(deltas, key=lambda p: abs(p[1] - claimed))
+        start = max(0, m.start() - 35)
+        end = min(len(answer), m.end() + 25)
+        ctx = answer[start:end]
+        rep.mismatches.append(NumericMismatch(
+            value=claimed,
+            formatted=m.group(0),
+            context=ctx.strip(),
+            nearest_in_data=ret,
+            nearest_distance_pct=abs(claimed - ret) / max(claimed, 1) * 100,
+        ))
         if len(rep.mismatches) >= 3:
             break
     return rep

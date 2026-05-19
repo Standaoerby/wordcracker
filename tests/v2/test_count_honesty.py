@@ -167,6 +167,30 @@ class NumericAuditCatchesClaimMismatch(unittest.TestCase):
         self.assertTrue(report.has_issues())
         self.assertEqual(report.mismatches[0].value, 50.0)
 
+    def test_pure_hallucination_caught(self):
+        """Stan 2026-05-19 follow-up: user asked 100, tool returned 19,
+        renderer wrote 50 (neither). Audit must flag — claim doesn't
+        match truth (top_returned=19), and it's not the truth even
+        though it's also not the request."""
+        from scripts.v2.numeric_audit import audit_numbers
+        answer = "Вот список из 50 слов — самые характерные для Дойла."
+        records = [{
+            "tool": "affinity_by_author",
+            "data": {
+                "top_requested": 100,  # user asked 100
+                "top_returned": 19,    # data has 19
+                "top_words": [{"word": f"w{i}", "affinity": 30.0}
+                                for i in range(19)],
+            },
+        }]
+        report = audit_numbers(answer, records, intent="author_vocab")
+        self.assertTrue(report.has_issues())
+        # The flagged value is 50 (renderer's hallucination)
+        m = report.mismatches[0]
+        self.assertEqual(m.value, 50.0)
+        # Nearest in data points at the truth (19), not the request
+        self.assertEqual(int(m.nearest_in_data), 19)
+
     def test_skip_when_audit_off(self):
         from scripts.v2 import numeric_audit
         with mock.patch.object(numeric_audit, "AUDIT_ENABLED", False):
