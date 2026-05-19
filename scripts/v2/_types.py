@@ -39,6 +39,13 @@ class SourceInfo:
     analytics_version: str
     spgc_baseline: str = "SPGC-2018-07-18"
     chroma_collection: str | None = None
+    # Sprint 19 — when the tool result references at least one user-
+    # uploaded book (U-prefix id), set has_user_uploads=True. The
+    # renderer adds a small footer telling the user that part of the
+    # answer comes from their own uploads, not the canonical SPGC
+    # baseline. Doesn't change tool behaviour — purely informational.
+    has_user_uploads: bool = False
+    user_upload_count: int = 0
 
 
 @dataclass

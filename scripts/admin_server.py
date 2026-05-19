@@ -463,10 +463,12 @@ def _reindex_running() -> bool:
 
 
 def _admin_nav_html() -> str:
-    """Inserted into PAGE so admin upload page links to failed-query view."""
-    return '<div class=meta style="margin-top:-12px; margin-bottom:14px;">' \
-           '<a href="/failed" style="color:#7ed321;">→ failed queries log</a>' \
-           '</div>'
+    """Inserted into PAGE so admin upload page links to failed-query view
+    and the library."""
+    return ('<div class=meta style="margin-top:-12px; margin-bottom:14px;">'
+            '<a href="/library/page" style="color:#7ed321;">→ library</a> '
+            '· <a href="/failed" style="color:#7ed321;">→ failed queries</a>'
+            '</div>')
 
 
 def _trigger_reindex_async() -> dict:
@@ -851,6 +853,172 @@ load();
 """
 
 
+def _render_library_page() -> str:
+    """Sprint 19 — admin library: list + inline actions per book."""
+    return r"""<!doctype html>
+<html lang=ru>
+<head>
+<meta charset=utf-8>
+<title>wordcracker · library</title>
+<style>
+body { font-family: ui-sans-serif, system-ui; max-width: 1200px;
+       margin: 24px auto; padding: 0 24px; background:#181a1f;
+       color:#eaeaea; }
+h1 { font-size: 22px; margin: 0 0 6px 0; }
+.meta { color: #888; font-size: 13px; margin-bottom: 18px; }
+.meta a { color: #7ed321; }
+.summary { background:#1f242b; border:1px solid #2f343c;
+           padding:10px 14px; border-radius:6px; margin-bottom:14px;
+           font-size:13px; color:#aaa; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { border-bottom: 1px solid #2f343c; padding: 8px 10px;
+         text-align: left; vertical-align: top; }
+th { background: #1f242b; color: #888; font-weight: normal;
+     text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }
+tr:hover td { background: #1d2128; }
+.health-ok { color:#7ed321; }
+.health-no_tokens, .health-no_counts { color:#f5a623; }
+.health-truncated, .health-no_raw { color:#d0021b; }
+.id { font-family: ui-monospace, monospace; color:#a0c4ff; }
+.btn { background:#262a31; color:#a0c4ff; border:1px solid #2f343c;
+       padding:4px 10px; border-radius:4px; font-size:12px;
+       cursor:pointer; margin-right:4px; text-decoration:none;
+       display:inline-block; }
+.btn:hover { border-color:#a0c4ff; }
+.btn-danger { color:#f08080; }
+.btn-danger:hover { border-color:#f08080; }
+.stats-overlay { display:none; position:fixed; inset:0;
+                 background:rgba(0,0,0,0.7); z-index:100;
+                 align-items:center; justify-content:center; }
+.stats-overlay.show { display:flex; }
+.stats-card { background:#1f242b; border-radius:8px;
+              padding:20px 24px; max-width:700px; max-height:80vh;
+              overflow:auto; }
+.stats-card h2 { margin:0 0 12px 0; color:#7ed321; }
+.stats-card .close { float:right; cursor:pointer; color:#666;
+                     font-size:20px; }
+.stats-card .close:hover { color:#eaeaea; }
+.stats-card pre { background:#0f1115; padding:8px; border-radius:4px;
+                  font-size:12px; max-height:200px; overflow:auto; }
+</style>
+</head>
+<body>
+<h1>wordcracker · library</h1>
+<div class=meta>
+  <a href="/">← upload</a> · <a href="/failed">failed queries</a>
+</div>
+<div class=summary id=summary>загружаем…</div>
+<table>
+<thead><tr>
+<th>id</th><th>title</th><th>author</th><th>lang</th>
+<th>size</th><th>health</th><th>uploaded</th><th>actions</th>
+</tr></thead>
+<tbody id=tbody><tr><td colspan=8>загрузка…</td></tr></tbody>
+</table>
+
+<div id=stats-overlay class=stats-overlay onclick="if(event.target.id==='stats-overlay')hideStats()">
+  <div class=stats-card id=stats-card></div>
+</div>
+
+<script>
+function fmtBytes(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024*1024) return (n/1024).toFixed(1) + ' KB';
+  return (n/1024/1024).toFixed(1) + ' MB';
+}
+async function loadLibrary() {
+  const r = await fetch('/api/library');
+  const data = await r.json();
+  const books = data.books || [];
+  const counts = {ok:0, broken:0, total:books.length, bytes:0};
+  for (const b of books) {
+    counts.bytes += b.raw_bytes || 0;
+    if (b.health === 'ok') counts.ok++; else counts.broken++;
+  }
+  document.getElementById('summary').textContent =
+    `${counts.total} книг · ${counts.ok} ok · ${counts.broken} проблем · ${fmtBytes(counts.bytes)} raw`;
+  const tbody = document.getElementById('tbody');
+  if (!books.length) {
+    tbody.innerHTML = '<tr><td colspan=8>загруженных книг ещё нет</td></tr>';
+    return;
+  }
+  tbody.innerHTML = books.map(b => `
+    <tr>
+      <td class=id>${b.id}</td>
+      <td>${escapeHtml(b.title) || '—'}</td>
+      <td>${escapeHtml(b.author) || '—'}</td>
+      <td>${b.language || '—'}</td>
+      <td>${fmtBytes(b.raw_bytes)}</td>
+      <td class="health-${b.health}">${b.health}</td>
+      <td>${b.uploaded_ts || '—'}</td>
+      <td>
+        <button class=btn onclick="showStats('${b.id}')">stats</button>
+        <a class=btn href="/book/${b.id}/raw" download>raw</a>
+        <button class=btn onclick="reprocess('${b.id}')">reprocess</button>
+        <button class="btn btn-danger" onclick="deleteBook('${b.id}')">delete</button>
+      </td>
+    </tr>
+  `).join('');
+}
+function escapeHtml(s) {
+  if (!s) return '';
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+          .replace(/"/g,'&quot;');
+}
+async function showStats(id) {
+  const r = await fetch(`/book/${id}/stats`);
+  const d = await r.json();
+  const card = document.getElementById('stats-card');
+  if (d.error) {
+    card.innerHTML = `<span class=close onclick=hideStats()>×</span>
+      <h2>${id}</h2><p>error: ${d.error}</p>`;
+  } else {
+    const headerWarn = d.has_gutenberg_header
+      ? '<p style="color:#f5a623">⚠ Gutenberg header не зачищен</p>' : '';
+    const footerWarn = d.has_gutenberg_footer
+      ? '<p style="color:#f5a623">⚠ Gutenberg footer не зачищен</p>' : '';
+    const top = (d.top_words || []).slice(0, 20)
+      .map(x => `${x.word} (${x.count})`).join(', ');
+    const samples = (d.sample_paragraphs || [])
+      .map(s => `<pre>${escapeHtml(s)}</pre>`).join('');
+    card.innerHTML = `
+      <span class=close onclick=hideStats()>×</span>
+      <h2>${id}</h2>
+      <p><b>raw</b>: ${fmtBytes(d.raw_bytes)} · mtime ${d.raw_mtime || '?'}</p>
+      <p><b>tokens</b>: ${d.total_tokens} · <b>vocab</b>: ${d.vocab_size}
+         · TTR ${(d.type_token_ratio || 0).toFixed(4)}</p>
+      ${headerWarn}${footerWarn}
+      <p><b>top words</b>: <span style="color:#888">${top}</span></p>
+      <p><b>sample</b>:</p>
+      ${samples || '<p style="color:#666">(no samples)</p>'}
+    `;
+  }
+  document.getElementById('stats-overlay').classList.add('show');
+}
+function hideStats() {
+  document.getElementById('stats-overlay').classList.remove('show');
+}
+async function reprocess(id) {
+  if (!confirm(`Reprocess ${id}? Strip headers + re-tokenize.`)) return;
+  const r = await fetch(`/book/${id}/reprocess`, {method: 'POST'});
+  const d = await r.json();
+  alert(`${id}: ${JSON.stringify(d, null, 2)}`);
+  loadLibrary();
+}
+async function deleteBook(id) {
+  if (!confirm(`Delete ${id}? Removes raw/tokens/counts/metadata. Chroma index will reclaim on next reindex.`)) return;
+  const r = await fetch(`/book/${id}/delete`, {method: 'POST'});
+  const d = await r.json();
+  alert(`${id}: ${JSON.stringify(d, null, 2)}`);
+  loadLibrary();
+}
+loadLibrary();
+</script>
+</body>
+</html>
+"""
+
+
 def _render_failed_page() -> str:
     return _FAILED_PAGE
 
@@ -922,9 +1090,69 @@ class Handler(BaseHTTPRequestHandler):
                 })
         if self.path == "/failed":
             return self._html(_render_failed_page())
+        # Sprint 19 — admin library endpoints (list / inspect / download)
+        if self.path in ("/library", "/api/library"):
+            try:
+                from admin_library import list_user_books
+                return self._json(200, {"books": list_user_books()})
+            except Exception as e:
+                return self._json(500, {"error": str(e)})
+        if self.path == "/library/page":
+            return self._html(_render_library_page())
+        if self.path in ("/audit", "/api/audit"):
+            try:
+                from admin_library import audit_library
+                return self._json(200, audit_library())
+            except Exception as e:
+                return self._json(500, {"error": str(e)})
+        # /book/<u_id>/stats — JSON stats
+        m = re.match(r"^/book/([Uu]\d+)/stats$", self.path)
+        if m:
+            try:
+                from admin_library import book_stats
+                return self._json(200, book_stats(m.group(1)))
+            except Exception as e:
+                return self._json(500, {"error": str(e)})
+        # /book/<u_id>/raw — text download
+        m = re.match(r"^/book/([Uu]\d+)/raw$", self.path)
+        if m:
+            try:
+                from admin_library import book_raw_path
+                p = book_raw_path(m.group(1))
+                if p is None:
+                    return self._json(404, {"error": "book not found"})
+                body = p.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header(
+                    "Content-Disposition",
+                    f'attachment; filename="{m.group(1).upper()}.txt"',
+                )
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            except Exception as e:
+                return self._json(500, {"error": str(e)})
         return self._html(PAGE)
 
     def do_POST(self):
+        # Sprint 19 — admin library mutations (delete / reprocess)
+        m = re.match(r"^/book/([Uu]\d+)/delete$", self.path)
+        if m:
+            try:
+                from admin_library import delete_book
+                return self._json(200, delete_book(m.group(1)))
+            except Exception as e:
+                return self._json(500, {"error": str(e)})
+        m = re.match(r"^/book/([Uu]\d+)/reprocess$", self.path)
+        if m:
+            try:
+                from admin_library import reprocess_book
+                return self._json(200, reprocess_book(m.group(1)))
+            except Exception as e:
+                return self._json(500, {"error": str(e)})
+
         if self.path != "/upload":
             return self._json(404, {"error": "not found"})
         ctype = self.headers.get("Content-Type", "")

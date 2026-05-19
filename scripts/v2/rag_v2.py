@@ -61,6 +61,7 @@ RENDER_PROMPT = """Тебя зовут {name}. Ты — литературный
 9. **Если в payload есть поле `render_instructions` — это ПРИОРИТЕТНЫЕ правила, всегда им следуй.**
 10. **Если в data есть `_bio_source: "wordcracker hardcoded"` — bio years подтверждены, не сомневайся в них.**
 11. **Числа и счёты — буква-в-букву из tool data.** Если ответ говорит «top 10» — в списке ровно 10 элементов из data, не 8 и не 12. Если data показывает 47 — пиши «47», не «около 50» и не «больше 40». Округление в перифразе допустимо только если оно явное («примерно 50, точнее 47»). Никаких чисел из «знания мира» — если число не в data, его нет в ответе. Это включает количество книг, частоты, проценты, годы рождения/смерти, рейтинги, дистанции.
+12. **Источник данных — раскрой, если использованы загруженные пользователем книги.** Если в payload есть `user_uploads_used: true` (или ToolResult.source_info.has_user_uploads), добавь короткое примечание в конце ответа: «*В ответе использованы загруженные вами книги (U<N>) — это не часть канонического корпуса SPGC*». Список конкретных U-id есть в `user_upload_ids` если нужно их назвать. На работу tool это не влияет — это исключительно прозрачность для пользователя.
 
 Tool trace тебе передан как JSON. Каждая запись — {{tool, query, data, warnings, coverage}}. Возьми оттуда factual content. **Ничего вне этих данных.**"""
 
@@ -307,6 +308,34 @@ _RETRIEVAL_TOOLS = frozenset({
 })
 
 
+# Sprint 19 — detect user-uploaded book references (U-prefix ids) in
+# tool results. When present, the renderer adds a disclosure footer
+# («ответ частично из загруженных вами книг») so the user knows the
+# answer isn't drawn purely from the canonical SPGC corpus.
+import re as _re_uid
+_U_ID_PATTERN = _re_uid.compile(r"\bU\d+\b")
+
+
+def _detect_user_uploads(results: list[ToolResult]) -> tuple[bool, int, list[str]]:
+    """Walk every ToolResult.data recursively; collect distinct U-ids.
+
+    Returns (has_uploads, count, sample_ids[:5]) — the sample is for
+    the render hint so the LLM can reference specific ids if helpful."""
+    seen: set[str] = set()
+    for r in results:
+        if not r.ok or r.data is None:
+            continue
+        try:
+            blob = json.dumps(r.data, ensure_ascii=False, default=str)
+        except Exception:
+            continue
+        for m in _U_ID_PATTERN.finditer(blob):
+            seen.add(m.group(0))
+            if len(seen) >= 50:  # cap to bound work
+                break
+    return bool(seen), len(seen), sorted(seen)[:5]
+
+
 def _extract_retrieval_log(results: list[ToolResult],
                             limit: int = 12) -> list[dict] | None:
     """Build a compact retrieval-source list for obs_mod.log_request.
@@ -361,6 +390,8 @@ def _llm_render(question: str, plan: plan_mod.QueryPlan,
     feed obs_mod.log_request so the admin dashboard can answer «do we
     need more num_ctx» data-driven instead of by guessing."""
     render_instructions = _collect_render_instructions(results)
+    # Sprint 19 — surface user-upload usage to the renderer.
+    has_uploads, upload_count, upload_sample = _detect_user_uploads(results)
     summary_payload = {
         "intent": plan.intent,
         "explain": plan.explain,
@@ -368,6 +399,10 @@ def _llm_render(question: str, plan: plan_mod.QueryPlan,
         # Top-level priority instructions — the renderer was missing notes
         # buried inside per-tool `data`. Surface them explicitly.
         "render_instructions": render_instructions,
+        # Source transparency — see RENDER_PROMPT rule 12.
+        "user_uploads_used": has_uploads,
+        "user_upload_count": upload_count,
+        "user_upload_ids":   upload_sample,
         "tool_results": [
             {
                 "tool": r.tool,
@@ -620,6 +655,10 @@ def ask(
         # actually fed the renderer? Splits «model gave bad answer»
         # from «retrieval gave bad source». None when no RAG tool ran.
         "retrieval_log": _extract_retrieval_log(rr.results),
+        # Sprint 19 — user-upload disclosure. True iff any tool result
+        # referenced a U-prefixed book id.
+        "user_uploads_used":  _detect_user_uploads(rr.results)[0],
+        "user_upload_count":  _detect_user_uploads(rr.results)[1],
         "answer_truncated": answer[:300],
     })
     return {
@@ -810,6 +849,9 @@ def ask_stream(
         "critic_eval_tokens":     verdict.eval_tokens,
         # Sprint 18 — retrieval source log
         "retrieval_log": _extract_retrieval_log(results),
+        # Sprint 19 — user-upload disclosure
+        "user_uploads_used":  _detect_user_uploads(results)[0],
+        "user_upload_count":  _detect_user_uploads(results)[1],
         "answer_truncated": answer[:300],
         "via_stream": True,
     })
