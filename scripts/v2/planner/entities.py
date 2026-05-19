@@ -16,10 +16,20 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 
-# Canonical author aliases. Keys are normalized (lowercased, no commas). Values
-# are the `^Surname,` regex used by the v1 metadata layer. Expand as needed —
-# this list covers all 40 example queries plus the popular cases from chat.
-AUTHOR_ALIASES: dict[str, str] = {
+# Canonical author aliases — TWO layers (Sprint 16 / v3.0):
+#
+#   AUTHOR_ALIASES_CURATED  — hand-curated dict below. Russian stem forms,
+#                             ambiguity guards (e.g. "по" preposition),
+#                             multi-word aliases, non-standard translit.
+#   AUTHOR_ALIASES_GENERATED — auto-built from corpus metadata.csv by
+#                             scripts/v2/build_author_aliases.py.
+#                             Stored as JSON, loaded lazily.
+#
+# Runtime: AUTHOR_ALIASES = {**generated, **curated} — curated wins on key
+# conflict. Every entry in CURATED is auto-regression-tested:
+#   tests/v2/test_aliases_regression.py
+# adding a new entry → next test run verifies extraction works for it.
+AUTHOR_ALIASES_CURATED: dict[str, str] = {
     # Russian classics (English translations live in the SPGC corpus).
     # Stem-forms cover Russian cases: "Достоевского/Достоевскому/Достоевским"
     # all match "достоевск" prefix.
@@ -127,6 +137,47 @@ AUTHOR_ALIASES: dict[str, str] = {
     # Q3 Salinger (common copyright author)
     "сэлинджер":        "^Salinger,",
     "salinger":         "^Salinger,",
+}
+
+
+def _load_generated_aliases() -> dict[str, str]:
+    """Lazy-load auto-generated alias dict produced by
+    scripts/v2/build_author_aliases.py. Missing file → empty dict
+    (no crash). Stale file (older than corpus metadata) is fine — the
+    aliases just won't cover new authors until next rebuild.
+
+    Generated entries are merged BENEATH curated ones so manual
+    overrides always win. See docs/v2/PLUGIN.md §1.
+    """
+    import json
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / "data" / "aliases_generated.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        # Accept either flat dict or {"aliases": {...}} wrapper
+        if isinstance(data, dict) and "aliases" in data:
+            data = data["aliases"]
+        if not isinstance(data, dict):
+            return {}
+        # Validate shape — each value must be a `^Surname,`-style regex
+        import re as _re
+        out: dict[str, str] = {}
+        for k, v in data.items():
+            if (isinstance(k, str) and isinstance(v, str)
+                    and _re.match(r"^\^[A-Za-zЀ-ӿ'-]+,?$", v)):
+                out[k.lower()] = v
+        return out
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+# Merge generated under curated. Curated wins on key conflict — manual
+# overrides are explicit by intent.
+AUTHOR_ALIASES: dict[str, str] = {
+    **_load_generated_aliases(),
+    **AUTHOR_ALIASES_CURATED,
 }
 
 
