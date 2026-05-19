@@ -520,6 +520,34 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     # ===== author_attribution =====
     (_re(r"кто автор|определи автора|attribute (this )?text|authorship of"),
      "author_attribution", 0.9),
+    # Sprint 17 Round 8 C7: «угадай автора отрывка X» / «whose passage
+    # is this» — natural phrasings the existing «кто автор» rule misses.
+    (_re(r"\b(угадай|отгада[йт]|определи|пойми|identify|guess|determine)\s+"
+         r"(?:кто\s+)?(?:the\s+)?(?:автор\w*|автора|author)\s+"
+         r"(?:of\s+(?:this|the))?\s*"
+         r"(?:этого\s+|этот\s+)?"
+         r"(?:отрывк\w*|текста|строк|цитат\w*|"
+         r"passage|excerpt|quote|line|text|prose)"),
+     "author_attribution", 0.93),
+    # «чей (это|этот) отрывок» / «whose passage» — bare interrogative.
+    # Allow либо «это» (neuter, demonstrative pronoun «this is»),
+    # либо «этот/эта/эти» (adjective forms), либо ничего.
+    (_re(r"\b(чей|чья|чьи|whose)\s+"
+         r"(?:это\s+|этот\s+|эта\s+|эти\s+)?"
+         r"(?:is\s+)?"
+         r"(?:this\s+)?"
+         r"(?:отрывок|отрывк\w*|пассаж|стиль|"
+         r"passage|excerpt|text|prose|line|quote)"),
+     "author_attribution", 0.9),
+    (_re(r"\b(угадай|отгада[йт]|guess|identify)\s+автора\s+[«\"„]"),
+     "author_attribution", 0.92),
+    # EN: «who is the author of this/the (passage|text|excerpt|prose)»
+    # — bibliographic «who wrote BookTitle» intentionally NOT matched
+    # here (that's book_lookup territory).
+    (_re(r"\bwho\s+(is|wrote|made)\s+(the\s+)?author\s+of\s+"
+         r"(?:this|the|that)\s+"
+         r"(passage|text|excerpt|quote|prose|line|paragraph)"),
+     "author_attribution", 0.93),
 
     # ===== author_influences =====
     (_re(r"влияни[яе]\w*|повлиял\w*|influences? on|literary influences?"),

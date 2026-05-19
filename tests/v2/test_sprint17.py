@@ -460,6 +460,122 @@ class TokenObservability(unittest.TestCase):
         self.assertEqual(meta["total_duration_ns"], 3_500_000_000)
 
 
+class Round8SilentContextFallback(unittest.TestCase):
+    """Round 8 C3-2 — user-deceptive bug: «теперь у Марло» (Marlowe
+    not in aliases at the time) silently restored Shakespeare from
+    prior turn and returned Shakespeare's vocabulary as if it were
+    Marlowe's. Fix: detect explicit-author-name-after-swap pattern,
+    block the backfill, clarify with «I don't know that author»."""
+
+    def test_unknown_author_after_swap_blocks_backfill(self):
+        """Simulate the exact Round 8 sequence with a deliberately
+        unknown author. Even with Marlowe now in aliases, we need a
+        future-proof unknown-author scenario."""
+        from scripts.v2.planner import history as hist_mod
+        from scripts.v2.planner.entities import Entities, extract
+        prior = [
+            {"role": "user", "content": "фирменные слова Шекспира"},
+            {"role": "assistant", "content": "Shakespeare: doth, thee, thou"},
+        ]
+        # Use a deliberately invented author name so the fix is verified
+        # independently of any alias additions.
+        current = extract("теперь у Нонэксистентов")
+        merged = hist_mod.merge_with_history(current, prior,
+                                              "теперь у Нонэксистентов")
+        # The Marlowe→Shakespeare bug would set author_regex='^Shakespeare,'
+        # here. Fix means it stays None AND raw_misc carries the name.
+        self.assertIsNone(merged.author_regex,
+            msg="silent fallback restored prior author — Round 8 C3-2 regression")
+        self.assertEqual(
+            (merged.raw_misc or {}).get("unresolved_author_named"),
+            "Нонэксистентов",
+        )
+
+    def test_unknown_author_clarify_message(self):
+        from scripts.v2.planner import plan as plan_mod
+        from scripts.v2.planner.entities import Entities
+        e = Entities(raw_misc={"unresolved_author_named": "Марлоид",
+                                "raw_text": "теперь у Марлоид"})
+        p = plan_mod.build("author_vocab", e)
+        self.assertTrue(p.needs_clarify)
+        self.assertIn("Марлоид", p.clarify_question or "")
+        self.assertIn("не узнаю", (p.clarify_question or "").lower())
+
+    def test_implicit_followup_still_backfills(self):
+        """«ещё примеры» (no explicit new author) — must still backfill
+        from prior. The block applies ONLY to explicit-named-author
+        cases."""
+        from scripts.v2.planner import history as hist_mod
+        from scripts.v2.planner.entities import extract
+        prior = [
+            {"role": "user", "content": "фирменные слова Doyle"},
+            {"role": "assistant", "content": "blighter, hullo..."},
+        ]
+        current = extract("ещё примеры")
+        merged = hist_mod.merge_with_history(current, prior, "ещё примеры")
+        # No swap trigger + no explicit author → safe to backfill
+        self.assertEqual(merged.author_regex, "^Doyle,")
+
+
+class Round8ElizabethanDramatists(unittest.TestCase):
+    """Round 8 surfaced Marlowe gap. Added the cohort — these aliases
+    should resolve to PG-style ^Surname, regex."""
+
+    KNOWN_DRAMATISTS = [
+        ("Marlowe", "^Marlowe,"),
+        ("Кристофер Марло", "^Marlowe,"),
+        ("Уэбстер", "^Webster, John"),
+        ("Ben Jonson", "^Jonson, Ben"),
+        ("Бен Джонсон", "^Jonson, Ben"),
+        ("Dekker", "^Dekker,"),
+        ("Kyd", "^Kyd,"),
+        ("Beaumont", "^Beaumont,"),
+        ("Middleton", "^Middleton,"),
+    ]
+
+    def test_each_dramatist_resolves(self):
+        for label, expected in self.KNOWN_DRAMATISTS:
+            with self.subTest(author=label):
+                e = ent_mod.extract(f"фирменные слова у {label}")
+                self.assertEqual(e.author_regex, expected,
+                    msg=f"{label!r} should resolve to {expected!r}")
+
+
+class Round8AuthorAttribution(unittest.TestCase):
+    """Round 8 C7: «угадай автора отрывка X» — phrasing missed by the
+    existing «кто автор» rule. Added passage-attribution triggers."""
+
+    POSITIVE = [
+        "угадай автора отрывка «the fog came pouring in»",
+        "отгадай автора этого отрывка",
+        "определи автора текста",
+        "чей этот отрывок?",
+        "чей отрывок?",
+        "identify the author of this passage",
+        "whose excerpt is this",
+        "who is the author of this text",
+    ]
+
+    NEGATIVE = [
+        # Bibliographic — not attribution; must NOT classify as
+        # author_attribution (any other intent or clarify is fine)
+        ("сколько книг у Doyle", "author_attribution"),
+    ]
+
+    def test_passage_attribution_classifies(self):
+        for q in self.POSITIVE:
+            with self.subTest(query=q):
+                m = int_mod.classify(q)
+                self.assertEqual(m.label, "author_attribution",
+                    msg=f"{q!r} → {m.label!r}")
+
+    def test_bibliographic_not_stolen(self):
+        for q, must_not in self.NEGATIVE:
+            with self.subTest(query=q):
+                m = int_mod.classify(q)
+                self.assertNotEqual(m.label, must_not)
+
+
 class MidsummerKnownBook(unittest.TestCase):
     def test_nominative_resolves(self):
         e = ent_mod.extract("какие архаизмы в Сне в летнюю ночь")  # prep case

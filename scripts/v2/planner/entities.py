@@ -137,6 +137,32 @@ AUTHOR_ALIASES_CURATED: dict[str, str] = {
     # Q3 Salinger (common copyright author)
     "сэлинджер":        "^Salinger,",
     "salinger":         "^Salinger,",
+    # Sprint 17 Round 8 — Elizabethan / Jacobean dramatists (Shakespeare-
+    # contemporaries cohort). Round 8 C3-2 surfaced via Marlowe gap;
+    # adding the rest preemptively to avoid the same silent-fallback
+    # trap on related queries.
+    "marlowe":          "^Marlowe,",
+    "марло":            "^Marlowe,",
+    "марлоу":           "^Marlowe,",
+    "кристофер марло":  "^Marlowe,",
+    "christopher marlowe": "^Marlowe,",
+    "webster":          "^Webster, John",  # disambiguate from Webster, Noah
+    "уэбстер":          "^Webster, John",
+    "вебстер":          "^Webster, John",
+    "jonson":           "^Jonson, Ben",
+    "ben jonson":       "^Jonson, Ben",
+    "джонсон":          "^Jonson, Ben",     # ambiguous w/ Samuel Johnson
+    "бен джонсон":      "^Jonson, Ben",
+    "dekker":           "^Dekker,",
+    "деккер":           "^Dekker,",
+    "kyd":              "^Kyd,",
+    "томас кид":        "^Kyd,",
+    "beaumont":         "^Beaumont,",
+    "бомонт":           "^Beaumont,",
+    "fletcher":         "^Fletcher, John",  # John Fletcher (playwright)
+    "флетчер":          "^Fletcher, John",
+    "middleton":        "^Middleton,",
+    "мидлтон":          "^Middleton,",
 }
 
 

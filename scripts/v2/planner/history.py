@@ -54,6 +54,20 @@ _CONTEXT_SWAP_TRIGGERS = re.compile(
     re.IGNORECASE,
 )
 
+# Sprint 17 Round 8 P0: detect explicit author-name positions in a
+# context-swap query. «теперь у Марло» / «а у Уэбстера» / «давай теперь
+# Толстого» — capture the capitalized token after the preposition. If
+# this token doesn't resolve via AUTHOR_ALIASES, merge_with_history must
+# NOT silently restore the prior author — that's user-deceptive (Round
+# 8 C3-2 returned Shakespeare answers for a Marlowe query).
+# Critical: NOT re.IGNORECASE — we rely on the leading capital letter
+# as the «proper noun candidate» signal.
+_EXPLICIT_AUTHOR_AFTER_SWAP = re.compile(
+    r"\b(?:[Тт]еперь|[Сс]ейчас|[Дд]авай(?:\s+теперь)?|а)\s+"
+    r"(?:у\s+|с\s+|про\s+|по\s+|для\s+|со\s+|об?\s+)?"
+    r"([A-ZА-ЯЁ][a-zA-Zа-яё-]{2,29})"
+)
+
 # Re-rank / re-format follow-ups: same data, different ordering. Re-run the
 # previous intent so the LLM gets the same tool result back from cache and
 # can render it sorted. Caught separately from «more examples» / «расскажи
@@ -216,14 +230,45 @@ def merge_with_history(current: Entities, history: list[dict] | None,
     prior turns iff the current text contains a follow-up trigger.
 
     Conservative: we don't override fields the user explicitly named in
-    the current turn. We only fill what's still None."""
+    the current turn. We only fill what's still None.
+
+    Sprint 17 Round 8 P0 safety: when the current turn is a context-swap
+    («теперь у X») AND the user clearly named an author but it didn't
+    resolve via AUTHOR_ALIASES, REFUSE to backfill the author from
+    prior. That's the difference between «implicit follow-up, reuse
+    prior context» (good) and «user explicitly switched to X, we don't
+    know X, silently pretend they meant the previous author» (bad —
+    surfaces as user-deceptive wrong answers, Round 8 C3-2 returned
+    Shakespeare for «теперь у Марло»). The unresolved name is parked
+    in raw_misc for the planner / clarify renderer to surface."""
     if not history or not _looks_like_followup(text):
         return current
     prior = _scan_history_for_entities(history)
     if prior is None:
         return current
     backfilled = replace(current)
-    if backfilled.author_regex is None and prior.author_regex:
+
+    # Detect user-named-but-unresolved author. If we see that pattern,
+    # block the author backfill — the user explicitly switched, we just
+    # didn't recognize them, and using prior would lie about the source.
+    block_author_backfill = False
+    if current.author_regex is None and _is_context_swap(text):
+        m = _EXPLICIT_AUTHOR_AFTER_SWAP.search(text)
+        if m:
+            named = m.group(1)
+            # Verify it really isn't a known alias (regex caught the
+            # surname but maybe AUTHOR_ALIASES has it under a different
+            # form — re-extract on the bare name to be sure).
+            verify = extract(f"у {named}")
+            if verify.author_regex is None:
+                block_author_backfill = True
+                backfilled.raw_misc = {
+                    **(backfilled.raw_misc or {}),
+                    "unresolved_author_named": named,
+                }
+
+    if (not block_author_backfill
+            and backfilled.author_regex is None and prior.author_regex):
         backfilled.author_regex = prior.author_regex
         backfilled.author_label = prior.author_label
     if backfilled.book_id is None and prior.book_id:

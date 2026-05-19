@@ -47,6 +47,31 @@ def _need_author(e: Entities, what: str = "автор") -> QueryPlan:
     # show concrete reformulations the user can copy. Include the captured
     # raw query as scaffold so they can edit it minimally.
     raw = (e.raw_misc or {}).get("raw_text", "") or ""
+
+    # Sprint 17 Round 8 P0: when the user explicitly named an author that
+    # we couldn't resolve (e.g. «теперь у Марло», «давай Уэбстера»), say
+    # so honestly instead of a generic «нужен автор». This is the surface
+    # of the silent-fallback prevention in history.merge_with_history —
+    # if we got here with unresolved_author_named set, the user does
+    # have an author in mind, we just don't recognize them.
+    unresolved = (e.raw_misc or {}).get("unresolved_author_named")
+    if unresolved:
+        clarify = (
+            f"Я не узнаю автора «{unresolved}». "
+            f"Возможно опечатка или этот автор пока не в моих алиасах.\n\n"
+            f"Попробуй:\n"
+            f"• уточнить написание (например «у Marlowe» / «у Кристофера Марло»)\n"
+            f"• передать как regex: «у ^Marlowe,» или подобный\n"
+            f"• назвать другого автора из списка — я знаю Doyle, Wodehouse, "
+            f"Достоевского, Толкина и ~90 других классиков"
+        )
+        return QueryPlan(
+            intent="clarify", entities=e, steps=[],
+            needs_clarify=True,
+            clarify_question=clarify,
+            explain=f"unresolved author named: {unresolved!r}",
+        )
+
     hint = ""
     if raw:
         # Show what they likely meant: «у Doyle / Wodehouse / Достоевского»
