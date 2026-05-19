@@ -189,16 +189,22 @@ KNOWN_BOOKS: dict[str, tuple[str, str]] = {
 
     # Russian classics (English translations in SPGC)
     "преступление и наказание":   ("PG2554", "Crime and Punishment"),
-    # Sprint 16 Phase G — RU declension variants. «слова в Преступлении и
-    # наказании» (prep), «герой Преступления и наказания» (gen) — both
-    # common in user questions. Match the nominative target.
+    # Sprint 16/17 — full RU declension coverage for the most-asked-about
+    # Russian-titled books. «что почитать после Преступления и наказания»
+    # (gen), «как в Преступлении и наказании» (prep), «что подобное
+    # Преступлению и наказанию» (dat) — all natural Russian phrasings.
     "преступления и наказания":   ("PG2554", "Crime and Punishment"),  # gen
     "преступлении и наказании":   ("PG2554", "Crime and Punishment"),  # prep
+    "преступлению и наказанию":   ("PG2554", "Crime and Punishment"),  # dat
+    "преступлением и наказанием": ("PG2554", "Crime and Punishment"),  # inst
     "crime and punishment":       ("PG2554", "Crime and Punishment"),
     "war and peace":              ("PG2600", "War and Peace"),
     "война и мир":                ("PG2600", "War and Peace"),
     "войны и мира":               ("PG2600", "War and Peace"),  # gen
     "войне и мире":               ("PG2600", "War and Peace"),  # prep
+    "войне и миру":               ("PG2600", "War and Peace"),  # dat
+    "войной и миром":             ("PG2600", "War and Peace"),  # inst
+    "войну и мир":                ("PG2600", "War and Peace"),  # acc
 
     # Shakespeare — Sprint 17 (Stan readability-compare bug, «Сон в летнюю
     # ночь»). PG1514 is the canonical Project Gutenberg id for A Midsummer
@@ -225,7 +231,9 @@ KNOWN_BOOKS: dict[str, tuple[str, str]] = {
     "dracula":                    ("PG345",  "Dracula"),
     "дракула":                    ("PG345",  "Dracula"),
     "дракулы":                    ("PG345",  "Dracula"),  # gen
-    "дракуле":                    ("PG345",  "Dracula"),  # prep
+    "дракуле":                    ("PG345",  "Dracula"),  # prep / dat
+    "дракулу":                    ("PG345",  "Dracula"),  # acc
+    "дракулой":                   ("PG345",  "Dracula"),  # inst
     "alice's adventures in wonderland": ("PG11", "Alice's Adventures in Wonderland"),
     "alice in wonderland":        ("PG11",  "Alice's Adventures in Wonderland"),
     "frankenstein":               ("PG84",   "Frankenstein"),
@@ -273,7 +281,9 @@ KNOWN_BOOKS: dict[str, tuple[str, str]] = {
     "anna karenina":              ("PG1399", "Anna Karenina"),
     "анна каренина":              ("PG1399", "Anna Karenina"),
     "анны карениной":             ("PG1399", "Anna Karenina"),  # gen (Sprint 16 Phase G)
-    "анне карениной":             ("PG1399", "Anna Karenina"),  # prep
+    "анне карениной":             ("PG1399", "Anna Karenina"),  # prep / dat
+    "анну каренину":              ("PG1399", "Anna Karenina"),  # acc
+    "анной карениной":            ("PG1399", "Anna Karenina"),  # inst
     # Catcher in the Rye is copyright
     "catcher in the rye":         ("",      "The Catcher in the Rye"),
     "the catcher in the rye":     ("",      "The Catcher in the Rye"),

@@ -339,6 +339,58 @@ class BookSimilarFollowupTrap(unittest.TestCase):
         self.assertIn("book_similar", _INTENT_SKIP_CRITIC)
 
 
+class ChtoPochitatPosle(unittest.TestCase):
+    """Stan 2026-05-19 prod: «что почитать после преступления и наказания»
+    classified as book_recommendation, but the plan returned
+    top_books_by_downloads (Hemingway / Carroll / Christie — generic
+    top, NOT related to the reference book). Two fixes:
+      1. Route «что почитать после/подобное/похожее/типа X» to
+         book_similar — semantically a similarity-to-reference query.
+      2. Add full RU declension for the 5 most-asked Russian-titled
+         books (acc/dat/inst beyond just nom/gen/prep) so the entity
+         extractor picks up forms like «Преступлению и наказанию» (dat),
+         «Войну и мир» (acc), «Анны Карениной» (gen)."""
+
+    def test_stan_verbatim_routes_to_book_similar(self):
+        m = int_mod.classify("что почитать после преступления и наказания")
+        self.assertEqual(m.label, "book_similar")
+
+    def test_stan_verbatim_resolves_book(self):
+        e = ent_mod.extract("что почитать после преступления и наказания")
+        self.assertEqual(e.book_id, "PG2554")
+
+    def test_stan_verbatim_plan(self):
+        e = ent_mod.extract("что почитать после преступления и наказания")
+        p = plan_mod.build("book_similar", e)
+        self.assertEqual(p.steps[0].tool, "find_book_by_topic")
+        # Topic should be the canonical EN title since embedding lookup
+        # on EN corpus has higher precision than RU.
+        self.assertEqual(p.steps[0].args["topic"], "Crime and Punishment")
+
+    def test_declension_dative(self):
+        """«подобное Преступлению и наказанию» — dative case."""
+        e = ent_mod.extract("что почитать подобное Преступлению и наказанию")
+        self.assertEqual(e.book_id, "PG2554")
+
+    def test_declension_accusative_dracula(self):
+        e = ent_mod.extract("что почитать похожее на Дракулу")
+        self.assertEqual(e.book_id, "PG345")
+
+    def test_declension_war_and_peace_genitive(self):
+        e = ent_mod.extract("что почитать после Войны и мира")
+        self.assertEqual(e.book_id, "PG2600")
+
+    def test_declension_anna_karenina_genitive(self):
+        e = ent_mod.extract("что почитать типа Анны Карениной")
+        self.assertEqual(e.book_id, "PG1399")
+
+    def test_level_recommendation_not_stolen(self):
+        """«что почитать на уровне B2» must STAY book_recommendation —
+        level queries are not similarity queries."""
+        m = int_mod.classify("что почитать на уровне B2")
+        self.assertEqual(m.label, "book_recommendation")
+
+
 class MidsummerKnownBook(unittest.TestCase):
     def test_nominative_resolves(self):
         e = ent_mod.extract("какие архаизмы в Сне в летнюю ночь")  # prep case

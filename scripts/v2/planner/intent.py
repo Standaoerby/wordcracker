@@ -616,8 +616,16 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     # phrasings.
     (_re(r"произведени\w*\b.{0,60}\b(можно|стоит)\s+(читать|изучать|освоить)"),
      "book_recommendation", 0.93),
+    # Sprint 17 fix: «что почитать после/подобное/похожее/типа X» —
+    # was wrongly classified as book_recommendation (generic popularity)
+    # ignoring the resolved book entity. These are all similarity-to-
+    # reference queries → book_similar with X as the semantic reference.
+    # Stan 2026-05-19: «что почитать после преступления и наказания»
+    # used to return top_books_by_downloads (Hemingway/Carroll/Christie
+    # — generic top), now routes to find_book_by_topic(Crime and
+    # Punishment) which returns thematically similar books.
     (_re(r"что\s+(почитать|читать)\b.{0,60}\b(после|подобн|похож|типа)"),
-     "book_recommendation", 0.9),
+     "book_similar", 0.93),
 
     # ===== word_etymology =====
     (_re(r"этимолог\w*|origin of the word"), "word_etymology", 0.95),
