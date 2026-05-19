@@ -1102,6 +1102,57 @@ _ROLEPLAY_PREAMBLE = re.compile(
 )
 
 
+def _extract_attribution_passage(text: str) -> str | None:
+    """Return a quoted passage suitable for author attribution / quote
+    lookup, or None.
+
+    Stan 2026-05-19: «угадай автора отрывка "the fog came pouring in..."»
+    fell to clarify «вставь сам текст (хотя бы 500 слов)» because the
+    extractor didn't capture the in-line quoted excerpt. Now we capture
+    quoted strings >= 30 chars and >= 5 words as attribution_text. Plan
+    builder routes <200-word passages to lexical_search (quote lookup),
+    ≥200-word to Burrows Delta (real stylometry).
+
+    Skips short single-word quotes (handled by _find_word) and titles
+    matched via KNOWN_BOOKS (those have separate book_id flow)."""
+    if not text or len(text) < 40:
+        return None
+    # Find quoted spans — accept «...», "...", "...", '...'
+    quote_patterns = [
+        ("«", "»"),
+        ('"', '"'),
+        ("“", "”"),   # curly double
+        ("‘", "’"),   # curly single
+    ]
+    candidates: list[str] = []
+    for open_q, close_q in quote_patterns:
+        i = 0
+        while True:
+            start = text.find(open_q, i)
+            if start < 0:
+                break
+            end = text.find(close_q, start + 1)
+            if end < 0:
+                break
+            inner = text[start + 1:end].strip()
+            i = end + 1
+            # Filter: long enough to be a passage, not just a word/title
+            if len(inner) < 30:
+                continue
+            word_count = len(inner.split())
+            if word_count < 5:
+                continue
+            # Avoid catching book titles — if the entire inner is in
+            # KNOWN_BOOKS, it's a title, not an attribution passage.
+            if inner.lower() in KNOWN_BOOKS:
+                continue
+            candidates.append(inner)
+    if not candidates:
+        return None
+    # Pick the longest one — best signal for both lookup and stylometry.
+    return max(candidates, key=len)
+
+
 def _strip_roleplay_preamble(text: str) -> str:
     """Return text with the role-play preamble removed (if any).
 
@@ -1161,6 +1212,14 @@ def extract(text: str) -> Entities:
     if word and book_title and word.lower() in book_title.lower():
         word = None
 
+    # Sprint 19+ — capture long quoted passage for attribution. Stan
+    # 2026-05-19: «угадай автора отрывка "the fog came pouring in..."»
+    # — passage was inside quotes, but extractor didn't surface it. v1
+    # author_attribution required ≥500 words and the user expected
+    # quote-lookup behaviour. Now: detect quoted passages >30 chars,
+    # store as attribution_text so plan can route to lexical search.
+    attribution_text = _extract_attribution_passage(text)
+
     return Entities(
         author_regex=primary_author[1],
         author_label=primary_author[0],
@@ -1179,5 +1238,7 @@ def extract(text: str) -> Entities:
         multi_author_regex=multi,
         multi_book_ids=multi_book_ids,
         multi_book_titles=multi_book_titles,
-        raw_misc={"raw_text": text},
+        raw_misc={"raw_text": text,
+                  **({"attribution_text": attribution_text}
+                     if attribution_text else {})},
     )

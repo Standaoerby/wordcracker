@@ -556,28 +556,69 @@ def _plan_author_closest(e: Entities) -> QueryPlan:
 
 
 def _plan_author_attribution(e: Entities) -> QueryPlan:
+    # Sprint 19+ — quote-lookup path takes priority over book_lookup
+    # redirect. «угадай автора отрывка "It was the best of times..."»
+    # has BOTH attribution_text (real passage) AND book_title (because
+    # the quoted-string regex picked it up too). We want lexical_search
+    # on the passage, not find_book(title="It was the best of times")
+    # which would return nothing useful.
+    text = (e.raw_misc or {}).get("attribution_text")
+    has_substantive_passage = bool(text and len(text.split()) >= 5)
+
     # Sprint 18 — bibliographic «who wrote X» / «кто автор Дракулы»
     # falls through to book_lookup. The original «кто автор» rule was
     # tagged author_attribution but stylometric attribution requires
     # the passage text, not a book title. When a book is explicitly
-    # named, the user wants the book's author from metadata — that's
-    # book_lookup territory.
-    if e.book_id or e.book_title:
+    # named WITHOUT a substantive quoted passage, the user wants the
+    # book's author from metadata — that's book_lookup territory.
+    if (e.book_id or e.book_title) and not has_substantive_passage:
         return _plan_book_lookup(e)
-    text = (e.raw_misc or {}).get("attribution_text")
     if not text:
         return QueryPlan(
             intent="clarify", entities=e, steps=[],
             needs_clarify=True,
-            clarify_question="Вставь сам текст, который нужно атрибутировать (хотя бы 500 слов).",
+            clarify_question=(
+                "Вставь сам текст для атрибуции в кавычках, например:\n"
+                "  «угадай автора отрывка \"<паста сюда>\"»\n\n"
+                "Для коротких цитат (5+ слов) я найду точное совпадение в "
+                "корпусе через FTS5. Для длинных образцов (200+ слов) — "
+                "стилометрический анализ Burrows Delta."
+            ),
             explain="запросил текст для author_attribution",
         )
+
+    # Sprint 19+ — dual-path. Short passage = quote lookup; long passage
+    # = stylometric attribution. Threshold 200 words: Burrows Delta
+    # becomes statistically meaningful around 200-300 tokens; anything
+    # shorter is noise. Lookup (FTS5 exact match via lexical_search)
+    # works on as little as 5 words and is the right operation for
+    # «угадай автора этой цитаты».
+    word_count = len(text.split())
+    if word_count < 200:
+        # Quote lookup — wrap the passage in FTS5 phrase quotes so we
+        # match the exact run. lexical_search returns pg_id + snippet
+        # + score; renderer surfaces the matched book + author.
+        # Trim if super long (FTS5 phrases >300 chars get expensive).
+        phrase = text[:300] if len(text) > 300 else text
+        # Strip terminal punctuation that breaks FTS5 phrase mode
+        phrase = phrase.strip(' .,!?;:"\'«»""\'')
+        return QueryPlan(
+            intent="author_attribution", entities=e,
+            steps=[PlanStep(
+                tool="lexical_search",
+                args={"query": f'"{phrase}"', "k": 5},
+            )],
+            expected_cost="cheap",
+            explain=(f"quote lookup via lexical_search "
+                     f"(passage={word_count} words, FTS5 exact match)"),
+        )
+
     return QueryPlan(
         intent="author_attribution", entities=e,
         steps=[PlanStep(tool="author_attribution",
                         args={"text": text, "top": e.top_n or 5})],
         expected_cost="medium",
-        explain="author_attribution",
+        explain=f"Burrows Delta attribution ({word_count} words)",
     )
 
 
