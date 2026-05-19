@@ -11,6 +11,7 @@ if str(_REPO) not in sys.path:
 from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
 from scripts.v2.tools.authors._surname_filter import filter_surnames
+from scripts.v2.tools.authors._corpus_artifacts import filter_corpus_artifacts
 
 
 # Stan's 2026-05-18 round 3: «характерные прилагательные Оскара Уайльда»
@@ -136,10 +137,16 @@ def affinity_by_author(author_regex: str, top: int = 50,
                 not in _LITERARY_PROPN_BLACKLIST]
         lit_dropped = before_lit - len(rows)
         rows, surname_dropped = filter_surnames(rows)
-        if lit_dropped or surname_dropped:
+        # Sprint 20 — drop OCR/markup artifacts (Roman-numeral ordinals
+        # like «xvth», single-char words, consonant-only clusters).
+        # Stan 2026-05-19: «xvth» = «XV-th век» from broken text
+        # rendering — not vocabulary.
+        rows, artifact_dropped = filter_corpus_artifacts(rows)
+        if lit_dropped or surname_dropped or artifact_dropped:
             note = (raw.get("proper_noun_filter") or "") if isinstance(raw, dict) else ""
             extra = (f"; v2 literary blacklist dropped {lit_dropped}, "
-                      f"v2 surname blocklist dropped {surname_dropped}")
+                      f"v2 surname blocklist dropped {surname_dropped}, "
+                      f"v2 corpus-artifact filter dropped {artifact_dropped}")
             if isinstance(raw, dict):
                 raw["proper_noun_filter"] = (note + extra).lstrip("; ")
         # Propagate the filtered list back so the LLM renders only

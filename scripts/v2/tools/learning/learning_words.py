@@ -11,6 +11,7 @@ if str(_REPO) not in sys.path:
 from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
 from scripts.v2.tools.authors._surname_filter import filter_surnames
+from scripts.v2.tools.authors._corpus_artifacts import filter_corpus_artifacts
 
 
 # Stan round 2 Q9: learning_words на P&P вернул `Lambton`, `Shire` — это
@@ -109,14 +110,29 @@ def learning_words(scope, level: str = "intermediate", top: int = 30,
         rows, surname_dropped = filter_surnames(
             rows, word_key="_word_for_filter",
         )
+        # Re-apply the marker since filter_surnames returns subset
+        for r in rows:
+            if "_word_for_filter" not in r:
+                r["_word_for_filter"] = (
+                    r.get("lemma") or r.get("word") or ""
+                )
+        rows, artifact_dropped = filter_corpus_artifacts(
+            rows, word_key="_word_for_filter",
+        )
         for r in rows:
             r.pop("_word_for_filter", None)
-        if surname_dropped and isinstance(raw, dict):
+        if (surname_dropped or artifact_dropped) and isinstance(raw, dict):
             raw["words"] = rows
             prev = raw.get("_render_note", "")
-            note = (f"v2 surname filter dropped {surname_dropped} "
-                     f"character/author names from learning list.")
-            raw["_render_note"] = (prev + " " + note).strip()
+            notes = []
+            if surname_dropped:
+                notes.append(f"v2 surname filter dropped {surname_dropped} "
+                              f"character/author names from learning list")
+            if artifact_dropped:
+                notes.append(f"v2 corpus-artifact filter dropped "
+                              f"{artifact_dropped} markup tokens (Roman "
+                              f"numerals, single chars)")
+            raw["_render_note"] = (prev + " " + "; ".join(notes)).strip()
     warnings: list[ToolWarning] = []
     if not rows:
         warnings.append(ToolWarning(

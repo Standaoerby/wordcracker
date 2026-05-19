@@ -16,6 +16,7 @@ if str(_REPO) not in sys.path:
 from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
 from scripts.v2.tools.authors._surname_filter import filter_surnames
+from scripts.v2.tools.authors._corpus_artifacts import filter_corpus_artifacts
 
 
 @tool(
@@ -70,13 +71,19 @@ def affinity_by_book(pg_id: str, top: int = 50,
     # участвовать в аффинити индексе».
     if rows:
         rows, surname_dropped = filter_surnames(rows)
+        rows, artifact_dropped = filter_corpus_artifacts(rows)
         if isinstance(raw, dict):
             raw["top_words"] = rows
+            notes = []
             if surname_dropped:
+                notes.append(f"v2 surname filter dropped {surname_dropped} "
+                              f"character/author names")
+            if artifact_dropped:
+                notes.append(f"v2 corpus-artifact filter dropped "
+                              f"{artifact_dropped} markup tokens (e.g. xvth)")
+            if notes:
                 prev = raw.get("_render_note", "")
-                note = (f"v2 surname filter dropped {surname_dropped} "
-                         f"character/author names from signature list.")
-                raw["_render_note"] = (prev + " " + note).strip()
+                raw["_render_note"] = (prev + " " + "; ".join(notes)).strip()
     # Sprint 20 — count-honesty signal (mirrors affinity_by_author).
     # When filtering knocks the list below `top`, surface the delta
     # so the renderer doesn't claim the requested count.
