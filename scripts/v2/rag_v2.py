@@ -807,7 +807,59 @@ def ask_stream(
     yield {"event": "intent", "label": intent.label,
            "confidence": intent.confidence, "explain": plan.explain}
 
+    # v4 LLM planner — mirror the rag_v2.ask() wiring for the SSE path.
+    # Stan 2026-05-19 discovered v4 wasn't firing on prod because chat-
+    # server uses ask_stream, not ask. When the rules-based path produces
+    # clarify AND WC_LLM_PLANNER=on, ask the LLM for a DAG plan and
+    # stream its execution. Otherwise the original clarify event flows
+    # through as before.
+    v4_planner_used = False
+    v4_planner_report = None
     if plan.needs_clarify:
+        try:
+            from scripts.v2.planner import llm_planner as _llmp
+        except ImportError:
+            _llmp = None
+        if _llmp is not None and _llmp.LLM_PLANNER_ENABLED:
+            try:
+                pres = _llmp.plan_query(question, history=history)
+            except Exception:
+                log.exception("v4 LLM planner crashed (stream)")
+                pres = None
+            if pres is not None and pres.ok and pres.plan and pres.plan.steps:
+                v4_planner_used = True
+                v4_planner_report = pres
+                # Execute the DAG once: stream events + collect results
+                # for renderer / critic in a single pass (don't double-
+                # dispatch via execute_spec_stream + execute_spec).
+                rr = router_mod.execute_spec(pres.plan)
+                results = rr.results
+                plan = rr.plan  # stub QueryPlan with v4 intent label
+                yield {"event": "v4_plan",
+                       "intent_hint": pres.plan.intent_hint or "v4_llm_plan",
+                       "rationale": pres.plan.rationale,
+                       "steps": [{"id": s.id, "tool": s.tool,
+                                   "args": s.args, "needs": s.needs}
+                                  for s in pres.plan.steps],
+                       "render_hint": pres.plan.render_hint,
+                       "elapsed_s": round(pres.elapsed_s, 2),
+                       "attempts": pres.attempts}
+                # Replay per-step events so SSE consumers see the
+                # familiar tool_call / tool_result shape.
+                for ev in rr.events:
+                    if ev.kind == "step_start":
+                        yield {"event": "tool_call", "name": ev.tool,
+                               "args": ev.args}
+                    elif ev.kind == "step_done" and ev.result is not None:
+                        tr = ev.result
+                        yield {"event": "tool_result", "name": ev.tool,
+                               "ms": tr.runtime_ms, "ok": tr.ok,
+                               "summary": tr.to_llm_string(max_chars=240)}
+            elif pres is not None and pres.clarify:
+                plan.clarify_question = pres.clarify
+                v4_planner_report = pres
+
+    if plan.needs_clarify and not v4_planner_used:
         # Sprint 17 fix: ask_stream() never logged failures, so the
         # chat-UI path was invisible to /admin/failed. Stan's 2026-05-19
         # «что сложнее читать ... или Сон в летнюю ночь?» went here and
@@ -827,6 +879,11 @@ def ask_stream(
             "failure_kind": "clarify",
             "failure_reason": plan.explain or "no specific reason",
             "via_stream": True,
+            "v4_planner_attempted": v4_planner_report is not None,
+            "v4_planner_attempts": (v4_planner_report.attempts
+                                     if v4_planner_report else None),
+            "v4_planner_elapsed_s": (round(v4_planner_report.elapsed_s, 2)
+                                      if v4_planner_report else None),
             **({"unknown_author_candidates": unknown_authors}
                if unknown_authors else {}),
         })
@@ -856,23 +913,26 @@ def ask_stream(
                "elapsed_sec": round(time.perf_counter() - t0, 2)}
         return
 
-    yield {"event": "plan", "steps": [{"tool": s.tool, "args": s.args}
-                                      for s in plan.steps]}
+    # Skip the v3 step-execution loop when v4 LLM planner already ran
+    # the DAG — `results` is already populated above.
+    if not v4_planner_used:
+        yield {"event": "plan", "steps": [{"tool": s.tool, "args": s.args}
+                                          for s in plan.steps]}
 
-    results: list[ToolResult] = []
-    for idx, step in enumerate(plan.steps):
-        # use the same injector logic the non-streaming router uses
-        args = router_mod._inject(step.args, results, step.depends_on,
-                                  step.inject_result_as)
-        yield {"event": "tool_call", "name": step.tool, "args": args}
-        from scripts.v2.legacy_dispatch import dispatch_any
-        tr = dispatch_any(step.tool, args)
-        results.append(tr)
-        yield {"event": "tool_result", "name": step.tool,
-               "ms": tr.runtime_ms, "ok": tr.ok,
-               "summary": tr.to_llm_string(max_chars=240)}
-        if not tr.ok and not step.optional:
-            break
+        results: list[ToolResult] = []
+        for idx, step in enumerate(plan.steps):
+            # use the same injector logic the non-streaming router uses
+            args = router_mod._inject(step.args, results, step.depends_on,
+                                      step.inject_result_as)
+            yield {"event": "tool_call", "name": step.tool, "args": args}
+            from scripts.v2.legacy_dispatch import dispatch_any
+            tr = dispatch_any(step.tool, args)
+            results.append(tr)
+            yield {"event": "tool_result", "name": step.tool,
+                   "ms": tr.runtime_ms, "ok": tr.ok,
+                   "summary": tr.to_llm_string(max_chars=240)}
+            if not tr.ok and not step.optional:
+                break
 
     # Renderer
     render_meta: dict = {}
@@ -935,6 +995,12 @@ def ask_stream(
         # Sprint 19 — user-upload disclosure
         "user_uploads_used":  _detect_user_uploads(results)[0],
         "user_upload_count":  _detect_user_uploads(results)[1],
+        # v4 — LLM planner usage on the streaming path
+        "v4_planner_used": v4_planner_used,
+        "v4_planner_attempts": (v4_planner_report.attempts
+                                 if v4_planner_report else None),
+        "v4_planner_elapsed_s": (round(v4_planner_report.elapsed_s, 2)
+                                  if v4_planner_report else None),
         "answer_truncated": answer[:300],
         "via_stream": True,
     })
