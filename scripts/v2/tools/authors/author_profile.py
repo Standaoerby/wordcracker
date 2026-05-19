@@ -89,28 +89,81 @@ def author_influences(author_regex: str, top: int = 10) -> ToolResult:
     except ImportError as e:
         return ToolResult.fail(tool="author_influences", err_type="internal",
                                message=f"v1 unavailable: {e}")
-    raw = _v1(author_regex=author_regex, top=top)
+    # Sprint 16 Phase B1: ask v1 for more candidates than `top` so that
+    # after filtering aggregate buckets we still have `top` valid rows.
+    # Stan round 6 R19: Doyle/Poe returned identical top — Burrows Delta
+    # baseline noise. Pulling top*3 and filtering aggregate authors gives
+    # the actual stylistic neighbours, not corpus-mean-similar ones.
+    raw = _v1(author_regex=author_regex, top=top * 3)
     query = {"author_regex": author_regex, "top": top}
     if isinstance(raw, dict) and raw.get("error"):
         return ToolResult.fail(tool="author_influences", err_type="not_found",
                                message=str(raw["error"]), query=query)
-    # Stan round 2 Q10: «Various» (aggregate placeholder for multi-author
-    # collections, ~3634 books) topped the «closest authors» list when
-    # asking «на кого похож Conan Doyle». Drop it + similar collection
-    # bucket names before rendering.
     if isinstance(raw, dict):
         for key in ("closest", "neighbours", "top", "authors"):
             lst = raw.get(key)
             if isinstance(lst, list):
-                filtered = [r for r in lst
-                            if not _is_collection_bucket(r)]
-                if len(filtered) < len(lst):
-                    raw[key] = filtered
+                filtered = [r for r in lst if not _is_collection_bucket(r)]
+                # Trim back to requested `top` after filtering
+                raw[key] = filtered[:top]
+
+        # Sprint 16 Phase B2: confidence floor. If the top-N distances
+        # are all near corpus baseline (small range), the «closest authors»
+        # are just whoever happens to sit closest to mean — not real
+        # stylistic siblings. Better to say so than mislead.
+        _annotate_confidence(raw, author_regex)
     return ToolResult.success(
         tool="author_influences", data=raw,
         coverage=Coverage(),
         query=query,
     )
+
+
+def _annotate_confidence(raw: dict, author_regex: str) -> None:
+    """Inspect Burrows Delta distances in the result. Mark low-confidence
+    when the spread is small (top N all clustered near baseline).
+
+    Heuristic: take top-N distances. If `(max - min) / median < 0.05`
+    OR if all top distances are within ±0.02 of the median, mark as
+    baseline-overlap. LLM render sees `confidence: low` + note → tells
+    user honestly «no clear stylistic match, this author sits near
+    corpus mean»."""
+    rows = None
+    for key in ("closest", "neighbours", "top", "authors"):
+        lst = raw.get(key)
+        if isinstance(lst, list) and lst:
+            rows = lst
+            break
+    if not rows:
+        return
+    distances: list[float] = []
+    for r in rows[:10]:
+        d = r.get("delta") or r.get("distance") or r.get("score")
+        if isinstance(d, (int, float)):
+            distances.append(float(d))
+    if len(distances) < 3:
+        return
+    distances.sort()
+    median = distances[len(distances) // 2]
+    spread = distances[-1] - distances[0]
+    if median <= 0:
+        return
+    relative_spread = spread / median if median > 0 else 0
+    confidence = "high"
+    if relative_spread < 0.05 or spread < 0.02:
+        confidence = "low"
+    raw["similarity_confidence"] = confidence
+    if confidence == "low":
+        raw["_render_note"] = (
+            f"Стилистический профиль автора {author_regex} находится "
+            f"близко к среднему по корпусу — расстояния до top-N "
+            f"кандидатов слабо отличаются (spread={spread:.3f}, "
+            f"median={median:.3f}). Это не «эти авторы похожи стилем», "
+            f"а «никто чётко не похож, все близко к baseline». "
+            f"Скажи пользователю честно: clear stylistic siblings "
+            f"не нашлось. Попробуй сравнить с конкретным кандидатом "
+            f"через compare_authors."
+        )
 
 
 _COLLECTION_BUCKETS = frozenset({
