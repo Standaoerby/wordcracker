@@ -185,6 +185,15 @@ AUTHOR_ALIASES_CURATED: dict[str, str] = {
     "maturin":          "^Maturin,",
     "матюрин":          "^Maturin,",
     "матьюрин":         "^Maturin,",
+    # Sprint 19+ — Milton (Stan 2026-05-19 «germanic vs latinate ratio
+    # в Beowulf и Paradise Lost» — author behind Paradise Lost wasn't
+    # resolvable). 17th-c. English poet, anchor for Latinate vocabulary
+    # contrast against Old-English-rooted Beowulf.
+    "milton":           "^Milton, John",
+    "john milton":      "^Milton, John",
+    "мильтон":          "^Milton, John",
+    "мильтона":         "^Milton, John",
+    "джон мильтон":     "^Milton, John",
     # Sprint 19+ — Victorian novelists (Stan 2026-05-19 «Burrows Delta
     # между Dickens и Trollope: кто ближе к Eliot» — neither in
     # AUTHOR_ALIASES). Anthony Trollope + George Eliot (Mary Ann Evans).
@@ -301,6 +310,20 @@ KNOWN_BOOKS: dict[str, tuple[str, str]] = {
     "the monk":                   ("PG601", "The Monk"),
     "monk a romance":             ("PG601", "The Monk"),
     "монах":                      ("PG601", "The Monk"),
+
+    # Sprint 19+ — Old English / 17th-c epic poetry (Stan 2026-05-19
+    # «germanic vs latinate ratio в Beowulf и Paradise Lost» — neither
+    # in KNOWN_BOOKS so book_id resolution failed).
+    # Beowulf: PG16328 = Gummere 1910 Modern English verse translation,
+    # the most-read public-domain edition.
+    "beowulf":                    ("PG16328", "Beowulf"),
+    "беовульф":                   ("PG16328", "Beowulf"),
+    "беовульфа":                  ("PG16328", "Beowulf"),
+    # Paradise Lost: PG26 = Milton, 1667. Anchor for Latinate diction.
+    "paradise lost":              ("PG26",    "Paradise Lost"),
+    "потерянный рай":             ("PG26",    "Paradise Lost"),
+    "потерянного рая":            ("PG26",    "Paradise Lost"),
+    "потерянном рае":             ("PG26",    "Paradise Lost"),
 
     # English / American canon
     "pride and prejudice":        ("PG1342", "Pride and Prejudice"),
@@ -962,10 +985,27 @@ def _find_year_range(text: str) -> tuple[int | None, int | None]:
 
 # ---------- country ----------
 
+
 def _find_country(text: str) -> str | None:
+    """Match country aliases. Latin-script aliases require word boundaries
+    to prevent substring false positives — `german` was matching inside
+    `germanic` (etymology family) and tagging the query as country=DE
+    (Stan 2026-05-19 «germanic vs latinate ratio в Beowulf и Paradise Lost»).
+
+    Cyrillic stems (русск, немецк, ...) still substring-match because they
+    cover natural Russian morphology (немецк-ий/-ого/-ому/-ом/-их/-ие).
+    """
     s = text.lower()
     for k, v in COUNTRY_ALIASES.items():
-        if k in s:
+        # Cyrillic / non-ASCII stem → keep substring match (covers Russian
+        # declensions: русск-ий, русск-ого, etc.)
+        if any(ord(ch) > 127 for ch in k):
+            if k in s:
+                return v
+            continue
+        # Latin-script alias → require word boundaries to keep `german`
+        # from matching `germanic`.
+        if re.search(rf"\b{re.escape(k)}\b", s):
             return v
     return None
 

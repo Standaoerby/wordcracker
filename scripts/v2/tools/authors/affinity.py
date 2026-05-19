@@ -10,6 +10,7 @@ if str(_REPO) not in sys.path:
 
 from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
+from scripts.v2.tools.authors._surname_filter import filter_surnames
 
 
 # Stan's 2026-05-18 round 3: «характерные прилагательные Оскара Уайльда»
@@ -121,14 +122,26 @@ def affinity_by_author(author_regex: str, top: int = 50,
     # parnassus» — all character / classical names.
     # Also drop the author's own surname if it leaks through (round-2 Q3:
     # Wilde signature words included «wilde»).
+    # Sprint 19+ (2026-05-19): top of Conan Doyle's signature list was
+    # mostly character surnames (challenger/knolles/barrymore/holmes/
+    # stapleton/mcfarlane/baumgarten). The corpus-diff heuristic +
+    # spaCy PROPN + word_dict propn cache all leak on ambiguous-cased
+    # tokens. New layer: positive surname signal from PG metadata authors
+    # + curated character set. See `_surname_filter.py`.
     if rows:
         rows = _drop_author_self_name(author_regex, rows)
-        filtered = [r for r in rows
-                    if (r.get("word") or "").lower()
-                    not in _LITERARY_PROPN_BLACKLIST]
-        dropped = len(rows) - len(filtered)
-        if dropped:
-            rows = filtered
+        before_lit = len(rows)
+        rows = [r for r in rows
+                if (r.get("word") or "").lower()
+                not in _LITERARY_PROPN_BLACKLIST]
+        lit_dropped = before_lit - len(rows)
+        rows, surname_dropped = filter_surnames(rows)
+        if lit_dropped or surname_dropped:
+            note = (raw.get("proper_noun_filter") or "") if isinstance(raw, dict) else ""
+            extra = (f"; v2 literary blacklist dropped {lit_dropped}, "
+                      f"v2 surname blocklist dropped {surname_dropped}")
+            if isinstance(raw, dict):
+                raw["proper_noun_filter"] = (note + extra).lstrip("; ")
         # Propagate the filtered list back so the LLM renders only
         # the clean list, not the raw one. Mutate `raw` in place
         # (top_words / top, whichever was the source).

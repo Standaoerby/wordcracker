@@ -16,6 +16,22 @@
 >   topical intents, retrieval source log, per_retriever 30→50,
 >   book-scope override for author_vocab, chat-hints CSS auto-hide.
 >   501 unit tests.
+> - **v3.1** — Sprint 19: admin library (inventory + inline actions +
+>   audit + reindex), user-upload source disclosure (RENDER_PROMPT
+>   rule 12), KNOWN_BOOKS / aliases expansions, Q15 Lovecraft
+>   compare_authors hallucination fix, find_book_by_topic precision
+>   (rerank + RU→EN translate + threshold), copyright-via-uploads
+>   disclosure, smart clarify recipes (triangulation /
+>   distribution / country-period-emotion), quote-lookup mode for
+>   short attribution passages, meta-question intent (что за сервис /
+>   для кого / бесплатно), book_readability sampled-vs-total words.
+>   612 unit tests.
+> - **v3.1.1** — patch: polysemy `'all_corpus'` scope error →
+>   `{'author':'.*'}` widen, Beowulf + Paradise Lost + Milton
+>   aliases, country alias word-boundary (germanic ≠ DE), etymology-
+>   ratio smart clarify branch, surname blocklist on affinity outputs
+>   (curated literary characters + PG-metadata authors). Affinity
+>   formula audited and verified. 637 unit tests.
 
 ## TL;DR
 

@@ -15,6 +15,7 @@ if str(_REPO) not in sys.path:
 
 from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
+from scripts.v2.tools.authors._surname_filter import filter_surnames
 
 
 @tool(
@@ -63,6 +64,19 @@ def affinity_by_book(pg_id: str, top: int = 50,
             message=err, query=query,
         )
     rows = (raw.get("top_words") if isinstance(raw, dict) else None) or []
+    # Sprint 19+ — surname blocklist (see authors._surname_filter docstring).
+    # Same defence layer as affinity_by_author: PG-metadata surnames +
+    # curated literary characters. Stan 2026-05-19 «фамилии не должны
+    # участвовать в аффинити индексе».
+    if rows:
+        rows, surname_dropped = filter_surnames(rows)
+        if isinstance(raw, dict):
+            raw["top_words"] = rows
+            if surname_dropped:
+                prev = raw.get("_render_note", "")
+                note = (f"v2 surname filter dropped {surname_dropped} "
+                         f"character/author names from signature list.")
+                raw["_render_note"] = (prev + " " + note).strip()
     warnings: list[ToolWarning] = []
     if not rows:
         warnings.append(ToolWarning(

@@ -946,6 +946,13 @@ def _plan_word_pos(e: Entities) -> QueryPlan:
             explain="word_pos needs target word",
         )
     scope = _scope_from(e)
+    # word_pos_distribution rejects "all_corpus" string (line 1577 in
+    # rag_tools.py): "bad scope; use {'book':PGid} | {'author':regex}".
+    # When user asks generic «polysemy для set» with no scope, widen to
+    # global-author regex which v1 _select_books treats as "all English
+    # books"; max_occurrences=200 caps runtime to first 200 matches.
+    if scope == "all_corpus":
+        scope = {"author": ".*"}
     return QueryPlan(
         intent="word_pos", entities=e,
         steps=[PlanStep(tool="word_pos_distribution",
@@ -1693,6 +1700,49 @@ def _smart_clarify_recipe(e: Entities) -> str | None:
             "В Sprint 20 backlog — corpus_stats_aggregate({metric})."
         )
 
+    # Sprint 19+ — etymology-ratio across books. Stan 2026-05-19
+    # «germanic vs latinate ratio в Beowulf и Paradise Lost». Multi-book
+    # etymology comparison with no single tool. Each book gets its own
+    # find_words_by_etymology({book: PGid}, family=X) — then ratio is
+    # computed manually from candidate-count returns.
+    ratio_markers = ("ratio", "соотношение", "процент", "доля", " vs ",
+                      " vs.", "против ", "compare ", "сравни")
+    has_ratio = any(m in raw_lc for m in ratio_markers)
+    books_in_query: list[tuple[str, str]] = []
+    if e.book_id and e.book_title:
+        books_in_query.append((e.book_id, e.book_title))
+    for bid, btitle in zip(e.multi_book_ids or [], e.multi_book_titles or []):
+        books_in_query.append((bid, btitle))
+    if e.etymology_family and len(books_in_query) >= 2 and has_ratio:
+        fam = e.etymology_family
+        # Pick the contrast family. germanic↔romance/latin, latin↔germanic,
+        # norse↔romance, etc. If user said "vs latinate" or "vs latin"
+        # explicitly, force that pair.
+        contrast = "romance"
+        if "latin" in raw_lc and fam in ("germanic", "norse"):
+            contrast = "latin"
+        elif fam in ("romance", "latin") and ("german" in raw_lc or "norse" in raw_lc):
+            contrast = "germanic"
+        steps = []
+        for bid, btitle in books_in_query[:3]:
+            steps.append(
+                f"• `find_words_by_etymology` scope=book:{bid} ({btitle}) "
+                f"family={fam} → high-affinity {fam} words\n"
+                f"• `find_words_by_etymology` scope=book:{bid} ({btitle}) "
+                f"family={contrast} → high-affinity {contrast} words"
+            )
+        bullets = "\n".join(steps)
+        return (
+            f"Etymology-ratio запрос ({fam} vs {contrast} across "
+            f"{len(books_in_query)} книг) — у меня нет single tool. "
+            f"Recipe per книгу:\n\n"
+            f"{bullets}\n\n"
+            f"Сравни len(matches) / candidate_pool по каждой книге — "
+            f"ratio будет приблизительный (affinity-based, не coverage). "
+            f"Для точной ratio: token-level POS tagger + per-token Wiktionary "
+            f"lookup на весь текст — в backlog Sprint 20."
+        )
+
     rich_fields = sum([
         bool(e.country),
         bool(e.year_from or e.year_to),
@@ -1700,6 +1750,7 @@ def _smart_clarify_recipe(e: Entities) -> str | None:
         bool(e.author_regex),
         bool(e.book_id or e.book_title),
         bool(e.word),
+        bool(e.etymology_family),
     ])
     if rich_fields < 2:
         return None
