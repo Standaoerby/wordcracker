@@ -566,6 +566,18 @@ _WORD_AFTER_VERB = re.compile(
     r"[\"'«“]?([a-zA-Zа-яё-]{3,30})[\"'»”]?",
     re.IGNORECASE,
 )
+# Sprint 17 (Round 7 Q8): «примеры ajar у Доyла» / «examples of ajar in
+# Dickens» — bare English token after «примеры»/«examples». Distinct
+# regex because we ONLY accept Latin-script captures here (Russian
+# fillers like «авторов» / «слова» would otherwise sneak through —
+# they're more likely false positives than real English-word targets).
+_BARE_WORD_AFTER_EXAMPLES = re.compile(
+    r"\b(?:[Пп]ример(?:ы|ов|ами)?"
+    r"(?:\s+использовани\w*|\s+употреблени\w*)?|"
+    r"[Ee]xamples?(?:\s+of)?)"
+    r"\s+(?:слова\s+|word\s+)?"
+    r"[\"'«“]?([a-z][a-z-]{2,29})[\"'»”]?",
+)
 # «имени Анна / имя Anna / по имени X» — Stan asks for usage examples of a
 # personal name in literature. We capture the bare proper noun after the
 # keyword and pass it through to word_contexts / hybrid_search; the search
@@ -609,6 +621,16 @@ def _find_word(text: str) -> str | None:
         w = m.group(1).lower()
         if (len(w) >= 3 and not w.istitle()
                 and w not in _WORD_STOPWORDS):
+            return w
+    # Sprint 17 — bare English word after «примеры/examples». Latin-only
+    # capture so Russian fillers («примеры авторов» / «примеры слов» —
+    # genitive plurals that don't start with «слов»+suffix word-trigger)
+    # don't sneak through.
+    m = _BARE_WORD_AFTER_EXAMPLES.search(text)
+    if m:
+        w = m.group(1).lower()
+        if (len(w) >= 3 and w not in _WORD_STOPWORDS
+                and "слов" not in w):
             return w
     # «имени X / имя X» — name probe. The original-case requirement in the
     # regex (capital first letter) sidesteps Russian/English fillers like

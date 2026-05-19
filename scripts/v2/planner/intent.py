@@ -728,21 +728,44 @@ RULES: list[tuple[Pattern[str], str, float]] = [
 ]
 
 
+# Sprint 17 — pre-sorted rule list for early-break.
+#
+# `classify()` semantics: pick the rule with (priority desc, confidence
+# desc). Since priority is per-intent (not per-rule), once we find ANY
+# match at priority P, every later rule with priority < P can be skipped:
+# it can't beat P regardless of its confidence. Within the same priority
+# bucket we still iterate every rule and keep the highest-confidence
+# match. Result: typical short queries that hit a high-priority rule
+# (e.g. introduction at 50, or out_of_scope at 200) skip 60-95% of the
+# remaining 80+ regex evaluations.
+#
+# Built ONCE at import time. RULES itself stays declarative (priority
+# tied to intent in PRIORITY dict, not in the rule tuple itself) so
+# future contributors don't have to keep two lists in sync.
+_SORTED_RULES: list[tuple] = sorted(
+    RULES,
+    key=lambda r: (-PRIORITY.get(r[1], 0), -r[2]),
+)
+
+
 def classify(text: str) -> IntentMatch:
     if not text or not text.strip():
         return IntentMatch("clarify", 0.0)
     s = text.strip().lower()
-    matches: list[IntentMatch] = []
-    for pat, intent, conf in RULES:
+    best: IntentMatch | None = None
+    best_pri: int | None = None
+    for pat, intent, conf in _SORTED_RULES:
+        rule_pri = PRIORITY.get(intent, 0)
+        # Early-break: we already have a match at higher priority — no
+        # rule below this bucket can win the (priority desc, conf desc)
+        # ordering.
+        if best_pri is not None and rule_pri < best_pri:
+            break
         if pat.search(s):
-            matches.append(IntentMatch(intent, conf, pat.pattern))
-    if not matches:
-        return IntentMatch("clarify", 0.0)
-    matches.sort(
-        key=lambda m: (PRIORITY.get(m.label, 0), m.confidence),
-        reverse=True,
-    )
-    return matches[0]
+            if best is None or conf > best.confidence:
+                best = IntentMatch(intent, conf, pat.pattern)
+                best_pri = rule_pri
+    return best or IntentMatch("clarify", 0.0)
 
 
 def all_intents() -> set[str]:

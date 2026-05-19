@@ -120,9 +120,13 @@ def _shrink(value, *, max_chars: int) -> object:
     return s[:max_chars] + "...(truncated)"
 
 
-# Sprint 11.1: skip critic entirely for intents that are inherently
-# table-data echoes — the LLM is just rendering rows from tool_results,
-# the critic adds noise without catching real hallucinations.
+# Sprint 11.1 + Sprint 17 extension: skip critic entirely for intents
+# that are inherently table-data echoes — the renderer just copies rows
+# from tool_results, the critic adds 3-5s of LLM latency without
+# catching real hallucinations. Sprint 16 Phase D's programmatic numeric
+# audit now catches the highest-value class of fabrications (made-up
+# counts) deterministically, so the LLM critic's role on tabular intents
+# is largely redundant.
 _INTENT_SKIP_CRITIC = {
     # learning_words returns ranked rows; renderer literally copies them
     "learning",
@@ -130,6 +134,21 @@ _INTENT_SKIP_CRITIC = {
     "top_authors_books",
     # learning vocab passport already heavy-cached + audited
     "vocab_passport",
+    # Sprint 17 extension — Phase E/F/G intents that are pure table echo:
+    # author_lookup    → author_metadata.sample_titles (list of strings)
+    # corpus_extremum  → top_authors_by(top=1) (1-row table)
+    # book_extremum    → top_books_by_downloads(top=1) or clarify
+    # topic_book_search → find_book_by_topic (dedupped book list)
+    # book_pub_year    → find_book.matches[0].pub_year (single value)
+    # book_lookup      → find_book.matches (title resolution table)
+    # Numeric audit (Phase D) catches the fabricated-count failure mode
+    # on these intents programmatically; LLM critic was just noise.
+    "author_lookup",
+    "corpus_extremum",
+    "book_extremum",
+    "topic_book_search",
+    "book_pub_year",
+    "book_lookup",
 }
 
 

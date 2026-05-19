@@ -674,13 +674,30 @@ def _plan_word_contexts(e: Entities) -> QueryPlan:
     if not e.word:
         return _need_word(e)
     if e.author_regex:
+        # Sprint 17 (Round 7 Q8): «примеры ajar у Остин/Диккенса/Дойла»
+        # used to dispatch only to Austen. multi_author_regex was already
+        # captured by the extractor but the plan ignored it. Now we emit a
+        # word_contexts step per author (cap 4 total) and let the renderer
+        # merge by author.
+        steps = [PlanStep(
+            tool="word_contexts",
+            args={"author_regex": e.author_regex,
+                  "word": e.word, "max_samples": 8},
+        )]
+        for extra in e.multi_author_regex[:3]:
+            steps.append(PlanStep(
+                tool="word_contexts",
+                args={"author_regex": extra,
+                      "word": e.word, "max_samples": 5},
+                optional=True,
+            ))
+        explain = f"word_contexts({e.author_regex}, {e.word})"
+        if e.multi_author_regex:
+            explain += f" + {len(e.multi_author_regex[:3])} more authors"
         return QueryPlan(
-            intent="word_contexts", entities=e,
-            steps=[PlanStep(tool="word_contexts",
-                            args={"author_regex": e.author_regex,
-                                  "word": e.word, "max_samples": 8})],
+            intent="word_contexts", entities=e, steps=steps,
             expected_cost="cheap",
-            explain=f"word_contexts({e.author_regex}, {e.word})",
+            explain=explain,
         )
     # No author scope → hybrid_search if FTS5 is available, else legacy
     # word_contexts_global. hybrid pulls 30 from each retriever, RRF-merges
