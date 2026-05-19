@@ -128,6 +128,57 @@ class ExecuteSpecBasic(unittest.TestCase):
         # s1 failed optional + s2 ran
         self.assertEqual(len(rr.results), 2)
 
+    def test_leaf_failure_continues_siblings(self):
+        """Sprint 20 — Stan 2026-05-19 prod regression: multi-word
+        fan-out (3 parallel word_freq_timeline) aborted on first
+        failure, killing siblings. None of s1/s2/s3 has dependents →
+        a failure in s1 should NOT prevent s2 + s3 from running."""
+        spec = ps.PlanSpec(steps=[
+            ps.PlanStepSpec(id="s1", tool="x", args={"word": "telephone"}),
+            ps.PlanStepSpec(id="s2", tool="x", args={"word": "automobile"}),
+            ps.PlanStepSpec(id="s3", tool="x", args={"word": "aeroplane"}),
+        ])
+        call_words: list[str] = []
+        def fake_dispatch(name, args):
+            call_words.append(args.get("word"))
+            # First call fails, others succeed
+            ok = args.get("word") != "telephone"
+            return _fake_tool_result(name, {"freq": 5}, ok=ok)
+        with mock.patch("scripts.v2.planner.router.dispatch_any",
+                          side_effect=fake_dispatch):
+            rr = router_mod.execute_spec(spec)
+        self.assertEqual(rr.kind, "results")
+        # All 3 dispatched (leaf failure did NOT abort)
+        self.assertEqual(len(rr.results), 3)
+        self.assertEqual(set(call_words),
+                          {"telephone", "automobile", "aeroplane"})
+        # First result is the failed one
+        self.assertFalse(rr.results[0].ok)
+        # Others succeeded
+        self.assertTrue(rr.results[1].ok)
+        self.assertTrue(rr.results[2].ok)
+
+    def test_failure_with_dependent_still_aborts(self):
+        """Regression: when a failed step DOES have a downstream
+        dependent, we still hard-abort (cascade) — only LEAF failures
+        get the soft treatment."""
+        spec = ps.PlanSpec(steps=[
+            ps.PlanStepSpec(id="s1", tool="resolver", args={"q": "X"}),
+            ps.PlanStepSpec(id="s2", tool="reader",
+                              args={"pg_id": "$s1.pg_id"}, needs=["s1"]),
+        ])
+        called: list[str] = []
+        def fake_dispatch(name, _args):
+            called.append(name)
+            return _fake_tool_result(name, {}, ok=(name != "resolver"))
+        with mock.patch("scripts.v2.planner.router.dispatch_any",
+                          side_effect=fake_dispatch):
+            rr = router_mod.execute_spec(spec)
+        # s1 failed and has dependent s2 → abort, s2 not dispatched
+        self.assertEqual(called, ["resolver"])
+        self.assertEqual(len(rr.results), 1)
+        self.assertFalse(rr.results[0].ok)
+
 
 class ExecuteSpecDAGOrdering(unittest.TestCase):
 

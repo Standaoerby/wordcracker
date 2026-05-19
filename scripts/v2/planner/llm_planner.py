@@ -254,15 +254,24 @@ def plan_query(text: str, *,
                 elapsed_s=time.perf_counter() - t_overall,
                 validation=report, raw_text=raw_text,
             )
-        # Validation failed — build a retry hint summarizing the errors.
+        # Validation failed — build a retry hint summarizing the errors
+        # AND including the offending tools' actual input_schema so the
+        # LLM can correct itself precisely.
         err_summary = "; ".join(
             f"{i.code} ({i.message})" for i in report.errors()[:5]
         )
+        schema_hints = _schema_hints_for_failed_tools(plan, report)
         log.warning("llm_planner attempt %d invalid: %s", attempt, err_summary)
         retry_hint = (
-            f"\n\n[retry] Your previous plan failed validation: "
-            f"{err_summary}. Fix and re-emit."
+            f"\n\n[retry] Your previous plan failed validation:\n"
+            f"  errors: {err_summary}\n"
         )
+        if schema_hints:
+            retry_hint += (
+                f"  schemas of failing tools:\n{schema_hints}\n"
+                f"Use ONLY args from input_schema.properties. "
+                f"Do NOT invent fields not listed there."
+            )
 
     # All retries failed → graceful clarify with original entities scaffold.
     elapsed = time.perf_counter() - t_overall
@@ -374,6 +383,41 @@ def _parse_json(text: str) -> Optional[dict]:
                 except json.JSONDecodeError:
                     return None
     return None
+
+
+def _schema_hints_for_failed_tools(plan, report) -> str:
+    """For each step that failed validation, dump its tool's
+    input_schema.properties so the retry prompt tells the LLM exactly
+    what's allowed. This was the missing piece on Stan 2026-05-19
+    prod — LLM emitted `basis=pub_year` for word_freq_timeline because
+    it never saw the schema constraint."""
+    try:
+        from scripts.v2.tool_registry import REGISTRY
+    except ImportError:
+        return ""
+    failed_step_ids = {i.step_id for i in report.errors() if i.step_id}
+    if not failed_step_ids:
+        return ""
+    tools_seen: set[str] = set()
+    lines: list[str] = []
+    for step in plan.steps:
+        if step.id not in failed_step_ids:
+            continue
+        if step.tool in tools_seen:
+            continue
+        tools_seen.add(step.tool)
+        spec = REGISTRY.get(step.tool)
+        if not spec:
+            continue
+        schema = getattr(spec, "input_schema", {}) or {}
+        props = schema.get("properties") or {}
+        required = schema.get("required") or []
+        prop_summary = ", ".join(
+            f"{k}{'*' if k in required else ''}: {(v or {}).get('type', 'any')}"
+            for k, v in props.items()
+        )
+        lines.append(f"    {step.tool}: {{ {prop_summary} }}  (* = required)")
+    return "\n".join(lines)
 
 
 __all__ = [

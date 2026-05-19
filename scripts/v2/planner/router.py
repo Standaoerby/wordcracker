@@ -159,6 +159,21 @@ def execute_spec(spec: PlanSpec) -> RouterResult:
     results_by_id: dict[str, Any] = {}
     results_ordered: list[ToolResult] = []
     events: list[StepEvent] = []
+    # Sprint 20 — Stan 2026-05-19 prod: multi-word timeline fan-out
+    # (3 parallel word_freq_timeline calls, no deps) aborted on the
+    # first failure, killing 2 successful candidates. Pre-compute which
+    # step ids have *dependents* — if a step's data isn't needed by
+    # anyone else, a failure there shouldn't abort the rest. Treat such
+    # leaf failures as «soft» — keep going, collect partial results,
+    # renderer reports what worked + what didn't.
+    dependents: dict[str, set[str]] = {s.id: set() for s in ordered}
+    by_id = {s.id: s for s in ordered}
+    for s in ordered:
+        deps: set[str] = set(s.needs)
+        _spec_mod._walk_refs(s.args, lambda step_id, _p: deps.add(step_id))
+        for d in deps:
+            if d in dependents:
+                dependents[d].add(s.id)
 
     for idx, step in enumerate(ordered):
         # Resolve any $sN.field refs in args against prior results.
@@ -178,11 +193,17 @@ def execute_spec(spec: PlanSpec) -> RouterResult:
         events.append(StepEvent(kind="step_done", step_idx=idx,
                                  tool=step.tool, result=result))
         if not result.ok and not step.optional:
-            return RouterResult(
-                kind="results",
-                plan=_spec_stub_query_plan(spec),
-                results=results_ordered, events=events,
-            )
+            # Hard-abort ONLY when failure would cascade: there are
+            # downstream steps that need this step's output. Otherwise
+            # this is a leaf in the DAG — keep going so siblings get a
+            # chance. Renderer will see partial results + tool errors.
+            if dependents.get(step.id):
+                return RouterResult(
+                    kind="results",
+                    plan=_spec_stub_query_plan(spec),
+                    results=results_ordered, events=events,
+                )
+            # leaf failure → continue
 
     return RouterResult(
         kind="results",
@@ -284,6 +305,15 @@ def execute_spec_stream(spec: PlanSpec) -> Iterator[dict]:
         for s in ordered
     ]}
 
+    # Sprint 20 — same soft-leaf failure semantics as execute_spec.
+    dependents: dict[str, set[str]] = {s.id: set() for s in ordered}
+    for s in ordered:
+        deps: set[str] = set(s.needs)
+        _spec_mod._walk_refs(s.args, lambda step_id, _p: deps.add(step_id))
+        for d in deps:
+            if d in dependents:
+                dependents[d].add(s.id)
+
     results_by_id: dict[str, Any] = {}
     for idx, step in enumerate(ordered):
         resolved_args = _spec_mod.resolve_refs(step.args, results_by_id)
@@ -300,7 +330,10 @@ def execute_spec_stream(spec: PlanSpec) -> Iterator[dict]:
                "summary": tr.to_llm_string(max_chars=240),
                "step_idx": idx, "step_id": step.id}
         if not tr.ok and not step.optional:
-            yield {"event": "done", "kind": "results_partial"}
-            return
+            if dependents.get(step.id):
+                # Cascade abort: downstream needs this output
+                yield {"event": "done", "kind": "results_partial"}
+                return
+            # Leaf failure → keep streaming the rest
 
     yield {"event": "done", "kind": "results"}

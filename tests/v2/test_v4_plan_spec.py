@@ -265,15 +265,30 @@ class ValidatorBasic(unittest.TestCase):
         codes = [i.code for i in rep.errors()]
         self.assertIn("too_many_steps", codes)
 
-    def test_unknown_arg_is_warning_not_error(self):
+    def test_unknown_arg_is_error_not_warning(self):
+        """Sprint 20 — Stan 2026-05-19 prod: LLM emitted basis=pub_year
+        for word_freq_timeline (not in schema). When this was a warning
+        the plan passed validation and dispatcher failed at v1 layer.
+        Now it's an error → retry triggers with the schema in the
+        retry hint."""
         plan = ps.PlanSpec(steps=[
             ps.PlanStepSpec(id="s1", tool="needs_pg",
                              args={"pg_id": "PG1", "bogus_extra": True}),
         ])
         rep = ps.validate(plan, registry=self.reg)
-        self.assertTrue(rep.ok)
-        warns = [i.code for i in rep.warnings()]
-        self.assertIn("unknown_arg", warns)
+        self.assertFalse(rep.ok)
+        codes = [i.code for i in rep.errors()]
+        self.assertIn("unknown_arg", codes)
+
+    def test_internal_underscore_args_exempt(self):
+        """`_capped_from` and other underscore-prefixed args are
+        v2-wrapper smuggle conventions — they bypass the schema check."""
+        plan = ps.PlanSpec(steps=[
+            ps.PlanStepSpec(id="s1", tool="needs_pg",
+                             args={"pg_id": "PG1", "_capped_from": 100}),
+        ])
+        rep = ps.validate(plan, registry=self.reg)
+        self.assertTrue(rep.ok, msg=str(rep.issues))
 
 
 class TopologicalOrdering(unittest.TestCase):

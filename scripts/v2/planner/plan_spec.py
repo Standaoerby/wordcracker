@@ -316,15 +316,27 @@ def validate(plan: PlanSpec, *,
                     f"step {s.id}: tool {s.tool!r} requires arg {req!r}",
                     step_id=s.id,
                 ))
-        # Any extra keys that aren't in the schema get a warning
-        for key in s.args:
-            if properties and key not in properties and not key.startswith("_"):
-                issues.append(ValidationIssue(
-                    "warning", "unknown_arg",
-                    f"step {s.id}: tool {s.tool!r} got arg {key!r} "
-                    f"not in input_schema.properties",
-                    step_id=s.id,
-                ))
+        # Sprint 20 — unknown args are ERRORS, not warnings. Stan
+        # 2026-05-19 prod: LLM emitted `basis=pub_year` for
+        # word_freq_timeline (not in schema), validator passed it as
+        # warning, dispatcher then failed with TypeError at v1 layer,
+        # router aborted entire multi-word fan-out. Hard-fail at
+        # validation forces retry with the schema in the retry hint.
+        # Schema keys starting with "_" (internal smuggle args like
+        # `_capped_from`) are exempt — they're a v2-wrapper convention.
+        if properties:
+            allowed_keys = set(properties)
+            for key in s.args:
+                if key.startswith("_"):
+                    continue
+                if key not in allowed_keys:
+                    issues.append(ValidationIssue(
+                        "error", "unknown_arg",
+                        f"step {s.id}: tool {s.tool!r} got arg {key!r} "
+                        f"not in input_schema.properties "
+                        f"(allowed: {sorted(allowed_keys)})",
+                        step_id=s.id,
+                    ))
 
         # needs references valid earlier steps
         for n in s.needs:
