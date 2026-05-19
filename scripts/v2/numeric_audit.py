@@ -263,12 +263,22 @@ def audit_numbers(
         return AuditReport.trust("(no tool records)")
 
     data_numbers = collect_data_numbers(records)
-    if not data_numbers:
+
+    # Sprint 20 — count-honesty pass. Affinity tools and learning_words
+    # now surface `top_requested` + `top_returned` when filtering shrinks
+    # the list. If the renderer writes the REQUESTED count near words
+    # like «слов»/«списка»/«top»/«words», that's a known Stan-class
+    # hallucination — explicitly flag it even if the requested number
+    # happens to appear in tool data elsewhere (e.g. min_corpus_count=50).
+    count_report = _audit_count_claims(answer, records)
+
+    if not data_numbers and not count_report.mismatches:
         return AuditReport.trust("(no numbers in tool data)")
 
     extracted = _extract_numbers(answer)
-    report = AuditReport(numbers_checked=len(extracted))
-    seen_values: set[float] = set()
+    report = AuditReport(numbers_checked=len(extracted),
+                         mismatches=list(count_report.mismatches))
+    seen_values: set[float] = {m.value for m in report.mismatches}
     for value, formatted, context in extracted:
         if value < min_value:
             continue
@@ -277,6 +287,8 @@ def audit_numbers(
         seen_values.add(value)
         if _is_year_like(value, context):
             continue
+        if not data_numbers:
+            continue  # nothing to compare against (count-honesty already ran)
         matched, nearest, pct = _is_matched(value, data_numbers, tol=tol)
         if matched:
             continue
@@ -291,6 +303,70 @@ def audit_numbers(
         if len(report.mismatches) >= 3:
             break
     return report
+
+
+# Patterns that suggest a count claim in the answer body. We pair them
+# with `top_requested` / `top_returned` from tool data to spot misleads.
+_COUNT_CLAIM_RE = re.compile(
+    r"(?:список\s+из\s+|вот\s+|представлен[ао]?\s+(?:тебе\s+)?список\s+из\s+|"
+    r"показываю\s+|показано\s+|"
+    r"top[\s-]?|топ[\s-]?)"
+    r"(\d{1,4})"
+    r"\s*"
+    r"(?:слов\w*|words?|элемент\w*|записе?й?|items?|"
+    r"любим\w+\s+слов\w*|"
+    r"фирменн\w+\s+слов\w*|"
+    r"характерн\w+\s+слов\w*|"
+    r"аффинн\w+\s+слов\w*)",
+    re.IGNORECASE,
+)
+
+
+def _audit_count_claims(answer: str, records: Iterable[dict]) -> AuditReport:
+    """Spot «список из 50 слов» when tool data says top_returned=19.
+
+    Looks at each record for `top_requested` ≠ `top_returned`. If the
+    answer mentions the requested number near a count word, flag it.
+
+    Returns AuditReport (possibly empty). Caller merges into the
+    main report.
+    """
+    rep = AuditReport()
+    deltas: list[tuple[float, float]] = []  # (requested, returned)
+    for r in records:
+        data = (r.get("data") if isinstance(r, dict) else None) or {}
+        if not isinstance(data, dict):
+            continue
+        req = data.get("top_requested")
+        ret = data.get("top_returned")
+        if isinstance(req, (int, float)) and isinstance(ret, (int, float)):
+            if int(req) != int(ret):
+                deltas.append((float(req), float(ret)))
+    if not deltas:
+        return rep
+
+    for m in _COUNT_CLAIM_RE.finditer(answer):
+        try:
+            claimed = float(m.group(1))
+        except ValueError:
+            continue
+        for req, ret in deltas:
+            if claimed == req and claimed != ret:
+                # Build context window around the claim
+                start = max(0, m.start() - 35)
+                end = min(len(answer), m.end() + 25)
+                ctx = answer[start:end]
+                rep.mismatches.append(NumericMismatch(
+                    value=claimed,
+                    formatted=m.group(0),
+                    context=ctx.strip(),
+                    nearest_in_data=ret,
+                    nearest_distance_pct=abs(claimed - ret) / claimed * 100,
+                ))
+                break
+        if len(rep.mismatches) >= 3:
+            break
+    return rep
 
 
 def annotate_with_audit(answer: str, report: AuditReport) -> str:

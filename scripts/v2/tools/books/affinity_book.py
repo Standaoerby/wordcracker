@@ -77,10 +77,33 @@ def affinity_by_book(pg_id: str, top: int = 50,
                 note = (f"v2 surname filter dropped {surname_dropped} "
                          f"character/author names from signature list.")
                 raw["_render_note"] = (prev + " " + note).strip()
+    # Sprint 20 — count-honesty signal (mirrors affinity_by_author).
+    # When filtering knocks the list below `top`, surface the delta
+    # so the renderer doesn't claim the requested count.
+    actual = len(rows) if rows else 0
+    if isinstance(raw, dict):
+        raw["top_requested"] = top
+        raw["top_returned"] = actual
+        if actual < top:
+            existing = raw.get("_render_note") or ""
+            count_note = (
+                f"ACTUAL COUNT: tool returned {actual} words after "
+                f"PROPN / surname / corpus filtering — NOT the {top} "
+                f"requested. Use {actual} in the answer."
+            )
+            raw["_render_note"] = (
+                (existing + " | " if existing else "") + count_note
+            )
     warnings: list[ToolWarning] = []
     if not rows:
         warnings.append(ToolWarning(
             code="empty_top", message="no signature words above min_corpus_count",
+        ))
+    elif actual < top:
+        warnings.append(ToolWarning(
+            code="under_filled",
+            message=(f"requested top={top}, returned {actual} after "
+                      f"filtering — renderer must say {actual}"),
         ))
     return ToolResult.success(
         tool="affinity_by_book", data=raw,

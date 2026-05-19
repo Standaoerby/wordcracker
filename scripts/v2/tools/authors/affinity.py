@@ -151,11 +151,43 @@ def affinity_by_author(author_regex: str, top: int = 50,
             elif "top" in raw:
                 raw["top"] = rows
 
+    # Sprint 20 — count-honesty signal. Stan 2026-05-19: renderer wrote
+    # «вот список из 50 слов» when affinity returned 19 after filtering.
+    # Critic caught it but the answer still misled the user. Surface
+    # the requested-vs-returned mismatch as a structured field + a
+    # mandatory _render_note so the LLM cannot quietly use the
+    # original `top` figure.
+    actual = len(rows) if rows else 0
+    if isinstance(raw, dict):
+        raw["top_requested"] = top
+        raw["top_returned"] = actual
+        if actual < top:
+            # Always say the actual number, never the requested one,
+            # when there's a delta — even by 1 word.
+            existing = raw.get("_render_note") or ""
+            count_note = (
+                f"ACTUAL COUNT: tool returned {actual} words after "
+                f"PROPN / surname / corpus-diff filtering — NOT the {top} "
+                f"requested. Use {actual} in the answer. If you need to "
+                f"mention the requested number, phrase it explicitly: "
+                f"«запросил {top}, после фильтра имён собственных и "
+                f"редких токенов осталось {actual}»."
+            )
+            raw["_render_note"] = (
+                (existing + " | " if existing else "") + count_note
+            )
+
     warnings: list[ToolWarning] = []
     if not rows:
         warnings.append(ToolWarning(
             code="empty_top",
             message="affinity returned no words — perhaps min_corpus_count too high",
+        ))
+    elif actual < top:
+        warnings.append(ToolWarning(
+            code="under_filled",
+            message=(f"requested top={top}, returned {actual} after "
+                      f"filtering — renderer must say {actual}"),
         ))
     return ToolResult.success(
         tool="affinity_by_author", data=raw,
