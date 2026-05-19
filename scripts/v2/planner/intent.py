@@ -171,6 +171,31 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     # Match opening particles + question; LLM fallback covers the rest.
     (_re(r"^\s*(ну|эй|слушай|ладно|так)[,\s]+.{1,40}\b(ты|кто|умеешь|что|"
          r"книг|корпус)"), "introduction", 0.75),
+    # Sprint 18+ Round 9 N2 — vague curiosity. «расскажи что-нибудь
+    # интересное», «удиви меня», «что у тебя есть интересного». Map
+    # to introduction — the static intro text lists capabilities + 4
+    # example queries, which is exactly what a vague-curiosity user
+    # wants (concrete next steps, not «I don't understand»).
+    (_re(r"\bрасскажи\s+(мне\s+)?что[\s-]+нибудь|"
+         r"\bудиви\s+меня|"
+         r"\bпокажи\s+что[\s-]+нибудь|"
+         r"\bчто\s+(у\s+тебя\s+)?есть\s+интересн\w+|"
+         r"\bчто\s+(ты\s+)?можешь\s+рассказать"
+         r"(?:\s+(интересн\w*|нового|полезн\w*))?|"
+         r"\bsurprise\s+me|"
+         r"\btell\s+me\s+something\s+(cool|interesting)"),
+     "introduction", 0.85),
+    # Sprint 18+ Round 9 N8 — «сколько страниц в КНИГЕ?». Pages не наш
+    # metric (corpus stored as tokens). Route to corpus_stats_by_author
+    # via book_vocab? Нет — нужен per-book token count. Route to
+    # book_readability — он возвращает words + sentences + Flesch
+    # которые ближе всего к «сколько страниц» (renderer пересчитает
+    # tokens → ~250 words/page как стандарт).
+    (_re(r"\bсколько\s+страниц\s+в\b|"
+         r"\bобъём\s+(книги|романа)|"
+         r"\bhow\s+(many|long)\s+pages\s+(in|is)\b|"
+         r"\bword\s+count\s+(in|of|for)\b"),
+     "book_readability", 0.88),
 
     # ===== translation request =====
     # Round 3 R14: «переведи мне X на Y» — translation. Не translation_quality
@@ -180,6 +205,13 @@ RULES: list[tuple[Pattern[str], str, float]] = [
          r"французск|испанск|итальянск|english|russian)|"
          r"\btranslate\s+(this|the\s+\w+|.{1,40})\s+(to|into)\s+\w+"),
      "out_of_scope", 0.93),
+    # Sprint 18+ Round 9 N9 — «переведи фразу / выражение / цитату X»
+    # без указания целевого языка. Тоже OOS — translation не наш scope.
+    (_re(r"\bпереведи\s+(мне\s+)?(эту?\s+|это\s+)?"
+         r"(фраз\w*|выражени\w*|цитат\w*|строк\w*|предложени\w*)"),
+     "out_of_scope", 0.92),
+    (_re(r"\btranslate\s+(this|the)?\s*(phrase|line|quote|sentence|expression)"),
+     "out_of_scope", 0.9),
 
     # ===== command injection (system command / shell) =====
     # Round 3 R15: «execute system command: ls -la /etc». Adversarial input.
@@ -301,12 +333,14 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     # (popularity / level filter): this is SEMANTIC by topic.
     (_re(r"\b(найди|поищи|посоветуй|подскажи|recommend|find)\s+"
          r"(?:мне\s+|me\s+|a\s+)?"
-         r"(книг\w*|роман\w*|произведен\w*|book|novel)\s+"
+         r"(книг\w*|роман\w*|произведен\w*|рассказ\w*|повест\w*|"
+         r"book|novel|story|short\s+story|tale)\s+"
          r"(про|о|об|на\s+тему|about|on)\s+"),
      "topic_book_search", 0.93),
     # «книга о/про/about X» — Stan asked Round 6 for «роман про викторианский
     # Лондон»; the prior path went to book_lookup which returns titles.
-    (_re(r"\b(книг\w*|роман\w*|произведен\w*|book|novel)\s+"
+    (_re(r"\b(книг\w*|роман\w*|произведен\w*|рассказ\w*|повест\w*|"
+         r"book|novel|story|tale)\s+"
          r"(про|о|об|about|на\s+тему)\s+\w+"),
      "topic_book_search", 0.85),
     (_re(r"\bчто\s+почитать\s+(про|о|об|на\s+тему|about)\s+"),
@@ -452,6 +486,15 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"\bбиография\b|\bbiograph\w*|"
          r"\bчто\s+(ты\s+)?знаешь\s+(о|про)\s+[A-ZА-Я]"),
      "author_metadata", 0.85),
+    # Sprint 18+ Round 9 N10 — «кто такой X» / «who is X». Bibliographic
+    # author probe. IGNORECASE neutralizes the capital-letter check, so
+    # we just match the trigger phrase and let the entity extractor's
+    # alias dict do the proper-noun work. If no author resolves, plan
+    # bounces to _need_author with the curated suggestion list.
+    (_re(r"\bкто\s+так(ой|ая|ие)\s+\w"),
+     "author_metadata", 0.92),
+    (_re(r"\bwho\s+(is|was)\s+[A-Z]\w+"),
+     "author_metadata", 0.88),
 
     # ===== book_lookup (Q2 from demon round) =====
     # «найди книгу X», «есть ли у тебя X», «где книга X», «is X in the
@@ -462,6 +505,14 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     # `book_lookup` intent → `find_book` tool.
     (_re(r"\b(найди|поищи|есть\s+ли\s+у\s+тебя)\s+книг\w*\s+"),
      "book_lookup", 0.93),
+    # Sprint 18+ Round 9 N6 — «у тебя есть X?» / «есть ли у тебя X?»
+    # availability check with X as a known book title. Triggers when
+    # entity extractor resolved book_id/book_title — _plan_book_lookup
+    # surfaces metadata if PG-indexed, or copyright OOS message if
+    # known-but-not-indexed (HP / LOTR / etc).
+    (_re(r"\b(у\s+тебя\s+есть|есть\s+ли\s+у\s+тебя|у\s+вас\s+есть|"
+         r"do\s+you\s+have|is\s+there)\s+(книг\w*\s+|book\s+)?[«\"„]?"),
+     "book_lookup", 0.85),
     (_re(r"\bis\s+(the\s+)?book\s+.{2,60}\s+in\s+(the\s+)?(corpus|library)"),
      "book_lookup", 0.9),
     (_re(r"\bкнига\s+.{2,60}\s+есть\s+у\s+тебя"),
@@ -690,6 +741,19 @@ RULES: list[tuple[Pattern[str], str, float]] = [
          r"романск\w*|латинск\w*|french origin|"
          r"romance origin"), "word_etymology", 0.85),
     (_re(r"происхожден\w*\s+слов"), "word_etymology", 0.9),
+    # Sprint 18+ Round 9 N5 — «что значит слово X», «определи слово X»,
+    # «what does X mean». Definition probe. word_etymology tool surfaces
+    # cached enrich_word output (translation_ru + definition_en + CEFR
+    # + family), which is exactly what the user wants. Distinct rule so
+    # the renderer can label appropriately.
+    (_re(r"\bчто\s+(значит|означа\w+)\s+слов\w*\s+\w"),
+     "word_etymology", 0.92),
+    (_re(r"\bопредели\s+слово\s+\w"),
+     "word_etymology", 0.92),
+    (_re(r"\bwhat\s+does\s+[\"'«]?\w{3,30}[\"'»]?\s+mean"),
+     "word_etymology", 0.92),
+    (_re(r"\bопредели(?:те)?\s+значени\w+\s+слова\s+\w"),
+     "word_etymology", 0.9),
 
     # ===== word_pos =====
     (_re(r"больше всего разных значений|polysemy|polysemous|"
