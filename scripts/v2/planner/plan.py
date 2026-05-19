@@ -725,15 +725,19 @@ def _plan_word_contexts(e: Entities) -> QueryPlan:
             explain=explain,
         )
     # No author scope → hybrid_search if FTS5 is available, else legacy
-    # word_contexts_global. hybrid pulls 30 from each retriever, RRF-merges
-    # to top 12, and surfaces both exact mentions ('ajar' literally) and
-    # semantically related passages ('half-open door', 'door slightly open').
+    # word_contexts_global. hybrid pulls per_retriever from each side,
+    # RRF-merges to top 12, optionally reranks with BGE cross-encoder
+    # before slicing the final k. Sprint 18: rerank ON by default for
+    # the no-author path — bi-encoder ranking surfaces lots of marginal
+    # mentions; cross-encoder eliminates them.
     return QueryPlan(
         intent="word_contexts", entities=e,
         steps=[PlanStep(tool="hybrid_search",
-                        args={"query": e.word, "k": 12, "per_retriever": 30})],
+                        args={"query": e.word, "k": 12,
+                              "per_retriever": 50,
+                              "rerank_with": "bge_reranker"})],
         expected_cost="medium",
-        explain=f"hybrid_search({e.word}) — FTS5 + ChromaDB RRF merge",
+        explain=f"hybrid_search({e.word}) — FTS5+Chroma RRF + BGE rerank",
     )
 
 
@@ -1173,14 +1177,18 @@ def _plan_book_similar(e: Entities) -> QueryPlan:
     topic = e.book_title or (e.raw_misc or {}).get("raw_text", "") or "books"
     steps = [PlanStep(
         tool="find_book_by_topic",
-        args={"topic": topic, "top": 8},
+        # Sprint 18 — BGE rerank default. For «похожие на X» queries the
+        # bi-encoder pool surfaces noisy neighbours (book mentions, not
+        # thematic relatives); cross-encoder reorder is the win.
+        args={"topic": topic, "top": 8, "rerank_with": "bge_reranker"},
     )]
     return QueryPlan(
         intent="book_similar", entities=e,
         steps=steps,
         expected_cost="medium",
-        explain=(f"book_similar → find_book_by_topic(topic={topic!r}) — "
-                 f"semantic neighbours of {e.book_title or e.book_id}"),
+        explain=(f"book_similar → find_book_by_topic(topic={topic!r}, "
+                 f"rerank=bge_reranker) — semantic neighbours of "
+                 f"{e.book_title or e.book_id}"),
     )
 
 
@@ -1279,9 +1287,15 @@ def _plan_topic_book_search(e: Entities) -> QueryPlan:
     return QueryPlan(
         intent="topic_book_search", entities=e,
         steps=[PlanStep(tool="find_book_by_topic",
-                        args={"topic": topic, "top": 8})],
+                        # Sprint 18 — BGE cross-encoder rerank by default
+                        # for topical book search. RRF gives the candidate
+                        # pool, cross-encoder reorders for true topical
+                        # relevance. ~1-2s extra latency, big quality lift.
+                        args={"topic": topic, "top": 8,
+                              "rerank_with": "bge_reranker"})],
         expected_cost="medium",
-        explain=f"topic_book_search → find_book_by_topic(topic={topic!r})",
+        explain=f"topic_book_search → find_book_by_topic(topic={topic!r}, "
+                "rerank=bge_reranker)",
     )
 
 

@@ -51,7 +51,7 @@ def _rank_map(items: list[dict[str, Any]], key: str = "pg_id") -> dict[str, int]
         "properties": {
             "query":         {"type": "string"},
             "k":             {"type": "integer", "description": "final top-k (default 12)"},
-            "per_retriever": {"type": "integer", "description": "k for each retriever before merge (default 30)"},
+            "per_retriever": {"type": "integer", "description": "k for each retriever before merge (default 50)"},
             "author_filter": {"type": "string", "description": "regex passed to semantic_search"},
             "rerank_with":   {"type": "string", "description": "plugin name from scoring.REGISTRY, e.g. 'bge_reranker' (slow but accurate)"},
         },
@@ -61,7 +61,7 @@ def _rank_map(items: list[dict[str, Any]], key: str = "pg_id") -> dict[str, int]
     cost="medium",
     cacheable=True,
 )
-def hybrid_search(query: str, k: int = 12, per_retriever: int = 30,
+def hybrid_search(query: str, k: int = 12, per_retriever: int = 50,
                   author_filter: str | None = None,
                   rerank_with: str | None = None) -> ToolResult:
     warnings: list[ToolWarning] = []

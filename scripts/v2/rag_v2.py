@@ -298,6 +298,58 @@ def _collect_render_instructions(results: list[ToolResult]) -> list[str]:
     return notes
 
 
+# Sprint 18 — retrieval source logging. Which tools surface ranked
+# chunks/books that go into the renderer prompt → log them so we can
+# diagnose «модель плохо ответила» vs «ей дали мусор» separately.
+_RETRIEVAL_TOOLS = frozenset({
+    "hybrid_search", "find_book_by_topic", "word_contexts",
+    "word_contexts_global", "semantic_search", "lexical_search",
+})
+
+
+def _extract_retrieval_log(results: list[ToolResult],
+                            limit: int = 12) -> list[dict] | None:
+    """Build a compact retrieval-source list for obs_mod.log_request.
+
+    Walks tool results, keeps only those from RAG-ish tools, captures
+    {tool, pg_id, score, snippet_preview, title?, author?} for each
+    match. Caps at `limit` rows total across all tools so logs stay
+    bounded. Returns None when there's nothing to log (no retrieval
+    tool ran)."""
+    rows: list[dict] = []
+    for r in results:
+        if r.tool not in _RETRIEVAL_TOOLS or not r.ok:
+            continue
+        data = r.data or {}
+        matches = data.get("matches") or data.get("samples") or []
+        if not isinstance(matches, list):
+            continue
+        for m in matches:
+            if not isinstance(m, dict):
+                continue
+            row = {"tool": r.tool}
+            for key in ("pg_id", "id", "title", "author"):
+                v = m.get(key)
+                if v is not None:
+                    row[key] = v
+            # Score: prefer rerank if present, else rrf, else generic
+            for key in ("rerank_score", "rrf_score", "score", "distance"):
+                v = m.get(key)
+                if isinstance(v, (int, float)):
+                    row["score"] = round(float(v), 4)
+                    row["score_kind"] = key
+                    break
+            snippet = m.get("snippet") or m.get("text") or m.get("body")
+            if isinstance(snippet, str) and snippet.strip():
+                row["snippet_preview"] = snippet.strip()[:120]
+            rows.append(row)
+            if len(rows) >= limit:
+                break
+        if len(rows) >= limit:
+            break
+    return rows or None
+
+
 def _llm_render(question: str, plan: plan_mod.QueryPlan,
                 results: list[ToolResult], *, model: str,
                 ollama_host: str,
@@ -564,6 +616,10 @@ def ask(
         "renderer_eval_tokens":   render_meta.get("eval_tokens"),
         "critic_prompt_tokens":   verdict.prompt_tokens,
         "critic_eval_tokens":     verdict.eval_tokens,
+        # Sprint 18 — retrieval source log. Which pg_ids/snippets
+        # actually fed the renderer? Splits «model gave bad answer»
+        # from «retrieval gave bad source». None when no RAG tool ran.
+        "retrieval_log": _extract_retrieval_log(rr.results),
         "answer_truncated": answer[:300],
     })
     return {
@@ -752,6 +808,8 @@ def ask_stream(
         "renderer_eval_tokens":   render_meta.get("eval_tokens"),
         "critic_prompt_tokens":   verdict.prompt_tokens,
         "critic_eval_tokens":     verdict.eval_tokens,
+        # Sprint 18 — retrieval source log
+        "retrieval_log": _extract_retrieval_log(results),
         "answer_truncated": answer[:300],
         "via_stream": True,
     })
