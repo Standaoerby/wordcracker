@@ -390,10 +390,10 @@ class Q15_CompareAuthorsAutoRetry(unittest.TestCase):
         call_log = []
         def fake_v1(author1_regex, author2_regex, top, min_corpus_count):
             call_log.append(min_corpus_count)
-            if min_corpus_count >= 1000:
+            if min_corpus_count >= 500:
                 return {"top_unique_a": [], "top_unique_b": [],
                         "cosine_similarity": 0.0, "books_a": 33, "books_b": 22}
-            # Retry threshold → actual data
+            # Retry threshold lower → actual data
             return {"top_unique_a": [{"word": "raven", "affinity": 12.3}],
                     "top_unique_b": [{"word": "eldritch", "affinity": 9.8}],
                     "cosine_similarity": 0.06,
@@ -402,13 +402,13 @@ class Q15_CompareAuthorsAutoRetry(unittest.TestCase):
         with mock.patch("scripts.rag_tools.compare_authors", new=fake_v1):
             r = affinity.compare_authors("^Poe,", "^Lovecraft, H",
                                           top=20, min_corpus_count=2000)
-        # Verify retry happened
-        self.assertEqual(len(call_log), 2, msg=f"expected 2 calls, got {call_log}")
+        # Verify multi-step retry happened: 2000 → 500 → 200 (returns data)
         self.assertEqual(call_log[0], 2000)
         self.assertEqual(call_log[1], 500)
-        # Data carries threshold trace
+        self.assertEqual(call_log[2], 200)  # step-down second retry
+        # Data carries final threshold trace
         self.assertEqual(r.data.get("min_corpus_count_requested"), 2000)
-        self.assertEqual(r.data.get("min_corpus_count_used"), 500)
+        self.assertEqual(r.data.get("min_corpus_count_used"), 200)
         self.assertTrue(r.data.get("_threshold_auto_lowered"))
         # And the retry-result words made it through
         self.assertEqual(len(r.data["top_unique_a"]), 1)
@@ -449,10 +449,11 @@ class Q15_CompareAuthorsAutoRetry(unittest.TestCase):
         # Single call — already low, don't try lower
         self.assertEqual(len(call_log), 1)
 
-    def test_both_still_empty_after_retry_strong_render_note(self):
-        """When retry ALSO returns empty, original data stands, plus
-        the empty-sides logic appends a hard NO-rationalize render note
-        forbidding interpretation through cosine_similarity."""
+    def test_both_still_empty_after_all_retries_strong_render_note(self):
+        """When ALL step-down retries (500/200/100/50) return empty, the
+        original data stands plus the empty-sides logic appends a hard
+        NO-rationalize render note forbidding interpretation through
+        cosine_similarity."""
         from scripts.v2.tools.authors import affinity
         def fake_v1(author1_regex, author2_regex, top, min_corpus_count):
             return {"top_unique_a": [], "top_unique_b": [],
@@ -504,15 +505,14 @@ class CacheKey_WrapperVersionInvalidation(unittest.TestCase):
         self.assertEqual(explicit, default)
 
     def test_bumped_tools_carry_new_version(self):
-        """Tools I changed in alpha3/alpha4 announce their new version
-        so prod naturally rebuilds cache on next call instead of
-        serving stale data. alpha4 bumped hybrid_search again to add
-        lang post-filter (Round 12 B4)."""
+        """Tools I changed across alphas announce versions so prod rebuilds
+        cache on deploy instead of serving stale data."""
         from scripts.v2.tool_registry import REGISTRY
-        # alpha4 bumped past v2-titles to v3-lang
+        # alpha4 bumps
         self.assertEqual(REGISTRY["hybrid_search"].wrapper_version, "v3-lang")
         self.assertEqual(REGISTRY["lexical_search"].wrapper_version, "v2-titles")
-        self.assertEqual(REGISTRY["compare_authors"].wrapper_version, "v2-autoretry")
+        # alpha4 second pass: step-down retry
+        self.assertEqual(REGISTRY["compare_authors"].wrapper_version, "v3-stepdown")
 
 
 if __name__ == "__main__":

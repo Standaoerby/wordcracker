@@ -355,6 +355,23 @@ genuinely wants more, return 10 + a clarify offering «next 10» in the \
 plan's rationale OR fewer steps + the rationale «capped at 10 of N for \
 chat timeout; user can ask for next batch».
 11. **Total plan steps cap at 12.** Validator rejects plans with >12 steps.
+12. **Language-aware retrieval — use `lang` param when user mentions a \
+language.** Stan Round 12 Q5: «имени Анна примеры в **английской** \
+классике» triggers v4 plan, but v4 forgot to set `lang="en"` on \
+hybrid_search → result was 8/10 Finnish/Hungarian/Italian. When the \
+user query mentions «английская/русская/french классика», «in \
+English», «на русском», «English literature» — set `lang="en"` / \
+"ru" / "fr" on hybrid_search / lexical_search / find_book_by_topic \
+steps. Recognized language tokens: en, ru, fr, de, it, es.
+13. **Per-author copyright — don't plan empty queries.** Authors under \
+copyright (Hemingway, Steinbeck, Faulkner, Salinger, Fitzgerald, \
+Orwell, Tolkien, C.S. Lewis, Huxley, Nabokov, Булгаков, Пастернак, \
+Солженицын) have no SPGC tokens. If the user asks for vocab_passport \
+/ author_profile / compare_authors / affinity_by_author for them, \
+DON'T plan the tool call (it returns empty + renderer hallucinates). \
+Return `{{"clarify": "Hemingway всё ещё под копирайтом — стилометрия \
+не считается. Доступны мета-информация или загруженные копии через \
+/admin/."}}` instead.
 
 The user's language might be Russian, English, or mixed. Match the \
 clarify language to the user's. JSON keys/values stay technical \

@@ -234,10 +234,10 @@ def affinity_by_author(author_regex: str, top: int = 50,
     requires=["author"],
     cost="medium",
     cacheable=True,
-    # Sprint 21+ Stan Q15: auto-retry at lower threshold added; output
-    # may now include `_threshold_auto_lowered`, `min_corpus_count_used`,
-    # `min_corpus_count_requested`. Bump to invalidate pre-retry cache.
-    wrapper_version="v2-autoretry",
+    # Sprint 22+ Stan Q15 follow-on: multi-step retry (500→200→100→50)
+    # for small-corpus authors. Output schema same as v2 but the values
+    # are now reliably non-empty. Bump to invalidate single-retry cache.
+    wrapper_version="v3-stepdown",
 )
 def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
                     min_corpus_count: int = 500) -> ToolResult:
@@ -265,24 +265,35 @@ def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
         both_empty = (not raw.get("top_unique_a")
                        and not raw.get("top_unique_b"))
         if both_empty:
-            retry_threshold = max(min_corpus_count // 4, 100)
-            log.info("compare_authors both-empty at min_corpus_count=%d → "
-                     "retry at %d (Q15 anti-empty)",
-                     min_corpus_count, retry_threshold)
-            try:
-                retry_raw = _v1(author1_regex=author1_regex,
-                                 author2_regex=author2_regex,
-                                 top=top, min_corpus_count=retry_threshold)
-            except Exception:
-                retry_raw = None
-            if isinstance(retry_raw, dict) and (retry_raw.get("top_unique_a")
-                                                  or retry_raw.get("top_unique_b")):
-                raw = retry_raw
-                raw["min_corpus_count_used"] = retry_threshold
-                raw["min_corpus_count_requested"] = min_corpus_count
-                raw["_threshold_auto_lowered"] = True
-                # Update query so the renderer sees both numbers
-                query["min_corpus_count_used"] = retry_threshold
+            # Sprint 22+ Round 12 Q15 follow-on: step-down through several
+            # thresholds. Stan prod 2026-05-20 second-attempt: single retry
+            # at //4 (500) for По/Лавкрафт also returned empty because rare
+            # markers («raven», «cthulhu», «eldritch») need <500 to surface
+            # in small-corpus (22-33 books) authors. Try descending steps
+            # until we get a non-empty result OR exhaust the floor.
+            for retry_threshold in (500, 200, 100, 50):
+                if retry_threshold >= min_corpus_count:
+                    continue
+                log.info("compare_authors both-empty → retry at "
+                         "min_corpus_count=%d (Q15 step-down)",
+                         retry_threshold)
+                try:
+                    retry_raw = _v1(author1_regex=author1_regex,
+                                     author2_regex=author2_regex,
+                                     top=top,
+                                     min_corpus_count=retry_threshold)
+                except Exception:
+                    retry_raw = None
+                    continue
+                if isinstance(retry_raw, dict) and (
+                        retry_raw.get("top_unique_a")
+                        or retry_raw.get("top_unique_b")):
+                    raw = retry_raw
+                    raw["min_corpus_count_used"] = retry_threshold
+                    raw["min_corpus_count_requested"] = min_corpus_count
+                    raw["_threshold_auto_lowered"] = True
+                    query["min_corpus_count_used"] = retry_threshold
+                    break  # got data, stop descending
 
     if isinstance(raw, dict) and raw.get("error"):
         err = str(raw["error"])
