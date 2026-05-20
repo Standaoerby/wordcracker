@@ -91,6 +91,13 @@ RENDER_PROMPT = """Тебя зовут {name}. Ты — литературный
     - НЕ повторяй полный enrich-payload как dump — только полезные поля.
     - Если какой-то facet отсутствует (например etymology=None) — мягко упомяни «этимология не извлеклась» один раз, не висни.
 
+18. **Tabular data — ОБЯЗАТЕЛЬНО markdown table.** Если в `data` есть массив с >2 объектами одинаковой shape (top/top_words/matches/samples/top_unique_a/affinity rows) — ОБЯЗАН вывести markdown pipe-table. Stan Round 13 Q13: запрос «сколько книг у Marlowe» в R12 показал 12 произведений таблицей, в R13 — «количество не указано напрямую» прозой. Это **потеря данных** из-за renderer non-determinism.
+    - Правило: array of similar dicts → table.
+    - Header — meaningful column names в языке user'а («Название», «Автор», «Год», «Affinity»). Pg_id в скобках при title.
+    - Не разворачивай таблицу в прозу. Не «пересказывай» что в таблице — таблица сама.
+    - Если array пустой (n=0) — НЕ строй пустую таблицу, скажи «список пустой».
+    - Если array из 1-2 объектов — можно текстом или mini-table; выбирай по читабельности.
+
 Tool trace тебе передан как JSON. Каждая запись — {{tool, query, data, warnings, coverage}}. Возьми оттуда factual content. **Ничего вне этих данных.**"""
 
 
@@ -435,6 +442,55 @@ def _extract_retrieval_log(results: list[ToolResult],
     return rows or None
 
 
+# Sprint 22+ alpha6 — table-heavy intents get lower renderer temp.
+# Round 13 Q13 (Marlowe books) and Q20 (P&P word counts) showed
+# renderer non-determinism on tabular data: same tool result, two
+# different renderings (one with table + counts, one with «не указано»
+# prose). Temp=0.1 makes the renderer more deterministic on these
+# intents. Prose-heavy intents (author_compare interpretation,
+# introduction, clarify text) keep 0.3 for natural variation.
+_LOW_TEMP_INTENTS: frozenset[str] = frozenset({
+    "top_authors_books",
+    "author_vocab",
+    "author_top_words",
+    "author_metadata",
+    "author_lookup",
+    "author_closest",
+    "author_influences",
+    "author_compare",
+    "book_vocab",
+    "book_lookup",
+    "book_compare",
+    "book_recommendation",
+    "book_similar",
+    "book_pub_year",
+    "book_archaic",
+    "book_emotion",
+    "book_readability",
+    "book_readability_compare",
+    "topic_book_search",
+    "word_collocates",
+    "word_etymology",
+    "word_timeline",
+    "word_pos",
+    "word_dialogue",
+    "word_movement",
+    "country_compare",
+    "country_vocab",
+    "period_vocab",
+    "composite_compare",
+    "genre_compare",
+    "topic_words",
+    "lexical_wealth",
+    "vocab_passport",
+    "learning",
+    "corpus_extremum",
+    "book_extremum",
+    "translate_word_list",
+    "export_word_list",
+})
+
+
 # Sprint 22+ alpha5 — render-time token budget (replaces alpha4 magic-
 # number truncation). See scripts/v2/token_budget.py for design.
 # Stan 2026-05-20 Christie case: 200-item tool result blew num_ctx →
@@ -542,6 +598,12 @@ def _llm_render(question: str, plan: plan_mod.QueryPlan,
                     + json.dumps(summary_payload, ensure_ascii=False, default=str)
                     + "\n```"},
     ]
+    # Sprint 22+ alpha6 — temperature по intent. R13 показал что
+    # на 4 из 20 запросов renderer давал мелкую variance на табличных
+    # данных (Q13 Marlowe пропустил таблицу; Q20 пропустил word count).
+    # Для table-heavy intents — temp 0.1 (детерминированнее, числа и
+    # колонки стабильнее). Для прозы — стандартный 0.3.
+    temp = 0.1 if (plan.intent in _LOW_TEMP_INTENTS) else 0.3
     payload = {
         "model": model,
         "messages": messages,
@@ -552,7 +614,7 @@ def _llm_render(question: str, plan: plan_mod.QueryPlan,
         # (typically 8192 for qwen3:14b). With WC_OLLAMA_NUM_CTX set
         # (env or default 16384 in MODEL_CTX_DEFAULTS), we get a
         # bigger window and matching budget.
-        "options": {"temperature": 0.3, "num_ctx": budget.ctx},
+        "options": {"temperature": temp, "num_ctx": budget.ctx},
         "think": False,
     }
     resp = requests.post(f"{ollama_host}/api/chat", json=payload, timeout=120)

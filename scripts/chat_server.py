@@ -951,8 +951,46 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             return
         engine = _pick_engine(self.path, self.headers, payload)
+        # Sprint 22+ alpha6 (Round 13 B1) — SSE keep-alive heartbeat.
+        # Long tool calls (~60-120s for heavy queries) used to silently
+        # drop the connection because no event fired during the wait,
+        # and nginx/CF closed the idle stream. Wrap the generator in
+        # a queue+thread: main loop pulls with 20s timeout and writes
+        # SSE comment `:keepalive\n\n` on timeout. Comments don't
+        # trigger client `onmessage` so the UI stays clean.
+        import queue, threading
+        ev_q: queue.Queue = queue.Queue()
+        SENTINEL = object()
+
+        def _producer():
+            try:
+                for ev in ask_stream(question, history=history, engine=engine):
+                    ev_q.put(ev)
+            except Exception as e:
+                ev_q.put({"_producer_error": e})
+            finally:
+                ev_q.put(SENTINEL)
+
+        threading.Thread(target=_producer, daemon=True).start()
+
         try:
-            for ev in ask_stream(question, history=history, engine=engine):
+            while True:
+                try:
+                    ev = ev_q.get(timeout=20)
+                except queue.Empty:
+                    # Keep connection alive while a tool runs > 20s.
+                    try:
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError):
+                        return
+                    except Exception:
+                        return
+                    continue
+                if ev is SENTINEL:
+                    break
+                if isinstance(ev, dict) and "_producer_error" in ev:
+                    raise ev["_producer_error"]
                 line = "data: " + json.dumps(ev, ensure_ascii=False, default=str) + "\n\n"
                 try:
                     self.wfile.write(line.encode("utf-8"))
