@@ -468,6 +468,7 @@ def _admin_nav_html() -> str:
     return ('<div class=meta style="margin-top:-12px; margin-bottom:14px;">'
             '<a href="/library/page" style="color:#7ed321;">→ library</a> '
             '· <a href="/failed" style="color:#7ed321;">→ failed queries</a>'
+            '· <a href="/feedback" style="color:#e08080;">🚩 flagged answers</a>'
             '</div>')
 
 
@@ -698,6 +699,7 @@ _FAILED_PAGE = r"""<!doctype html>
 
 <div class=nav>
   <a href="/">← upload</a>
+  <a href="/feedback" style="color:#e08080;">🚩 flagged answers</a>
   <a href="/api/failed">JSON</a>
 </div>
 
@@ -906,6 +908,7 @@ tr:hover td { background: #1d2128; }
 <h1>wordcracker · library</h1>
 <div class=meta>
   <a href="/">← upload</a> · <a href="/failed">failed queries</a>
+  · <a href="/feedback" style="color:#e08080;">🚩 flagged answers</a>
   · <button class=btn onclick="triggerReindex()" style="margin-left:12px">↻ reindex Chroma</button>
   <span id=reindex-status style="margin-left:8px; color:#888"></span>
 </div>
@@ -1044,6 +1047,234 @@ def _render_failed_page() -> str:
     return _FAILED_PAGE
 
 
+# Sprint 22+ — flagged-bad-answers admin page. Mirrors the /failed
+# page pattern: JSON endpoint at /api/feedback, HTML at /feedback.
+# Records loaded asynchronously from JSONL so the page stays responsive
+# even with thousands of entries.
+_FEEDBACK_PAGE = r"""<!doctype html>
+<html lang=ru>
+<head>
+<meta charset=utf-8>
+<title>wordcracker · flagged bad answers</title>
+<style>
+  body { font-family: ui-sans-serif, system-ui, sans-serif; background:#1c1f24; color:#eaeaea;
+         max-width:1280px; margin:32px auto; padding:0 20px; }
+  h1 { margin:0 0 6px 0; }
+  .meta { color:#888; font-size:13px; margin-bottom:24px; }
+  .nav { margin-bottom:16px; }
+  .nav a { color:#7ed321; margin-right:14px; }
+  .filter { background:#262a31; padding:10px 14px; border-radius:6px; margin-bottom:16px;
+            display:flex; gap:14px; align-items:center; }
+  .filter label { color:#aaa; font-size:13px; }
+  .filter input, .filter select { background:#1a1d22; color:#eaeaea; border:1px solid #2f343c;
+                                    padding:4px 8px; border-radius:4px; }
+  table { border-collapse:collapse; width:100%; background:#262a31;
+          border-radius:6px; overflow:hidden; }
+  thead { background:#1a1d22; }
+  th { text-align:left; padding:10px 14px; font-size:12px; color:#888;
+       text-transform:uppercase; letter-spacing:0.5px; font-weight:normal;
+       border-bottom:1px solid #2f343c; }
+  td { padding:10px 14px; border-bottom:1px solid #1f2227; vertical-align:top;
+       font-size:13px; }
+  td.ts { color:#666; font-family:ui-monospace,monospace; font-size:11px;
+          white-space:nowrap; }
+  td.q { color:#a0c4ff; max-width:280px; }
+  td.intent { color:#888; font-family:ui-monospace,monospace; font-size:12px;
+              white-space:nowrap; }
+  td.ans { color:#bbb; max-width:380px; font-size:12px; }
+  td.note { color:#e08080; max-width:240px; font-size:12px; font-style:italic; }
+  td.risk { white-space:nowrap; }
+  td.risk .high   { background:#3a2020; color:#e08080; padding:2px 7px;
+                    border-radius:9px; font-size:11px; }
+  td.risk .medium { background:#3a3320; color:#e0a04e; padding:2px 7px;
+                    border-radius:9px; font-size:11px; }
+  td.risk .low    { background:#1e3a2e; color:#7ed321; padding:2px 7px;
+                    border-radius:9px; font-size:11px; }
+  td.expand { color:#666; font-family:ui-monospace,monospace; font-size:11px;
+              cursor:pointer; }
+  td.expand:hover { color:#7ed321; }
+  .empty { color:#666; text-align:center; padding:40px 0; }
+  details summary { cursor:pointer; color:#666; font-size:12px; }
+  details summary:hover { color:#7ed321; }
+  details pre { background:#0f1115; padding:8px; border-radius:4px;
+                font-size:11px; max-height:300px; overflow:auto;
+                white-space:pre-wrap; word-break:break-word; }
+  .id-col { color:#555; font-family:ui-monospace,monospace; font-size:10px; }
+  .total-card { background:#262a31; border-radius:6px; padding:12px 18px;
+                margin-bottom:16px; display:flex; gap:24px; }
+  .total-card .stat { display:flex; flex-direction:column; }
+  .total-card .stat .v { color:#7ed321; font-size:22px; font-weight:bold;
+                          font-variant-numeric:tabular-nums; }
+  .total-card .stat .k { color:#888; font-size:11px; text-transform:uppercase; }
+</style>
+</head>
+<body>
+<h1>wordcracker · flagged bad answers</h1>
+<div class=meta>Ответы, на которые пользователь нажал
+🚩 «неправильный». Append-only JSONL в
+<code>/workspace/spgc/derived/v2_feedback/bad-YYYY-MM-DD.jsonl</code>.
+Новее — выше.</div>
+
+<div class=nav>
+  <a href="/">← upload</a>
+  <a href="/failed">→ failed queries</a>
+  <a href="/library/page">→ library</a>
+  <a href="/api/feedback">JSON</a>
+</div>
+
+<div class=total-card>
+  <div class=stat><span class=v id=stat-total>—</span><span class=k>flagged</span></div>
+  <div class=stat><span class=v id=stat-risk-high>—</span><span class=k>high risk</span></div>
+  <div class=stat><span class=v id=stat-risk-medium>—</span><span class=k>medium risk</span></div>
+  <div class=stat><span class=v id=stat-with-note>—</span><span class=k>with user note</span></div>
+</div>
+
+<div class=filter>
+  <label>intent:</label>
+  <select id=intent-filter>
+    <option value="">all</option>
+  </select>
+  <label>risk:</label>
+  <select id=risk-filter>
+    <option value="">all</option>
+    <option value=high>high</option>
+    <option value=medium>medium</option>
+    <option value=low>low</option>
+  </select>
+  <label>has note:</label>
+  <select id=note-filter>
+    <option value="">all</option>
+    <option value=yes>yes</option>
+    <option value=no>no</option>
+  </select>
+  <span style="flex:1"></span>
+  <span class=meta id=count>загрузка…</span>
+</div>
+
+<table id=tbl>
+  <thead>
+    <tr>
+      <th>time</th>
+      <th>intent</th>
+      <th>query</th>
+      <th>answer (truncated)</th>
+      <th>user note</th>
+      <th>risk</th>
+      <th>details</th>
+    </tr>
+  </thead>
+  <tbody id=body><tr><td colspan=7 class=empty>загрузка…</td></tr></tbody>
+</table>
+
+<script>
+let RAW = [];
+
+function fmtTs(iso) {
+  if (!iso) return '';
+  // Display as YYYY-MM-DD HH:MM:SS (UTC, but trim TZ for compactness)
+  return iso.replace('T', ' ').split('.')[0];
+}
+
+function escapeHTML(s) {
+  if (s == null) return '';
+  return String(s).replace(/[&<>"']/g, c => (
+    {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function renderRow(r) {
+  const risk = (r.render_meta && r.render_meta.confabulation_risk) || '—';
+  const riskCell = risk === '—'
+    ? '<span style="color:#555">—</span>'
+    : `<span class="${risk}">${risk}</span>`;
+  const intent = r.intent || '—';
+  const note = r.user_note || '';
+  const ans = (r.answer || '').slice(0, 200);
+  const detailsJSON = JSON.stringify(r, null, 2);
+  return `<tr>
+    <td class=ts>${escapeHTML(fmtTs(r.ts))}<br><span class=id-col>${escapeHTML(r.id||'')}</span></td>
+    <td class=intent>${escapeHTML(intent)}</td>
+    <td class=q>${escapeHTML(r.question||'')}</td>
+    <td class=ans>${escapeHTML(ans)}${(r.answer||'').length>200?'…':''}</td>
+    <td class=note>${escapeHTML(note)}</td>
+    <td class=risk>${riskCell}</td>
+    <td><details><summary>raw</summary><pre>${escapeHTML(detailsJSON)}</pre></details></td>
+  </tr>`;
+}
+
+function applyFilters() {
+  const intentF = document.getElementById('intent-filter').value;
+  const riskF   = document.getElementById('risk-filter').value;
+  const noteF   = document.getElementById('note-filter').value;
+  let filtered = RAW.filter(r => {
+    if (intentF && r.intent !== intentF) return false;
+    const risk = r.render_meta && r.render_meta.confabulation_risk;
+    if (riskF && risk !== riskF) return false;
+    if (noteF === 'yes' && !r.user_note) return false;
+    if (noteF === 'no' && r.user_note) return false;
+    return true;
+  });
+  document.getElementById('count').textContent =
+    filtered.length + ' / ' + RAW.length + ' shown';
+  const tbody = document.getElementById('body');
+  if (!filtered.length) {
+    tbody.innerHTML = '<tr><td colspan=7 class=empty>пока ничего</td></tr>';
+    return;
+  }
+  tbody.innerHTML = filtered.map(renderRow).join('');
+}
+
+function updateStats() {
+  document.getElementById('stat-total').textContent = RAW.length;
+  document.getElementById('stat-risk-high').textContent =
+    RAW.filter(r => r.render_meta && r.render_meta.confabulation_risk === 'high').length;
+  document.getElementById('stat-risk-medium').textContent =
+    RAW.filter(r => r.render_meta && r.render_meta.confabulation_risk === 'medium').length;
+  document.getElementById('stat-with-note').textContent =
+    RAW.filter(r => r.user_note).length;
+}
+
+function populateIntentFilter() {
+  const select = document.getElementById('intent-filter');
+  const intents = new Set(RAW.map(r => r.intent).filter(Boolean));
+  // Keep first 'all' option, clear rest
+  while (select.options.length > 1) select.remove(1);
+  Array.from(intents).sort().forEach(i => {
+    const opt = document.createElement('option');
+    opt.value = i; opt.textContent = i;
+    select.appendChild(opt);
+  });
+}
+
+async function load() {
+  try {
+    const r = await fetch('/api/feedback?limit=1000&days=30');
+    const data = await r.json();
+    RAW = data.records || [];
+    updateStats();
+    populateIntentFilter();
+    applyFilters();
+  } catch (e) {
+    document.getElementById('body').innerHTML =
+      `<tr><td colspan=7 class=empty>ошибка загрузки: ${escapeHTML(e.message)}</td></tr>`;
+  }
+}
+
+document.getElementById('intent-filter').addEventListener('change', applyFilters);
+document.getElementById('risk-filter').addEventListener('change', applyFilters);
+document.getElementById('note-filter').addEventListener('change', applyFilters);
+load();
+// Refresh once a minute — admin keeps the tab open while triaging
+setInterval(load, 60000);
+</script>
+</body>
+</html>
+"""
+
+
+def _render_feedback_page() -> str:
+    return _FEEDBACK_PAGE
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a, **k): return
 
@@ -1111,6 +1342,40 @@ class Handler(BaseHTTPRequestHandler):
                 })
         if self.path == "/failed":
             return self._html(_render_failed_page())
+        # Sprint 22+ — user-flagged bad answers («🚩 неправильный»
+        # button). Same shape as /failed: JSON for tooling, HTML page
+        # for eyeballs. Records live in append-only JSONL at
+        # /workspace/spgc/derived/v2_feedback/bad-YYYY-MM-DD.jsonl.
+        if (self.path == "/api/feedback"
+                or self.path.startswith("/api/feedback?")):
+            try:
+                from scripts.v2.feedback import list_recent
+            except ImportError as e:
+                return self._json(503, {
+                    "error": "feedback module unavailable",
+                    "detail": str(e),
+                })
+            limit, days = 200, 14
+            if "?" in self.path:
+                from urllib.parse import parse_qs
+                params = parse_qs(self.path.split("?", 1)[1])
+                try:
+                    limit = max(1, min(int(params.get("limit", ["200"])[0]),
+                                         1000))
+                except (ValueError, IndexError):
+                    pass
+                try:
+                    days = max(1, min(int(params.get("days", ["14"])[0]), 90))
+                except (ValueError, IndexError):
+                    pass
+            try:
+                records = list_recent(days_back=days, limit=limit)
+                return self._json(200, {"count": len(records),
+                                          "records": records})
+            except Exception as e:
+                return self._json(500, {"error": str(e)})
+        if self.path == "/feedback":
+            return self._html(_render_feedback_page())
         # Sprint 19 — admin library endpoints (list / inspect / download)
         if self.path in ("/library", "/api/library"):
             try:
