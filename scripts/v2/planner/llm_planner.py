@@ -293,6 +293,24 @@ def plan_query(text: str, *,
                 f"Use ONLY args from input_schema.properties. "
                 f"Do NOT invent fields not listed there."
             )
+        # Sprint 20+ — Stan prod showed qwen3:14b corrupting arg names
+        # with non-ASCII characters mid-token (target_lang → target身).
+        # Explicit ASCII reminder when the error mentions non-ASCII chars.
+        if any(ord(ch) > 127 for ch in err_summary):
+            retry_hint += (
+                "\n  ⚠ The previous output contained NON-ASCII characters "
+                "inside argument names. JSON keys and argument names MUST "
+                "be exact ASCII as listed in the schema. Copy the names "
+                "character-for-character — do not translate them."
+            )
+        # If validator rejected too_many_steps, also remind about the
+        # 10-step fan-out cap.
+        if any("too_many_steps" in i.code for i in report.errors()):
+            retry_hint += (
+                "\n  ⚠ Cap parallel fan-out at 10 steps. If user asked "
+                "for «all»/«100», emit 10 + mention cap in rationale; "
+                "do not try to cover all in one plan."
+            )
 
     # All retries failed → graceful clarify with original entities scaffold.
     elapsed = time.perf_counter() - t_overall

@@ -340,9 +340,25 @@ Multi-book → fan-out via independent steps with the same template.
 information, or tools insufficient), return `{{"clarify": "<specific question \
 in user's language>"}}` instead.
 8. Set `render_hint` so the renderer knows how to format the result.
+9. **ASCII-ONLY for JSON keys, tool names, and argument names.** Schema \
+keys like `target_lang`, `bucket_years`, `author_regex` MUST be copied \
+character-for-character. Never substitute non-ASCII (Chinese / Cyrillic / \
+emoji) inside argument names — `target_lang` is one valid token, `target身` \
+or `target_язык` will fail validation. String VALUES (the user-facing \
+clarify text) can use any language; only KEYS and SCHEMA NAMES are \
+ASCII-strict.
+10. **Cap parallel fan-out at 10 steps.** Even if the user asks for «все \
+слова» / «all words» / «top 100», emit AT MOST 10 enrich_word / \
+find_words_by_etymology / word_freq_timeline steps in a single plan. \
+Chat timeout is 90 s; per-step LLM/Wiktionary calls add up. If the user \
+genuinely wants more, return 10 + a clarify offering «next 10» in the \
+plan's rationale OR fewer steps + the rationale «capped at 10 of N for \
+chat timeout; user can ask for next batch».
+11. **Total plan steps cap at 12.** Validator rejects plans with >12 steps.
 
 The user's language might be Russian, English, or mixed. Match the \
-clarify language to the user's. JSON keys/values stay technical.
+clarify language to the user's. JSON keys/values stay technical \
+(ASCII per rule 9).
 
 # AVAILABLE TOOLS
 {catalog}
