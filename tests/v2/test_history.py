@@ -151,8 +151,12 @@ class CopyrightRefusal(unittest.TestCase):
         plan = _copyright_refusal_if_book_under_copyright(e)
         self.assertIsNotNone(plan)
         self.assertEqual(plan.intent, "out_of_scope")
-        self.assertIn("полнотекстовый анализ невозможен", plan.out_of_scope_reason)
+        # Sprint 21 B102 — refusal now mentions BOTH options: metadata
+        # OR local upload (fair use). Check the key phrases.
+        self.assertIn("copyright", plan.out_of_scope_reason)
         self.assertIn("public-domain", plan.out_of_scope_reason)
+        self.assertIn("Мета-информация", plan.out_of_scope_reason)
+        self.assertIn("загруженной локально", plan.out_of_scope_reason)
         self.assertIn("Моррис", plan.out_of_scope_reason)
 
     def test_old_man_without_the_prefix_still_matches(self):

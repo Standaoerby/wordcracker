@@ -866,9 +866,35 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     return  # client gone (TLS error, etc.)
         except Exception as e:
+            # Sprint 21 B104 — soft fix for «network error». Top-level
+            # SSE catch sometimes never makes it to the client (headers
+            # already sent, connection half-closed). Emit a structured
+            # friendly event + an answer-shaped fallback so the UI has
+            # something to show regardless of where in the stream we
+            # died. Each write is wrapped — by the time we get here
+            # the connection may be broken.
+            msg = str(e)[:200].replace('"', "'").replace("\n", " ")
+            payload = (
+                f'data: {{"event":"error","kind":"server",'
+                f'"message":"⚠️ Сбой сервера ({type(e).__name__}). '
+                f'Попробуй ещё раз через минуту.","detail":"{msg}"}}\n\n'
+            )
             try:
-                self.wfile.write(
-                    f'data: {{"event":"error","message":"server: {e}"}}\n\n'.encode("utf-8"))
+                self.wfile.write(payload.encode("utf-8"))
+                self.wfile.flush()
+            except Exception:
+                pass
+            # Also emit an answer event with a fallback message so the
+            # client doesn't get stuck on a spinner waiting for `answer`.
+            try:
+                fallback = (
+                    'data: {"event":"answer",'
+                    '"text":"⚠️ Сервер не смог ответить. '
+                    'Попробуй переформулировать запрос или подожди 30 секунд."}\n\n'
+                )
+                self.wfile.write(fallback.encode("utf-8"))
+                self.wfile.write(b'data: {"event":"done"}\n\n')
+                self.wfile.flush()
             except Exception:
                 pass
 

@@ -174,14 +174,21 @@ def _copyright_refusal_if_book_under_copyright(e: Entities) -> QueryPlan | None:
                     intent="out_of_scope", entities=e, steps=[],
                     out_of_scope_reason=(
                         f"«{canonical}» — книга всё ещё под защитой "
-                        f"copyright, **полнотекстовый анализ невозможен**: "
-                        f"в Project Gutenberg доступны только public-domain "
+                        f"copyright, поэтому в каноническом корпусе "
+                        f"Project Gutenberg доступны только public-domain "
                         f"тексты (US до ~1929, UK до ~1973).\n\n"
-                        f"**Что доступно по этой книге:** только мета-"
-                        f"информация (название, автор, year, downloads из "
-                        f"Gutendex API, если книга вообще зарегистрирована). "
-                        f"Стилометрию / частоты / affinity / контексты "
-                        f"посчитать не на чем — токенизированного текста нет."
+                        f"**Что доступно по этой книге:**\n"
+                        f"• **Мета-информация** (название, автор, год, "
+                        f"downloads из Gutendex API) — если книга "
+                        f"зарегистрирована;\n"
+                        f"• **Полный анализ из загруженной локально копии** "
+                        f"— если вы загрузили свою версию через `/admin/`, "
+                        f"работаем с U-id (fair use для исследовательских "
+                        f"целей). Стилометрия / частоты / affinity / "
+                        f"контексты в этом случае считаются по вашему "
+                        f"экземпляру, не по канону SPGC.\n\n"
+                        f"Без локальной загрузки стилометрия не считается — "
+                        f"токенизированного текста нет."
                         f"{analog_hint}"
                     ),
                     explain=f"book under copyright: {canonical}",
@@ -853,14 +860,29 @@ def _plan_word_contexts(e: Entities) -> QueryPlan:
     # before slicing the final k. Sprint 18: rerank ON by default for
     # the no-author path — bi-encoder ranking surfaces lots of marginal
     # mentions; cross-encoder eliminates them.
+    #
+    # Sprint 21 B101: also fan out enrich_word in parallel so the
+    # renderer can surface translation + IPA + POS + definition +
+    # etymology alongside the contexts. enrich_word is Wiktionary-
+    # cached (~1.5s first call, <5ms cached); independent of contexts
+    # so the router runs them in parallel. enrich is optional — single-
+    # word queries without author scope are the «расскажи мне про
+    # слово X» case (Stan B101: «отдавать перевод слова, примеры в
+    # контексте и этимологию» вместе).
     return QueryPlan(
         intent="word_contexts", entities=e,
-        steps=[PlanStep(tool="hybrid_search",
-                        args={"query": e.word, "k": 12,
-                              "per_retriever": 50,
-                              "rerank_with": "bge_reranker"})],
+        steps=[
+            PlanStep(tool="hybrid_search",
+                     args={"query": e.word, "k": 12,
+                           "per_retriever": 50,
+                           "rerank_with": "bge_reranker"}),
+            PlanStep(tool="enrich_word",
+                     args={"word": e.word, "target_lang": "ru"},
+                     optional=True),
+        ],
         expected_cost="medium",
-        explain=f"hybrid_search({e.word}) — FTS5+Chroma RRF + BGE rerank",
+        explain=(f"hybrid_search({e.word}) — FTS5+Chroma RRF + BGE rerank, "
+                 f"+ enrich_word in parallel (translation+etymology)"),
     )
 
 
@@ -1016,11 +1038,26 @@ def _plan_word_etymology(e: Entities) -> QueryPlan:
             explain=f"find_words_by_etymology({scope}, family={e.etymology_family}, top≤20)",
         )
     if e.word:
+        # Sprint 21 B101: fan out word_contexts in parallel — when user
+        # asks etymology of a word, they often want примеры + перевод
+        # together. word_etymology returns enrich_word data (translation
+        # + IPA + POS + definition + etymology); word_contexts adds the
+        # corpus examples. Both independent → router runs in parallel.
+        # word_contexts is optional — Wiktionary outage doesn't kill
+        # the etymology answer.
         return QueryPlan(
             intent="word_etymology", entities=e,
-            steps=[PlanStep(tool="word_etymology", args={"word": e.word})],
+            steps=[
+                PlanStep(tool="word_etymology", args={"word": e.word}),
+                PlanStep(tool="hybrid_search",
+                         args={"query": e.word, "k": 6,
+                               "per_retriever": 30,
+                               "rerank_with": "bge_reranker"},
+                         optional=True),
+            ],
             expected_cost="cheap",
-            explain=f"word_etymology({e.word})",
+            explain=(f"word_etymology({e.word}) + hybrid_search({e.word}, k=6)"
+                     f" parallel — Stan B101 bundle"),
         )
     return QueryPlan(
         intent="clarify", entities=e, steps=[],

@@ -4,6 +4,11 @@ Complements the semantic_search (ChromaDB) by getting exact-match queries
 right: "find the word ajar in the corpus" returns books that literally
 contain "ajar", not nearby concepts. The hybrid_search tool merges this
 with semantic results via RRF.
+
+Sprint 21 (Stan B100): each match now carries `title` and `author` when
+v1 metadata can resolve the pg_id. Closes the «renderer echoes PG2554
+verbatim instead of Crime and Punishment» bug. The lookup is mtime-cached
+so the second query in the same session is ~0ms metadata cost.
 """
 from __future__ import annotations
 
@@ -18,6 +23,66 @@ from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
 
 log = logging.getLogger("wordcracker.v2.tools.search.lexical")
+
+
+# Sprint 21 B100 — pg_id → (title, author) lookup. Built lazily from
+# v1 metadata DataFrame; lock for thread safety. The map is small
+# (~77k rows × 3 fields = ~5 MB Python dict), so we keep it in
+# memory once built. Rebuilds when metadata mtime changes — the
+# v1 _metadata_df helper already mtime-caches its DataFrame, we
+# just need to detect when our dict is stale.
+_TITLE_CACHE: dict[str, dict[str, str]] | None = None
+_TITLE_CACHE_LOCK = threading.Lock()
+_TITLE_CACHE_KEY: tuple | None = None    # mtime-tuple of meta files
+
+
+def _title_lookup() -> dict[str, dict[str, str]]:
+    """Return {pg_id: {'title': ..., 'author': ...}}. Rebuilds when v1
+    metadata mtime changes. Returns empty dict if v1 unavailable."""
+    global _TITLE_CACHE, _TITLE_CACHE_KEY
+    try:
+        # v1 _metadata_df is mtime-cached; cheap repeat call.
+        from scripts.rag_tools import (_metadata_df, SPGC_METADATA,
+                                         USER_UPLOADS_META, ORPHAN_PG_META)
+    except ImportError:
+        return {}
+    cur_key = tuple(
+        p.stat().st_mtime if p.exists() else 0.0
+        for p in (SPGC_METADATA, USER_UPLOADS_META, ORPHAN_PG_META)
+    )
+    with _TITLE_CACHE_LOCK:
+        if _TITLE_CACHE is not None and _TITLE_CACHE_KEY == cur_key:
+            return _TITLE_CACHE
+        try:
+            df = _metadata_df()
+        except Exception as e:
+            log.warning("title-lookup metadata load failed: %s", e)
+            return _TITLE_CACHE or {}
+        out: dict[str, dict[str, str]] = {}
+        title_col = "title" if "title" in df.columns else None
+        author_col = "author" if "author" in df.columns else None
+        id_col = "pg_id" if "pg_id" in df.columns else (
+            "id" if "id" in df.columns else None)
+        if id_col is None:
+            return {}
+        for _, row in df.iterrows():
+            pid = str(row[id_col]) if row[id_col] is not None else ""
+            if not pid:
+                continue
+            entry: dict[str, str] = {}
+            if title_col:
+                t = row.get(title_col)
+                if t and not (isinstance(t, float) and t != t):  # not NaN
+                    entry["title"] = str(t)
+            if author_col:
+                a = row.get(author_col)
+                if a and not (isinstance(a, float) and a != a):
+                    entry["author"] = str(a)
+            if entry:
+                out[pid] = entry
+        _TITLE_CACHE = out
+        _TITLE_CACHE_KEY = cur_key
+        return out
 
 # Default lives in the bind-mounted /data/spgc/derived volume so it survives
 # container restarts. Override with WC_FTS_DB if hosting elsewhere.
@@ -120,13 +185,25 @@ def lexical_search(query: str, k: int = 10,
             message=f"FTS5 query error: {e}", query={"query": query},
         )
 
+    # Sprint 21 B100 — augment each match with title/author from metadata.
+    # Renderer rule 16 says: prefer title in user-facing text. Without
+    # this enrichment the renderer has no choice but to echo PG ids.
+    lookup = _title_lookup()
     matches: list[dict[str, Any]] = []
     for row in rows:
-        matches.append({
-            "pg_id": row["id"],
+        pid = row["id"]
+        entry = {
+            "pg_id": pid,
             "score": float(row["score"]),     # negative; smaller = better
             "snippet": row["snippet"],
-        })
+        }
+        meta = lookup.get(str(pid))
+        if meta:
+            if meta.get("title"):
+                entry["title"] = meta["title"]
+            if meta.get("author"):
+                entry["author"] = meta["author"]
+        matches.append(entry)
 
     return ToolResult.success(
         tool="lexical_search",

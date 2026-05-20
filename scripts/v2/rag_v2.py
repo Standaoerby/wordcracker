@@ -79,6 +79,17 @@ RENDER_PROMPT = """Тебя зовут {name}. Ты — литературный
     - **Jaccard top-200** — выше = больше пересечение топ-200 фирменных слов авторов (similarity, не distance).
     Если direction не очевиден из имени метрики и нет `metric_explanations` — НЕ интерпретируй, просто покажи число.
 
+16. **Book titles > PG ids в user-facing тексте.** Когда tool возвращает книгу с обоими `pg_id` и `title` — ВСЕГДА пиши title в основном тексте ответа («Pride and Prejudice»). PG/U id — это технический ключ для следующих tool calls, не для глаз пользователя. Stan Round 11+ B100: «отдавать не айдишники, а имена книг».
+    - Допустимо: «Pride and Prejudice (PG1342)» в скобках при первом упоминании — для прозрачности источника.
+    - Допустимо: bare pg_id в clickable-cell metadata (frontend сам решит как показать).
+    - Запрещено: «Рекомендую PG2554, PG345, PG1342» как основной текст списка — это unreadable.
+    - Если title в data отсутствует (rare lexical_search edge case) — формулируй «книга PG{{id}} (название не извлеклось из метаданных)» и предложи user'у sequence find_book → target tool.
+
+17. **Слова — расширенный ответ (translation + примеры + этимология).** Когда план запустил `enrich_word` ИЛИ `word_contexts` для конкретного слова, и в payload есть данные по нескольким facet'ам (translation_ru, definition_en, etymology, contexts/samples) — surface их ВМЕСТЕ, даже если intent был узкий. Stan B101: «отдавать перевод слова, примеры в контексте и этимологию».
+    - Формат: краткое сводное описание сверху (перевод + IPA + POS + определение) → блок «Примеры из корпуса» с 2-3 snippets (если word_contexts отработал) → строка «Этимология» (если etymology в data).
+    - НЕ повторяй полный enrich-payload как dump — только полезные поля.
+    - Если какой-то facet отсутствует (например etymology=None) — мягко упомяни «этимология не извлеклась» один раз, не висни.
+
 Tool trace тебе передан как JSON. Каждая запись — {{tool, query, data, warnings, coverage}}. Возьми оттуда factual content. **Ничего вне этих данных.**"""
 
 
@@ -756,10 +767,13 @@ def ask(
             )
         except Exception as e:
             log.exception("renderer LLM failed")
-            answer = (f"[renderer error: {e}]\n\nRaw tool results:\n"
-                      + "\n".join(json.dumps(r.to_dict(), ensure_ascii=False,
-                                             default=str, indent=2)[:1000]
-                                  for r in rr.results))
+            # Sprint 21 B104 — soft network-error fix. Stan: «всё ещё
+            # выпадает network error, найти причину, сделать мягкий фикс».
+            # Most common cause: Ollama timeout (model overloaded or
+            # GPU dropped). Build a user-friendly message that says
+            # WHAT happened + the partial tool results so the user
+            # gets value even when Ollama is unhealthy.
+            answer = _friendly_render_error(e, rr.results)
 
     # ---- Sprint 6.1: critic pass ----
     # Verify the rendered answer against tool_results. Only annotates when
@@ -1118,7 +1132,14 @@ def ask_stream(
                 history=history,
             )
         except Exception as e:
-            answer = f"[renderer error: {e}]"
+            # Sprint 21 B104 — soft network-error fix in streaming path.
+            log.exception("renderer LLM failed (stream)")
+            answer = _friendly_render_error(e, results)
+            # Also yield a structured error event so the UI can render a
+            # banner instead of just an in-message error. Client sees this
+            # BEFORE the final `answer` event lands.
+            yield {"event": "error", "kind": "renderer",
+                   "message": _short_render_error_message(e)}
 
     # Critic pass — same logic as ask() above. We emit the verdict as its
     # own SSE event so the UI can show a confidence badge before the final
@@ -1200,6 +1221,61 @@ def ask_stream(
 
 
 # ---------- introduction text (no LLM) ----------
+
+
+# Sprint 21 B104 — soft network-error fixes. The renderer LLM (qwen3:14b
+# via Ollama) can die for a few reasons:
+#   - GPU dropped (Stan's RTX 3090 is hot-deck shared with other services
+#     and Ollama sometimes loses the device after `docker network` events;
+#     we have a cron-watcher but there's a window)
+#   - Ollama timeout on heavy num_ctx
+#   - ConnectionError if Ollama container restarted
+# Pre-Sprint-21 we surfaced `[renderer error: <stacktrace>]` directly in
+# the answer. That UX is hostile — user sees a Python repr.
+# Now we produce a short friendly message + dump the tool results so the
+# user at least sees the data, can copy-paste it, and try again later.
+
+def _short_render_error_message(err: Exception) -> str:
+    """Translate a renderer exception into a human-readable one-liner
+    suitable for an SSE `error` event."""
+    name = type(err).__name__
+    # Specific friendly variants
+    msg = str(err).lower()
+    if "timeout" in msg or "timed out" in msg or "readtimeout" in msg:
+        return ("Ollama не ответил вовремя (модель перегружена или GPU "
+                "переключился). Попробуй ещё раз через минуту.")
+    if "connection" in msg or "connectionerror" in msg or "refused" in msg:
+        return ("Ollama недоступен (контейнер перезапустился или сеть). "
+                "Подожди 30 секунд и попробуй ещё раз.")
+    if "gpu" in msg or "cuda" in msg or "out of memory" in msg:
+        return ("GPU не отдала ответ — возможно перегружен или "
+                "перезапущен. Попробуй через минуту.")
+    # Generic fallback
+    return f"Сбой рендерера ({name}). Подробности в логах. Попробуй ещё раз."
+
+
+def _friendly_render_error(err: Exception, results: list[ToolResult]) -> str:
+    """Build a user-facing answer string when the renderer LLM fails.
+
+    Surfaces a friendly Russian message + a summary of the tool results
+    that DID succeed, so the user sees value even when Ollama is down.
+    """
+    short = _short_render_error_message(err)
+    lines: list[str] = [f"⚠️ **{short}**", ""]
+    ok_results = [r for r in results if r.ok and r.data]
+    if ok_results:
+        lines.append("Я успел вызвать инструменты ниже — данные есть, но "
+                     "сформулировать связный ответ не получилось:")
+        lines.append("")
+        for r in ok_results[:5]:  # cap at 5 to keep output tractable
+            summary = r.to_llm_string(max_chars=400)
+            lines.append(f"**{r.tool}** — {summary}")
+            lines.append("")
+    else:
+        lines.append("К сожалению, инструменты тоже не дали полезных "
+                     "данных. Возможно, запрос невалидный — "
+                     "попробуй переформулировать.")
+    return "\n".join(lines).strip()
 
 
 _INTRO_PATH = Path(__file__).parent / "intro_text.md"
