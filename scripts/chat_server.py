@@ -151,6 +151,14 @@ PAGE = r"""<!doctype html>
   .copy-btn      { background:transparent; color:#888; border:1px solid #2f343c;
                    font-size:11px; padding:2px 8px; border-radius:4px; cursor:pointer; }
   .copy-btn:hover { color:#eaeaea; border-color:#50e3c2; }
+  /* Sprint 22+ — feedback button «🚩 неправильный». Discoverable but
+     not loud — soft red so users notice it's available without it
+     screaming at them on every correct answer. */
+  .flag-btn      { background:transparent; color:#888; border:1px solid #2f343c;
+                   font-size:11px; padding:2px 8px; border-radius:4px; cursor:pointer; }
+  .flag-btn:hover { color:#e08080; border-color:#7a3a3a; }
+  .flag-btn:disabled { opacity:0.6; cursor:wait; }
+  .flag-btn-sent { color:#7ed321 !important; border-color:#1e3a2e !important; }
   /* Sprint 11.5 retry-with-scope button — shown when planner asked clarify */
   .retry-scope   { background:transparent; color:#a0c4ff; border:1px solid #2d3a4d;
                    font-size:11px; padding:2px 8px; border-radius:4px; cursor:pointer;
@@ -444,8 +452,9 @@ async function submit(text) {
 
   const toolRows = {};   // name → row element (last-pending)
   const tools = [];
-  let intentLabel = null;   // captured from {event:'intent'} early in stream
-  let criticInfo  = null;   // captured from {event:'critic'} late in stream
+  let intentLabel = null;        // captured from {event:'intent'} early in stream
+  let intentConfidence = null;   // confidence value from same event
+  let criticInfo  = null;        // captured from {event:'critic'} late in stream
 
   try {
     const r = await fetch('/api/chat/stream', {
@@ -507,6 +516,7 @@ async function submit(text) {
           }
           case 'intent':
             intentLabel = ev.label;
+            intentConfidence = ev.confidence;
             // Update the live-status header so the user sees the planner
             // verdict immediately.
             const ihint = status.querySelector('.think');
@@ -562,6 +572,53 @@ async function submit(text) {
         setTimeout(() => copyBtn.textContent = 'copy', 1200);
       };
       badges.appendChild(copyBtn);
+
+      // Sprint 22+ — feedback button «🚩 неправильный». Click flags
+      // this assistant turn to /api/flag_bad_answer with full context
+      // (question, answer, intent, tool_calls, elapsed_sec). Optional
+      // user note via prompt. Admin reviews at /admin/bad_answers.
+      const flagBtn = document.createElement('button');
+      flagBtn.className = 'flag-btn'; flagBtn.type = 'button';
+      flagBtn.textContent = '🚩 неправильный';
+      flagBtn.title = 'Пометить ответ как кривой — отправляется админу для разбора';
+      flagBtn.onclick = async () => {
+        const note = window.prompt(
+            'Что не так с ответом? (опционально, можно оставить пустым)',
+            '');
+        if (note === null) return;  // user cancelled
+        flagBtn.disabled = true;
+        flagBtn.textContent = '⏳ отправляю...';
+        try {
+          const r = await fetch('/api/flag_bad_answer', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+              question: text,
+              answer: answerText,
+              intent: intentLabel,
+              intent_confidence: intentConfidence,
+              tool_calls: final ? (final.tool_calls || tools) : tools,
+              elapsed_sec: final ? final.elapsed_sec : null,
+              render_meta: final ? (final.render_meta || null) : null,
+              critic_summary: criticInfo ? criticInfo.summary : null,
+              user_note: note,
+              history: history.slice(-10),
+            }),
+          });
+          if (r.ok) {
+            const body = await r.json().catch(() => ({}));
+            flagBtn.textContent = '✓ записано (' + (body.id || 'ok') + ')';
+            flagBtn.classList.add('flag-btn-sent');
+          } else {
+            flagBtn.textContent = '✗ ошибка ' + r.status;
+            flagBtn.disabled = false;
+          }
+        } catch (err) {
+          flagBtn.textContent = '✗ сеть';
+          flagBtn.disabled = false;
+        }
+      };
+      badges.appendChild(flagBtn);
     }
     live.appendChild(badges);
 
@@ -831,6 +888,45 @@ class Handler(BaseHTTPRequestHandler):
                 payload = {"total": 0, "engine": "v1"}
             return self._send(200, json.dumps(payload, ensure_ascii=False, default=str),
                               "application/json; charset=utf-8")
+        # Sprint 22+ — admin: list flagged bad answers as JSON.
+        # Behind same Basic Auth as the rest. JSONL on disk so ops can
+        # also grep / tail directly from the host.
+        if self.path == "/admin/bad_answers" or self.path.startswith(
+                "/admin/bad_answers?"):
+            try:
+                from scripts.v2.feedback import list_recent
+            except ImportError as e:
+                return self._send(500,
+                                  json.dumps({"error": f"feedback unavailable: {e}"}),
+                                  "application/json")
+            # Parse query string ?limit=N&days=N
+            limit = 200
+            days = 7
+            if "?" in self.path:
+                qs = self.path.split("?", 1)[1]
+                from urllib.parse import parse_qs
+                params = parse_qs(qs)
+                try:
+                    limit = max(1, min(int(params.get("limit", ["200"])[0]),
+                                        1000))
+                except (ValueError, IndexError):
+                    pass
+                try:
+                    days = max(1, min(int(params.get("days", ["7"])[0]), 90))
+                except (ValueError, IndexError):
+                    pass
+            try:
+                records = list_recent(days_back=days, limit=limit)
+            except Exception as e:
+                return self._send(500,
+                                  json.dumps({"error": str(e)}),
+                                  "application/json")
+            return self._send(200,
+                              json.dumps({"count": len(records),
+                                          "records": records},
+                                         ensure_ascii=False, default=str,
+                                         indent=2),
+                              "application/json; charset=utf-8")
         page = PAGE.replace("__ASSISTANT_NAME__", ASSISTANT_NAME)
         return self._send(200, page, "text/html; charset=utf-8")
 
@@ -970,6 +1066,50 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, json.dumps({"error": err}).encode("utf-8"),
                                   "application/json")
             return self._stream_chat(payload)
+        # Sprint 22+ — user feedback collection. Stan asked for a way
+        # to flag bad answers from the chat UI so fixes can be
+        # prioritized from real user reports instead of waiting for
+        # external Claude rounds. Append-only JSONL at
+        # /workspace/spgc/derived/v2_feedback/bad-YYYY-MM-DD.jsonl.
+        if self.path == "/api/flag_bad_answer":
+            payload, err = self._read_payload_capped()
+            if err:
+                return self._send(400, json.dumps({"error": err}).encode("utf-8"),
+                                  "application/json")
+            try:
+                from scripts.v2.feedback import record_bad_answer
+            except ImportError as e:
+                return self._send(500,
+                                  json.dumps({"error": f"feedback unavailable: {e}"}),
+                                  "application/json")
+            try:
+                ip = (self.headers.get("X-Forwarded-For")
+                      or self.client_address[0])
+                rec = record_bad_answer(
+                    question=payload.get("question") or "",
+                    answer=payload.get("answer") or "",
+                    intent=payload.get("intent"),
+                    intent_confidence=payload.get("intent_confidence"),
+                    tool_calls=payload.get("tool_calls") or [],
+                    elapsed_sec=payload.get("elapsed_sec"),
+                    render_meta=payload.get("render_meta"),
+                    critic_summary=payload.get("critic_summary"),
+                    user_note=payload.get("user_note"),
+                    history=payload.get("history") or [],
+                    ip=ip,
+                )
+            except ValueError as e:
+                return self._send(400,
+                                  json.dumps({"error": str(e)}),
+                                  "application/json")
+            except Exception as e:
+                return self._send(500,
+                                  json.dumps({"error": f"flag failed: {e}"}),
+                                  "application/json")
+            return self._send(200,
+                              json.dumps({"ok": True, "id": rec["id"]},
+                                         ensure_ascii=False),
+                              "application/json; charset=utf-8")
         if not (self.path == "/api/chat" or self.path.startswith("/api/chat?")):
             return self._send(404, b"not found", "text/plain")
         payload, err = self._read_payload_capped()
