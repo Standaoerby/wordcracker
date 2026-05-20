@@ -467,5 +467,51 @@ class Q15_CompareAuthorsAutoRetry(unittest.TestCase):
         self.assertIn("affinity_by_author", note)
 
 
+class CacheKey_WrapperVersionInvalidation(unittest.TestCase):
+    """Sprint 21+: wrapper_version baked into cache_key so bumping it
+    invalidates pre-bump cached entries automatically (no manual
+    `rm -rf /data/v2_cache/<tool>` needed on deploy). Stan B100 cache
+    saga: prod kept serving title-less hybrid_search results because
+    cache key was content-of-args only.
+    """
+
+    def test_different_versions_produce_different_keys(self):
+        from scripts.v2.cache import cache_key
+        k1 = cache_key("hybrid_search", {"query": "ajar"},
+                       wrapper_version="v1")
+        k2 = cache_key("hybrid_search", {"query": "ajar"},
+                       wrapper_version="v2-titles")
+        self.assertNotEqual(k1, k2)
+        # Tool prefix preserved on both
+        self.assertTrue(k1.startswith("hybrid_search:"))
+        self.assertTrue(k2.startswith("hybrid_search:"))
+
+    def test_same_version_same_args_same_key(self):
+        from scripts.v2.cache import cache_key
+        k1 = cache_key("hybrid_search", {"query": "ajar"},
+                       wrapper_version="v2-titles")
+        k2 = cache_key("hybrid_search", {"query": "ajar"},
+                       wrapper_version="v2-titles")
+        self.assertEqual(k1, k2)
+
+    def test_default_version_v1(self):
+        """Tools without explicit wrapper_version stay on v1 — their
+        existing cache entries continue to be served (no spurious
+        invalidation across the whole tool registry)."""
+        from scripts.v2.cache import cache_key
+        explicit = cache_key("foo", {"x": 1}, wrapper_version="v1")
+        default  = cache_key("foo", {"x": 1})
+        self.assertEqual(explicit, default)
+
+    def test_bumped_tools_carry_new_version(self):
+        """The 3 tools I changed in alpha3 announce their new version
+        so prod naturally rebuilds cache on next call instead of
+        serving stale data."""
+        from scripts.v2.tool_registry import REGISTRY
+        self.assertEqual(REGISTRY["hybrid_search"].wrapper_version, "v2-titles")
+        self.assertEqual(REGISTRY["lexical_search"].wrapper_version, "v2-titles")
+        self.assertEqual(REGISTRY["compare_authors"].wrapper_version, "v2-autoretry")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

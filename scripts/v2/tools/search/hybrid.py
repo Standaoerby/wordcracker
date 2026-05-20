@@ -60,6 +60,10 @@ def _rank_map(items: list[dict[str, Any]], key: str = "pg_id") -> dict[str, int]
     requires=["word"],
     cost="medium",
     cacheable=True,
+    # Sprint 21+ Stan B100: output schema gained `title`/`author` fields
+    # on every match. Bump to invalidate pre-alpha3 cached entries that
+    # lack these fields.
+    wrapper_version="v2-titles",
 )
 def hybrid_search(query: str, k: int = 12, per_retriever: int = 50,
                   author_filter: str | None = None,

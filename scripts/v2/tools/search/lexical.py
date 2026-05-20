@@ -142,6 +142,10 @@ def _close_for_test() -> None:
     requires=["word"],
     cost="cheap",
     cacheable=True,
+    # Sprint 21+ Stan B100: matches now include title/author via v1
+    # metadata lookup. Old cached results without those fields stop
+    # being served.
+    wrapper_version="v2-titles",
 )
 def lexical_search(query: str, k: int = 10,
                    snippet_chars: int = 200) -> ToolResult:

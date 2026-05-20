@@ -70,9 +70,15 @@ def _normalize_args(args: dict) -> str:
     return json.dumps(cleaned, sort_keys=True, ensure_ascii=False, default=str)
 
 
-def cache_key(tool: str, args: dict) -> str:
+def cache_key(tool: str, args: dict, wrapper_version: str = "v1") -> str:
     norm = _normalize_args(args)
-    h = hashlib.sha256(norm.encode("utf-8")).hexdigest()[:16]
+    # Sprint 21+ (Stan B100): wrapper_version becomes part of the hash so
+    # bumping the wrapper invalidates old entries automatically. The
+    # version is folded INTO the hash (not appended after) — keeps the
+    # key shape uniform across tools.
+    h = hashlib.sha256(
+        (f"{wrapper_version}\0" + norm).encode("utf-8")
+    ).hexdigest()[:16]
     return f"{tool}:{h}"
 
 
@@ -110,9 +116,10 @@ def _write_disk(tool: str, key: str, payload: dict) -> None:
 # ---- public API ----
 
 
-def cache_get(tool: str, args: dict) -> ToolResult | None:
+def cache_get(tool: str, args: dict,
+              wrapper_version: str = "v1") -> ToolResult | None:
     """Look up a cached ToolResult. Returns None on miss / stale-incompatible."""
-    key = cache_key(tool, args)
+    key = cache_key(tool, args, wrapper_version=wrapper_version)
 
     with _lru_lock:
         cached = _lru.get(key)
@@ -148,11 +155,12 @@ def cache_get(tool: str, args: dict) -> ToolResult | None:
     return result.with_cache_hit(True)
 
 
-def cache_put(tool: str, args: dict, result: ToolResult) -> None:
+def cache_put(tool: str, args: dict, result: ToolResult,
+              wrapper_version: str = "v1") -> None:
     if not result.ok:
         # Don't poison the cache with errors.
         return
-    key = cache_key(tool, args)
+    key = cache_key(tool, args, wrapper_version=wrapper_version)
     payload = result.to_dict()
     payload["_cached_at"] = time.time()
     payload["_corpus_version"] = (

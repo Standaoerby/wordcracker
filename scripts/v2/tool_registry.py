@@ -51,6 +51,13 @@ class ToolSpec:
     timeout_s: int = 30
     cacheable: bool = True
     output_data_schema: dict | None = None
+    # Sprint 21+ (Stan B100 cache invalidation): bump this when the
+    # wrapper's output SHAPE changes (new fields, schema renames). Old
+    # cached results under the previous version key become unreachable
+    # but harmless — they just stop being served. Avoids «I shipped a
+    # fix but prod still serves stale data» entirely. Default "v1" for
+    # all unchanged tools; tools mid-evolution use "v2" / "v3" etc.
+    wrapper_version: str = "v1"
 
 
 REGISTRY: dict[str, ToolSpec] = {}
@@ -67,11 +74,15 @@ def tool(
     timeout_s: int = 30,
     cacheable: bool = True,
     output_data_schema: dict | None = None,
+    wrapper_version: str = "v1",
 ) -> Callable:
     """Decorator that registers the wrapped function under `name`.
 
     The wrapped function MUST return a ToolResult. Use ToolResult.success / .fail
     helpers. Exceptions are caught by dispatch() and turned into ToolError.
+
+    `wrapper_version`: bump when the output shape changes so old cached
+    entries get bypassed automatically on deploy (no manual cache eviction).
     """
     def decorate(fn: Callable[..., ToolResult]) -> Callable[..., ToolResult]:
         if name in REGISTRY:
@@ -87,6 +98,7 @@ def tool(
             timeout_s=timeout_s,
             cacheable=cacheable,
             output_data_schema=output_data_schema,
+            wrapper_version=wrapper_version,
         )
         return fn
     return decorate
@@ -132,7 +144,8 @@ def dispatch(name: str, args: dict | None = None) -> ToolResult:
     if spec.cacheable:
         try:
             from scripts.v2 import cache as _cache
-            cached = _cache.cache_get(name, args)
+            cached = _cache.cache_get(name, args,
+                                       wrapper_version=spec.wrapper_version)
             if cached is not None:
                 return cached
         except Exception as e:
@@ -167,7 +180,8 @@ def dispatch(name: str, args: dict | None = None) -> ToolResult:
     if spec.cacheable and result.ok:
         try:
             from scripts.v2 import cache as _cache
-            _cache.cache_put(name, args, result)
+            _cache.cache_put(name, args, result,
+                             wrapper_version=spec.wrapper_version)
         except Exception as e:
             log.warning("cache_put failed for %s: %s", name, e)
     return result

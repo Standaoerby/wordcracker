@@ -227,6 +227,10 @@ def affinity_by_author(author_regex: str, top: int = 50,
     requires=["author"],
     cost="medium",
     cacheable=True,
+    # Sprint 21+ Stan Q15: auto-retry at lower threshold added; output
+    # may now include `_threshold_auto_lowered`, `min_corpus_count_used`,
+    # `min_corpus_count_requested`. Bump to invalidate pre-retry cache.
+    wrapper_version="v2-autoretry",
 )
 def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
                     min_corpus_count: int = 500) -> ToolResult:
