@@ -339,5 +339,70 @@ class AffirmativeOpenerFollowup(unittest.TestCase):
         self.assertFalse(_looks_like_followup("найди слово ajar"))
 
 
+class TableVsZeroCountAudit(unittest.TestCase):
+    """Stan 2026-05-20: 30-row Wilde adjectives table + footer «было
+    возвращено 0 слов, хотя запрашивалось 30». Slipped past
+    _audit_count_claims (no top_requested/top_returned delta) AND
+    plain numeric audit (0 < AUDIT_MIN=5). New _audit_table_vs_zero_count
+    catches it."""
+
+    def test_table_30_rows_vs_zero_claim_flagged(self):
+        from scripts.v2.numeric_audit import _audit_table_vs_zero_count
+        answer = (
+            "| word | count |\n"
+            "|------|-------|\n"
+            + "\n".join(f"| word{i} | {i*10} |" for i in range(30))
+            + "\n\n⚠️ Важно: было возвращено 0 слов, хотя запрашивалось 30."
+        )
+        report = _audit_table_vs_zero_count(answer)
+        self.assertTrue(report.mismatches)
+        m = report.mismatches[0]
+        self.assertEqual(m.value, 0.0)
+        self.assertEqual(m.nearest_in_data, 30.0)
+
+    def test_table_matches_count_no_flag(self):
+        from scripts.v2.numeric_audit import _audit_table_vs_zero_count
+        answer = (
+            "| word | count |\n"
+            "|------|-------|\n"
+            "| a | 1 |\n"
+            "| b | 2 |\n"
+            "| c | 3 |\n"
+            "\nВернулось 3 слова."
+        )
+        report = _audit_table_vs_zero_count(answer)
+        self.assertFalse(report.mismatches)
+
+    def test_no_table_no_flag(self):
+        from scripts.v2.numeric_audit import _audit_table_vs_zero_count
+        answer = "Никаких таблиц. Просто текст."
+        report = _audit_table_vs_zero_count(answer)
+        self.assertFalse(report.mismatches)
+
+
+class LearningWordsStampsCount(unittest.TestCase):
+    """Stan 2026-05-20: learning_words wrapper didn't stamp top_returned
+    so renderer hallucinated the count. Now mirrors affinity_by_book
+    contract."""
+
+    def test_learning_words_stamps_top_returned(self):
+        from scripts.v2.tools.learning import learning_words as lw_mod
+        fake_v1_result = {
+            "scope": "book:PG1342",
+            "level": "B2",
+            "words": [{"word": f"w{i}", "cefr": "B2"} for i in range(15)],
+        }
+        with mock.patch("scripts.learning_tools.learning_words",
+                         return_value=fake_v1_result):
+            r = lw_mod.learning_words(scope={"book": "PG1342"},
+                                       level="B2", top=20)
+        # top_returned + top_requested stamped
+        self.assertEqual(r.data.get("top_requested"), 20)
+        self.assertEqual(r.data.get("top_returned"), 15)
+        # And render note explains the delta
+        note = r.data.get("_render_note") or ""
+        self.assertIn("ACTUAL COUNT", note)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

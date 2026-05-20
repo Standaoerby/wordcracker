@@ -306,6 +306,17 @@ def audit_numbers(
     # hallucination — explicitly flag it even if the requested number
     # happens to appear in tool data elsewhere (e.g. min_corpus_count=50).
     count_report = _audit_count_claims(answer, records)
+    # Sprint 22+ Round 12 post-deploy: table-vs-zero contradiction.
+    # Stan 2026-05-20 screenshot: 30-row table + footer «возвращено
+    # 0 слов» slipped past every existing audit because 0 is below
+    # AUDIT_MIN and the answer didn't trip the top_requested vs
+    # top_returned delta path.
+    table_zero_report = _audit_table_vs_zero_count(answer)
+    if table_zero_report.mismatches:
+        # Prepend so it shows first — it's the most user-visible kind
+        # of contradiction.
+        count_report.mismatches = (table_zero_report.mismatches
+                                    + count_report.mismatches)
 
     if not data_numbers and not count_report.mismatches:
         return AuditReport.trust("(no numbers in tool data)")
@@ -421,6 +432,81 @@ def _audit_count_claims(answer: str, records: Iterable[dict]) -> AuditReport:
             nearest_distance_pct=abs(claimed - ret) / max(claimed, 1) * 100,
         ))
         if len(rep.mismatches) >= 3:
+            break
+    return rep
+
+
+# Sprint 22+ Round 12 post-deploy: «таблица 30 строк ↔ возвращено 0
+# слов» contradiction. Stan 2026-05-20 screenshot showed renderer
+# hallucinating a footer «было возвращено 0 слов, хотя запрашивалось
+# 30» over a perfectly populated 30-row table. _audit_count_claims
+# couldn't catch it because the claim was «0» which is below AUDIT_MIN
+# and there was no top_requested mismatch in data. New audit: count
+# table rows, then scan for «возвращено N слов» phrasings where N
+# wildly disagrees with the table.
+_TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$", re.MULTILINE)
+_TABLE_SEPARATOR_RE = re.compile(
+    r"^\s*\|?\s*:?[-=]{2,}\s*[:|]?",  # | --- | -- |
+)
+_ZERO_COUNT_PHRASE_RE = re.compile(
+    r"(?:было\s+возвращено|вернулось|returned)\s+"
+    r"(\d{1,4})\s*"
+    r"(?:слов|words|строк|rows|элемент\w*)",
+    re.IGNORECASE,
+)
+
+
+def _count_table_rows(answer: str) -> int:
+    """Count data rows in markdown pipe tables. Subtracts header (first
+    `|...|` line) + separator (`|---|...`) per table. Multiple tables
+    sum together — this is a coarse signal for «answer has tabular data
+    of this size»."""
+    lines = _TABLE_ROW_RE.findall(answer)
+    if not lines:
+        return 0
+    # Drop separator-like lines from count
+    data_rows = [l for l in lines if not _TABLE_SEPARATOR_RE.match(l)]
+    # Heuristic: first row of each contiguous block is a header. Hard
+    # to detect block boundaries without state — approximate with -1
+    # per detected table separator (each separator implies one header
+    # before it).
+    n_separators = sum(1 for l in lines if _TABLE_SEPARATOR_RE.match(l))
+    n_data = max(0, len(data_rows) - n_separators)
+    return n_data
+
+
+def _audit_table_vs_zero_count(answer: str) -> AuditReport:
+    """Flag «возвращено N слов» footers that contradict the table."""
+    rep = AuditReport()
+    table_rows = _count_table_rows(answer)
+    if table_rows == 0:
+        return rep
+    for m in _ZERO_COUNT_PHRASE_RE.finditer(answer):
+        try:
+            claimed = int(m.group(1))
+        except ValueError:
+            continue
+        # Allow exact match (renderer correctly says «вернулось 30»
+        # alongside 30-row table). Flag when claim wildly diverges.
+        if claimed == table_rows:
+            continue
+        # Threshold: only flag clear contradictions where the gap is
+        # >50% of the table size. Avoids picking up legitimate «top_
+        # requested vs returned» disclosures.
+        if abs(claimed - table_rows) <= max(2, table_rows // 5):
+            continue
+        start = max(0, m.start() - 40)
+        end = min(len(answer), m.end() + 20)
+        ctx = answer[start:end].replace("\n", " ").strip()
+        rep.mismatches.append(NumericMismatch(
+            value=float(claimed),
+            formatted=m.group(0),
+            context=f"[table has {table_rows} rows] {ctx}",
+            nearest_in_data=float(table_rows),
+            nearest_distance_pct=(abs(claimed - table_rows)
+                                    / max(table_rows, 1) * 100),
+        ))
+        if len(rep.mismatches) >= 2:
             break
     return rep
 

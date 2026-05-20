@@ -133,6 +133,27 @@ def learning_words(scope, level: str = "intermediate", top: int = 30,
                               f"{artifact_dropped} markup tokens (Roman "
                               f"numerals, single chars)")
             raw["_render_note"] = (prev + " " + "; ".join(notes)).strip()
+    # Sprint 22+ Round 12 post-deploy: stamp count-honesty fields just
+    # like affinity_by_author / affinity_by_book do. Stan prod 2026-05-20:
+    # renderer hallucinated «возвращено 0 слов» footer over a 30-row
+    # table because learning_words didn't surface top_returned and the
+    # LLM invented the number. Adding the field gives the renderer a
+    # ground truth to anchor on (per RENDER_PROMPT rule 14).
+    actual = len(rows) if rows else 0
+    if isinstance(raw, dict):
+        raw["top_requested"] = top
+        raw["top_returned"] = actual
+        if actual < top:
+            existing = raw.get("_render_note") or ""
+            count_note = (
+                f"ACTUAL COUNT: learning_words returned {actual} words "
+                f"after filtering — NOT the {top} requested. Use "
+                f"{actual} in the answer."
+            )
+            raw["_render_note"] = (
+                (existing + " | " if existing else "") + count_note
+            )
+
     warnings: list[ToolWarning] = []
     if not rows:
         warnings.append(ToolWarning(
