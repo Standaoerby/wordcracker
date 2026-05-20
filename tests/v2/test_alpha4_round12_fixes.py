@@ -404,5 +404,92 @@ class LearningWordsStampsCount(unittest.TestCase):
         self.assertIn("ACTUAL COUNT", note)
 
 
+class RenderTruncation(unittest.TestCase):
+    """Stan 2026-05-20: «200 фирменных слов Кристи» rendered as a
+    fabricated Russian art-gallery press release (bus routes 12-227).
+    Root cause: 200-item tool result blew qwen3:14b num_ctx → model
+    fell back to training-data confabulation. Defense: cap list sizes
+    before serialization."""
+
+    def test_long_list_truncated_to_cap(self):
+        from scripts.v2.rag_v2 import _truncate_for_render, RENDER_LIST_CAP
+        data = {"top": [{"word": f"w{i}", "affinity": i}
+                         for i in range(200)]}
+        out = _truncate_for_render(data)
+        # Cap + 1 truncation-note item
+        self.assertEqual(len(out["top"]), RENDER_LIST_CAP + 1)
+        marker = out["top"][-1]
+        self.assertEqual(marker["_truncated_to"], RENDER_LIST_CAP)
+        self.assertEqual(marker["_original_length"], 200)
+
+    def test_short_list_not_truncated(self):
+        from scripts.v2.rag_v2 import _truncate_for_render
+        data = {"top": [{"word": f"w{i}"} for i in range(10)]}
+        out = _truncate_for_render(data)
+        self.assertEqual(len(out["top"]), 10)
+        # No marker appended
+        self.assertNotIn("_truncated_to", out["top"][-1])
+
+    def test_long_string_truncated(self):
+        from scripts.v2.rag_v2 import _truncate_for_render, RENDER_STR_CAP
+        data = {"snippet": "x" * 5000}
+        out = _truncate_for_render(data)
+        self.assertLess(len(out["snippet"]), 6000)
+        self.assertIn("truncated", out["snippet"])
+
+    def test_scalar_passthrough(self):
+        from scripts.v2.rag_v2 import _truncate_for_render
+        self.assertEqual(_truncate_for_render(42), 42)
+        self.assertEqual(_truncate_for_render(3.14), 3.14)
+        self.assertEqual(_truncate_for_render(None), None)
+
+    def test_deeply_nested_truncation_respects_depth_cap(self):
+        from scripts.v2.rag_v2 import _truncate_for_render
+        # Build 10-level nest — function should bail at depth 6 to
+        # avoid pathological cases.
+        deep = "leaf"
+        for _ in range(10):
+            deep = {"x": deep}
+        out = _truncate_for_render(deep)
+        # No crash; output exists
+        self.assertIsNotNone(out)
+
+
+class RepeatShortCircuit(unittest.TestCase):
+    """Stan 2026-05-20 demo: «повтори» triggered v4 LLM-planner which
+    returned a CLARIFY IN ARABIC. Correct behavior: return last
+    assistant turn verbatim, no LLM call."""
+
+    def test_is_repeat_request_basic(self):
+        from scripts.v2.planner.history import is_repeat_request
+        self.assertTrue(is_repeat_request("повтори"))
+        self.assertTrue(is_repeat_request("повторите"))
+        self.assertTrue(is_repeat_request("repeat"))
+        self.assertTrue(is_repeat_request("repeat?"))
+        self.assertTrue(is_repeat_request("снова"))
+        self.assertTrue(is_repeat_request("say it again"))
+
+    def test_is_repeat_request_not_basic(self):
+        from scripts.v2.planner.history import is_repeat_request
+        self.assertFalse(is_repeat_request("повтори это пожалуйста"))
+        self.assertFalse(is_repeat_request("сравни По и Лавкрафта"))
+        self.assertFalse(is_repeat_request(""))
+
+    def test_last_assistant_message(self):
+        from scripts.v2.planner.history import last_assistant_message
+        h = [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "q2"},
+            {"role": "assistant", "content": "a2 (latest)"},
+        ]
+        self.assertEqual(last_assistant_message(h), "a2 (latest)")
+
+    def test_last_assistant_message_empty_history(self):
+        from scripts.v2.planner.history import last_assistant_message
+        self.assertIsNone(last_assistant_message(None))
+        self.assertIsNone(last_assistant_message([]))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

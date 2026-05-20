@@ -270,6 +270,36 @@ def is_expansion_followup(text: str) -> bool:
     return bool(_EXPAND_PATTERNS.search(text))
 
 
+# Sprint 22+ Round 12 post-deploy — «повтори / repeat» short-circuit.
+# Stan 2026-05-20: «повтори» triggered v4 LLM-planner which returned
+# a clarify text IN ARABIC because qwen3:14b on very short inputs
+# picks a random target language. Correct behavior: surface the
+# last assistant message verbatim, no LLM call needed.
+_REPEAT_PATTERNS = re.compile(
+    r"^\s*(?:повтори(те)?|repeat|снова|перепиши|перескажи|"
+    r"say\s+(it\s+)?again|повтор)\s*[?.!]?\s*$",
+    re.IGNORECASE,
+)
+
+
+def is_repeat_request(text: str) -> bool:
+    """True iff message is a bare «повтори / repeat / снова»."""
+    return bool(_REPEAT_PATTERNS.search(text or ""))
+
+
+def last_assistant_message(history: list[dict] | None) -> str | None:
+    """Return content of the most recent assistant turn, if any.
+    Used by the repeat-request short-circuit."""
+    if not history:
+        return None
+    for msg in reversed(history):
+        if msg.get("role") == "assistant":
+            content = msg.get("content")
+            if content and isinstance(content, str) and content.strip():
+                return content
+    return None
+
+
 def _scan_history_for_entities(history: list[dict]) -> Entities | None:
     """Re-extract entities from the most recent user message that had any.
 

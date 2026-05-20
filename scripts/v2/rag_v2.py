@@ -435,6 +435,52 @@ def _extract_retrieval_log(results: list[ToolResult],
     return rows or None
 
 
+# Sprint 22+ Round 12 follow-on — render-time data truncation.
+# Stan 2026-05-20: «200 фирменных слов Агаты Кристи» rendered as a
+# fabricated «Арт-Линия» press-release with bus routes 12-227 because
+# the 200-item affinity_by_author result exceeded qwen3:14b's num_ctx
+# and the model fell back to training-data confabulation.
+#
+# Defense: cap every list inside `data` to RENDER_LIST_CAP items
+# before serialization. Stamps `_truncated_to` so the renderer knows
+# to disclose. Preserves dict structure — we don't touch scalar
+# fields like cosine_similarity, year_from, etc.
+
+RENDER_LIST_CAP = 50      # items per list — comfortably under 8k ctx
+RENDER_STR_CAP  = 2000    # chars per string field — prevents one
+                          # gargantuan snippet eating the budget
+
+
+def _truncate_for_render(obj, _depth: int = 0):
+    """Recursively cap large lists/strings inside `obj` so the
+    serialized payload fits comfortably in num_ctx. Idempotent and
+    safe on non-collection inputs (returns them unchanged)."""
+    if _depth > 6:
+        return obj
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            out[k] = _truncate_for_render(v, _depth + 1)
+        return out
+    if isinstance(obj, list):
+        if len(obj) > RENDER_LIST_CAP:
+            head = [_truncate_for_render(x, _depth + 1)
+                    for x in obj[:RENDER_LIST_CAP]]
+            # Mark truncation inline so the renderer sees it even
+            # without reading the parent dict.
+            head.append({
+                "_truncated_to": RENDER_LIST_CAP,
+                "_original_length": len(obj),
+                "_note": (f"list truncated to {RENDER_LIST_CAP} of "
+                          f"{len(obj)} items for num_ctx safety"),
+            })
+            return head
+        return [_truncate_for_render(x, _depth + 1) for x in obj]
+    if isinstance(obj, str) and len(obj) > RENDER_STR_CAP:
+        return obj[:RENDER_STR_CAP] + f"…[truncated, {len(obj)} chars]"
+    return obj
+
+
 def _llm_render(question: str, plan: plan_mod.QueryPlan,
                 results: list[ToolResult], *, model: str,
                 ollama_host: str,
@@ -476,7 +522,15 @@ def _llm_render(question: str, plan: plan_mod.QueryPlan,
             {
                 "tool": r.tool,
                 "query": r.query,
-                "data": r.data,
+                # Sprint 22+ Round 12 follow-on: cap large list fields
+                # before render to keep num_ctx under control. Stan
+                # 2026-05-20: «200 фирменных слов Кристи» → 200-item
+                # affinity result overflowed qwen3:14b context and
+                # rendered text about an art gallery (training-data
+                # hallucination). _truncate_for_render caps any list
+                # at 50 items + stamps `_truncated_to` so renderer
+                # knows to disclose.
+                "data": _truncate_for_render(r.data),
                 "warnings": [{"code": w.code, "message": w.message}
                              for w in r.warnings],
                 "coverage": {"books_matched": r.coverage.books_matched,
@@ -532,6 +586,37 @@ def ask(
     {"answer", "tool_calls", "iterations", "model", "elapsed_sec", "intent"}
     """
     t0 = time.perf_counter()
+
+    # Sprint 22+ Round 12 post-deploy — «повтори / repeat» short-circuit.
+    # Stan 2026-05-20: «повтори» without other context triggered v4
+    # LLM-planner which returned a CLARIFY IN ARABIC because qwen3:14b
+    # on bare ultra-short input picks a random target language. The
+    # correct behavior is trivial: return the previous assistant turn
+    # verbatim. No LLM, no router, no risk of language drift.
+    if history_mod.is_repeat_request(question):
+        prev = history_mod.last_assistant_message(history)
+        if prev:
+            return {
+                "answer": prev,
+                "tool_calls": [],
+                "iterations": 0,
+                "model": model,
+                "elapsed_sec": round(time.perf_counter() - t0, 2),
+                "intent": "repeat",
+                "intent_confidence": 1.0,
+                "via": "repeat-shortcut",
+            }
+        # No prior — fall through to clarify
+        return {
+            "answer": "Пока нечего повторить — задай свой первый вопрос.",
+            "tool_calls": [],
+            "iterations": 0,
+            "model": model,
+            "elapsed_sec": round(time.perf_counter() - t0, 2),
+            "intent": "clarify",
+            "intent_confidence": 1.0,
+            "via": "repeat-no-history",
+        }
 
     # Sprint 20+ — v4 LLM planner takes over for follow-up turns when
     # the feature flag is on. Stan 2026-05-19 («отдать всё v4 для
@@ -966,6 +1051,20 @@ def ask_stream(
     """SSE events compatible with v1 plus v2-specific intent/plan/clarify."""
     yield {"event": "start"}
     t0 = time.perf_counter()
+
+    # Sprint 22+ Round 12 post-deploy — «повтори / repeat» short-circuit
+    # (stream variant). Same defense as ask() — no LLM, no router, no
+    # language drift risk. Emit minimal SSE events so the UI flows.
+    if history_mod.is_repeat_request(question):
+        prev = history_mod.last_assistant_message(history)
+        text = prev or "Пока нечего повторить — задай свой первый вопрос."
+        yield {"event": "intent", "label": "repeat", "confidence": 1.0,
+               "via": "repeat-shortcut"}
+        yield {"event": "answer", "text": text}
+        yield {"event": "done", "tool_calls": [], "iterations": 0,
+               "elapsed_sec": round(time.perf_counter() - t0, 2),
+               "intent": "repeat"}
+        return
 
     # Sprint 20+ — v4 LLM planner takes the followup path. See `ask()`
     # for the architectural decision. Mirrors the same gating logic;
