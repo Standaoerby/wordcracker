@@ -53,6 +53,28 @@ _REF_TRIGGERS = re.compile(
     re.IGNORECASE,
 )
 
+
+# Sprint 22+ Round 12 post-deploy: affirmative-opener followups. Stan
+# 2026-05-20 demo: «**да** конкретные произведения, в которых встречается
+# имя Anna» (after a previous Anna query) — lexically NOT a followup
+# (no эти/их/такие), so _looks_like_followup returned False, v4
+# main-planner ran without followup-context flag and clarified out.
+# Treat «да X» / «yes X» / «yeah X» / «угу X» / «ок X» at the start
+# of a message as a followup signal so the v4 followup branch (which
+# DOES pass history with the table-extraction context) fires.
+_AFFIRMATIVE_OPENER = re.compile(
+    r"^\s*(да|ага|угу|ок(ей)?|давай|yes|yeah|yep|sure|okay|ok)\b"
+    r"[\s,]+\w",   # must be followed by actual content, not bare «да»
+    re.IGNORECASE,
+)
+
+
+def _is_affirmative_opener_followup(text: str) -> bool:
+    """True when message starts with an affirmative («да», «yes», ...)
+    followed by content. Stan 2026-05-20: «да конкретные произведения...»
+    after an Anna query slid past _looks_like_followup; this catches it."""
+    return bool(_AFFIRMATIVE_OPENER.search(text))
+
 # Stan round 5 critical finding: «теперь у Диккенса» / «а у X» / «давай
 # теперь Толстого» — explicit context-swap follow-up that the main
 # `\b...\b` alternation pattern can't catch because trailing `\b`
@@ -229,7 +251,8 @@ def _looks_like_followup(text: str) -> bool:
     return bool(_REF_TRIGGERS.search(text) or _CONTEXT_SWAP_TRIGGERS.search(text)
                 or _PROPN_REMOVAL_PATTERNS.search(text)
                 or _is_translate_followup(text)
-                or _is_export_followup(text))
+                or _is_export_followup(text)
+                or _is_affirmative_opener_followup(text))
 
 
 def _is_context_swap(text: str) -> bool:

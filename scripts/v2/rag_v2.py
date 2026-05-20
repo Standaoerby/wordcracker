@@ -714,10 +714,48 @@ def ask(
                 plan = rr_v4.plan
                 rr = rr_v4
             elif pres is not None and pres.clarify:
-                # LLM declined — replace the generic clarify with the
-                # specific question it asked.
-                plan.clarify_question = pres.clarify
-                v4_planner_report = pres
+                # Sprint 22+ Round 12: when v4 main-planner gives up,
+                # try v3 rules (infer_followup_intent) before accepting
+                # the v4 clarify. Stan 2026-05-20: «да конкретные
+                # произведения, в которых встречается имя Anna» was
+                # semantically a followup but lexically slid past
+                # _looks_like_followup → v4 main fired without followup
+                # context → clarified out. With «да X» now in followup
+                # triggers, infer_followup_intent may resolve it here.
+                v3_intent_label = None
+                try:
+                    inferred = history_mod.infer_followup_intent(
+                        question, history)
+                    if inferred and inferred not in ("clarify",):
+                        v3_intent_label = inferred
+                except Exception:
+                    log.exception("v3 main-planner fallback failed")
+                if v3_intent_label:
+                    v3_entities = ent_mod.extract(question)
+                    v3_entities = history_mod.merge_with_history(
+                        v3_entities, history or [], question)
+                    try:
+                        v3_plan = plan_mod.build(v3_intent_label, v3_entities)
+                    except Exception:
+                        log.exception("v3 plan build failed (main)")
+                        v3_plan = None
+                    if v3_plan and not v3_plan.needs_clarify and v3_plan.steps:
+                        # v3 has a real plan — use it instead of v4 clarify
+                        intent = int_mod.IntentMatch(
+                            label=v3_intent_label, confidence=0.7,
+                            matched_pattern="v4-main-clarify-then-v3-rescue",
+                        )
+                        entities = v3_entities
+                        plan = v3_plan
+                        v4_planner_report = pres
+                    else:
+                        plan.clarify_question = pres.clarify
+                        v4_planner_report = pres
+                else:
+                    # LLM declined — replace the generic clarify with the
+                    # specific question it asked.
+                    plan.clarify_question = pres.clarify
+                    v4_planner_report = pres
 
     if plan.needs_clarify and not v4_planner_used:
         clarify_answer = plan.clarify_question or "Уточни запрос."

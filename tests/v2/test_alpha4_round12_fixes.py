@@ -299,5 +299,45 @@ class CIA_AnonymousAuthorsDropped(unittest.TestCase):
         self.assertEqual(dropped, 2)
 
 
+class AffirmativeOpenerFollowup(unittest.TestCase):
+    """Stan 2026-05-20 demo: «да конкретные произведения, в которых
+    встречается имя Anna» (after Anna query) — semantically a followup
+    but lexically NO emotional/reference triggers. New rule: messages
+    that START with «да» / «yes» / «yeah» / «угу» / «ок» followed by
+    content are followups."""
+
+    def test_da_konkretnye_is_followup(self):
+        from scripts.v2.planner.history import _looks_like_followup
+        self.assertTrue(_looks_like_followup(
+            "да конкретные произведения, в которых встречается имя Anna"))
+
+    def test_yes_show_more_is_followup(self):
+        from scripts.v2.planner.history import _looks_like_followup
+        self.assertTrue(_looks_like_followup("yes, show more examples"))
+
+    def test_yeah_followup(self):
+        from scripts.v2.planner.history import _looks_like_followup
+        self.assertTrue(_looks_like_followup("yeah more please"))
+
+    def test_ok_davai(self):
+        from scripts.v2.planner.history import _looks_like_followup
+        self.assertTrue(_looks_like_followup("ок давай примеры"))
+
+    def test_bare_da_is_not_followup(self):
+        """«да» alone is too short to be a meaningful followup — should
+        not trigger to avoid clarify confusion. Need at least one word
+        of content after."""
+        from scripts.v2.planner.history import _looks_like_followup
+        # No content after, just particle
+        self.assertFalse(_looks_like_followup("да"))
+        self.assertFalse(_looks_like_followup("да."))
+        self.assertFalse(_looks_like_followup("yes"))
+
+    def test_unrelated_no_da_is_not_followup(self):
+        from scripts.v2.planner.history import _looks_like_followup
+        self.assertFalse(_looks_like_followup("сравни По и Лавкрафта"))
+        self.assertFalse(_looks_like_followup("найди слово ajar"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
