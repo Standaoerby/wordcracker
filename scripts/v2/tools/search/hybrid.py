@@ -129,19 +129,51 @@ def hybrid_search(query: str, k: int = 12, per_retriever: int = 50,
     pool_size = min(len(fused), max(k * 2, 30)) if rerank_with else k
     top = fused[:pool_size]
 
+    # Sprint 21+ B100 v2 — lazy v1-metadata lookup helper for ultimate
+    # title fallback. Used when neither lex nor sem carries title (e.g.
+    # cached lexical results from before alpha3, or an exotic edge case).
+    # Import here so the test path that mocks dispatch doesn't pay the
+    # v1 metadata-load cost on every hybrid call.
+    _meta_cache: dict = {}
+    def _meta_lookup(pid: str) -> dict:
+        if not pid:
+            return {}
+        if pid in _meta_cache:
+            return _meta_cache[pid]
+        try:
+            from scripts.v2.tools.search.lexical import _title_lookup
+            lookup = _title_lookup()
+            entry = lookup.get(str(pid), {}) or {}
+        except Exception:
+            entry = {}
+        _meta_cache[pid] = entry
+        return entry
+
     out_matches = []
     for pg, score, lm, sm in top:
-        # Sprint 21+ B100 hotfix — title/author can come from EITHER side:
-        # lexical_search (alpha3 patch attaches them via v1 metadata
-        # lookup) or semantic_search (chunk metadata from ChromaDB).
-        # Stan 2026-05-20 prod screenshot: «ajar» query lexical-only
-        # matches surfaced PG65232/PG13304/PG14663 with no titles because
-        # this merge dropped lm.title and sm was empty. Now try both
-        # sides; semantic side wins on tie (chunk metadata is what
-        # the rest of the pipeline expects).
-        sm_meta = sm.get("metadata") if isinstance(sm.get("metadata"), dict) else {}
-        title = (sm_meta.get("title") if sm_meta else None) or lm.get("title")
-        author = (sm_meta.get("author") if sm_meta else None) or lm.get("author")
+        # Sprint 21+ B100 hotfix v2 — title/author come from THREE places,
+        # in priority order:
+        #   1) semantic_search v1 puts title/author at TOP LEVEL of each
+        #      result (scripts/rag_tools.py lines 419-426). NOT nested
+        #      under metadata. My earlier alpha3 fix looked in the wrong
+        #      key, which is why prod still showed PG ids only.
+        #   2) lexical_search (post-alpha3 patch) puts title/author at
+        #      top level after v1 metadata lookup.
+        #   3) Ultimate fallback: do the v1 metadata lookup HERE at merge
+        #      time. Catches old cached results that pre-date the
+        #      lexical_search title-attach patch.
+        title = (
+            sm.get("title")
+            or (sm.get("metadata") or {}).get("title")    # defensive
+            or lm.get("title")
+            or _meta_lookup(pg).get("title")
+        )
+        author = (
+            sm.get("author")
+            or (sm.get("metadata") or {}).get("author")
+            or lm.get("author")
+            or _meta_lookup(pg).get("author")
+        )
         out_matches.append({
             "pg_id": pg,
             "rrf_score": round(score, 6),
