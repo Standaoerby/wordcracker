@@ -39,3 +39,9 @@ services:
       # Lower budgeted utilization = lower confabulation risk.
       # Set to 32768 if VRAM allows and longer queries are common.
       - WC_OLLAMA_NUM_CTX=16384
+      # Sprint 20+ alpha1 — v4 LLM planner (qwen3:14b with format=json,
+      # PlanSpec DAG) takes over for followup turns (Stan's Path 3) +
+      # compound queries. Closes R12 Q11/Q12 (translate / export
+      # followup) and R13 Q17 (Hemingway copyright). On since R12-R13
+      # transition; committed here so future `git pull` doesn't wipe it.
+      - WC_LLM_PLANNER=on
