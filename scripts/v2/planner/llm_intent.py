@@ -212,6 +212,12 @@ def classify_with_llm(text: str, history: list[dict] | None = None
                     )
                 break
 
+    # Sprint 22+ alpha5 — Token Budget. Intent classification has
+    # minimal payload (system prompt ~3k tok + short user message)
+    # so usually low risk, but we pass explicit num_ctx for consistency
+    # across all Ollama callers.
+    from scripts.v2.token_budget import TokenBudget
+    _budget = TokenBudget(model=LLM_INTENT_MODEL)
     payload = {
         "model": LLM_INTENT_MODEL,
         "messages": [
@@ -219,7 +225,10 @@ def classify_with_llm(text: str, history: list[dict] | None = None
             {"role": "user", "content": user_msg},
         ],
         "stream": False,
-        "options": {"temperature": 0.0, "num_predict": 16},
+        "options": {
+            "temperature": 0.0, "num_predict": 16,
+            "num_ctx": _budget.ctx,
+        },
         "keep_alive": -1,
     }
     t0 = time.perf_counter()

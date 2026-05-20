@@ -412,14 +412,16 @@ class RenderTruncation(unittest.TestCase):
     before serialization."""
 
     def test_long_list_truncated_to_cap(self):
-        from scripts.v2.rag_v2 import _truncate_for_render, RENDER_LIST_CAP
+        # alpha5: _truncate_for_render now uses cap=50 internally via
+        # TokenBudget helpers (no module-level constant).
+        from scripts.v2.rag_v2 import _truncate_for_render
         data = {"top": [{"word": f"w{i}", "affinity": i}
                          for i in range(200)]}
         out = _truncate_for_render(data)
-        # Cap + 1 truncation-note item
-        self.assertEqual(len(out["top"]), RENDER_LIST_CAP + 1)
+        # cap=50 + 1 truncation-note item
+        self.assertEqual(len(out["top"]), 51)
         marker = out["top"][-1]
-        self.assertEqual(marker["_truncated_to"], RENDER_LIST_CAP)
+        self.assertEqual(marker["_truncated_to"], 50)
         self.assertEqual(marker["_original_length"], 200)
 
     def test_short_list_not_truncated(self):
@@ -431,10 +433,11 @@ class RenderTruncation(unittest.TestCase):
         self.assertNotIn("_truncated_to", out["top"][-1])
 
     def test_long_string_truncated(self):
-        from scripts.v2.rag_v2 import _truncate_for_render, RENDER_STR_CAP
+        from scripts.v2.rag_v2 import _truncate_for_render
         data = {"snippet": "x" * 5000}
         out = _truncate_for_render(data)
-        self.assertLess(len(out["snippet"]), 6000)
+        # alpha5: cap=2000 chars via TokenBudget _cap_strings
+        self.assertLess(len(out["snippet"]), 2100)
         self.assertIn("truncated", out["snippet"])
 
     def test_scalar_passthrough(self):

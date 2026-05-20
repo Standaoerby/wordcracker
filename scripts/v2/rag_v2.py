@@ -435,50 +435,28 @@ def _extract_retrieval_log(results: list[ToolResult],
     return rows or None
 
 
-# Sprint 22+ Round 12 follow-on — render-time data truncation.
-# Stan 2026-05-20: «200 фирменных слов Агаты Кристи» rendered as a
-# fabricated «Арт-Линия» press-release with bus routes 12-227 because
-# the 200-item affinity_by_author result exceeded qwen3:14b's num_ctx
-# and the model fell back to training-data confabulation.
+# Sprint 22+ alpha5 — render-time token budget (replaces alpha4 magic-
+# number truncation). See scripts/v2/token_budget.py for design.
+# Stan 2026-05-20 Christie case: 200-item tool result blew num_ctx →
+# confabulation. The TokenBudget layer adaptively shrinks payload via
+# a 7-step ladder until it fits OR exhausts options (then honest fail).
 #
-# Defense: cap every list inside `data` to RENDER_LIST_CAP items
-# before serialization. Stamps `_truncated_to` so the renderer knows
-# to disclose. Preserves dict structure — we don't touch scalar
-# fields like cosine_similarity, year_from, etc.
+# Public alias `_truncate_for_render` kept for backwards-compat with
+# tests; delegates to TokenBudget for actual work. Magic constants
+# RENDER_LIST_CAP/RENDER_STR_CAP gone — budget is dynamic per call.
 
-RENDER_LIST_CAP = 50      # items per list — comfortably under 8k ctx
-RENDER_STR_CAP  = 2000    # chars per string field — prevents one
-                          # gargantuan snippet eating the budget
+from scripts.v2.token_budget import TokenBudget, ShrinkReport
 
 
 def _truncate_for_render(obj, _depth: int = 0):
-    """Recursively cap large lists/strings inside `obj` so the
-    serialized payload fits comfortably in num_ctx. Idempotent and
-    safe on non-collection inputs (returns them unchanged)."""
-    if _depth > 6:
-        return obj
-    if isinstance(obj, dict):
-        out = {}
-        for k, v in obj.items():
-            out[k] = _truncate_for_render(v, _depth + 1)
-        return out
-    if isinstance(obj, list):
-        if len(obj) > RENDER_LIST_CAP:
-            head = [_truncate_for_render(x, _depth + 1)
-                    for x in obj[:RENDER_LIST_CAP]]
-            # Mark truncation inline so the renderer sees it even
-            # without reading the parent dict.
-            head.append({
-                "_truncated_to": RENDER_LIST_CAP,
-                "_original_length": len(obj),
-                "_note": (f"list truncated to {RENDER_LIST_CAP} of "
-                          f"{len(obj)} items for num_ctx safety"),
-            })
-            return head
-        return [_truncate_for_render(x, _depth + 1) for x in obj]
-    if isinstance(obj, str) and len(obj) > RENDER_STR_CAP:
-        return obj[:RENDER_STR_CAP] + f"…[truncated, {len(obj)} chars]"
-    return obj
+    """Compatibility shim — applies a generic cap (50 lists, 2000
+    strings) via TokenBudget helpers without computing actual budget.
+    Used by tests that pre-date the budget API.
+    """
+    from scripts.v2.token_budget import _cap_lists, _cap_strings
+    out, _ = _cap_lists(obj, cap=50)
+    out, _ = _cap_strings(out, cap=2000)
+    return out
 
 
 def _llm_render(question: str, plan: plan_mod.QueryPlan,
@@ -522,15 +500,7 @@ def _llm_render(question: str, plan: plan_mod.QueryPlan,
             {
                 "tool": r.tool,
                 "query": r.query,
-                # Sprint 22+ Round 12 follow-on: cap large list fields
-                # before render to keep num_ctx under control. Stan
-                # 2026-05-20: «200 фирменных слов Кристи» → 200-item
-                # affinity result overflowed qwen3:14b context and
-                # rendered text about an art gallery (training-data
-                # hallucination). _truncate_for_render caps any list
-                # at 50 items + stamps `_truncated_to` so renderer
-                # knows to disclose.
-                "data": _truncate_for_render(r.data),
+                "data": r.data,
                 "warnings": [{"code": w.code, "message": w.message}
                              for w in r.warnings],
                 "coverage": {"books_matched": r.coverage.books_matched,
@@ -542,6 +512,28 @@ def _llm_render(question: str, plan: plan_mod.QueryPlan,
             for r in results
         ],
     }
+
+    # Sprint 22+ alpha5 — Token Budget Layer. Adaptive shrink before
+    # send to Ollama. Replaces alpha4 hard-capped _truncate_for_render
+    # which used magic numbers irrespective of actual ctx pressure.
+    # Budget = ctx - headroom (default 1500 for response). When fits,
+    # zero work. When over, ladder kicks in. When ladder exhausts,
+    # report.fits=False — we log WARN but still attempt (phase-1
+    # transitional; phase-4 will hard-fail).
+    budget = TokenBudget(model=model)
+    summary_payload, shrink_report = budget.shrink_to_fit(summary_payload)
+    if shrink_report.actions:
+        log.info("renderer shrink applied: %s (initial=%d → final=%d, "
+                 "budget=%d, util=%d%%)",
+                 shrink_report.actions, shrink_report.initial_tokens,
+                 shrink_report.final_tokens, shrink_report.budget,
+                 shrink_report.utilization_pct())
+    if not shrink_report.fits:
+        log.warning("renderer payload STILL over budget after ladder "
+                    "exhausted: %s (estimate=%d, budget=%d)",
+                    shrink_report.actions, shrink_report.final_tokens,
+                    shrink_report.budget)
+
     messages = [
         {"role": "system", "content": RENDER_PROMPT.format(name=ASSISTANT_NAME)},
         {"role": "user", "content": question},
@@ -555,7 +547,12 @@ def _llm_render(question: str, plan: plan_mod.QueryPlan,
         "messages": messages,
         "stream": False,
         "keep_alive": -1,
-        "options": {"temperature": 0.3},
+        # Sprint 22+ alpha5: explicit num_ctx in options. Without this,
+        # Ollama uses whatever default is baked into the model
+        # (typically 8192 for qwen3:14b). With WC_OLLAMA_NUM_CTX set
+        # (env or default 16384 in MODEL_CTX_DEFAULTS), we get a
+        # bigger window and matching budget.
+        "options": {"temperature": 0.3, "num_ctx": budget.ctx},
         "think": False,
     }
     resp = requests.post(f"{ollama_host}/api/chat", json=payload, timeout=120)
@@ -567,6 +564,10 @@ def _llm_render(question: str, plan: plan_mod.QueryPlan,
         "eval_tokens":   body.get("eval_count"),
         "total_duration_ns": body.get("total_duration"),
         "load_duration_ns":  body.get("load_duration"),
+        # Sprint 22+ alpha5 — token-budget observability per call.
+        # Admin dashboard can plot utilization trends + correlate
+        # confabulation_risk:high with user-reported bad answers.
+        **budget.to_log_dict(shrink_report),
     }
     return text, meta
 

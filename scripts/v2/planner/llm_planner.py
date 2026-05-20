@@ -336,6 +336,15 @@ def plan_query(text: str, *,
 def _call_ollama(user_msg: str) -> str:
     """Single Ollama chat call with format=json. Returns content text
     (may or may not be valid JSON; parser decides)."""
+    # Sprint 22+ alpha5 — Token Budget. v4 planner prompt is mostly
+    # the system message (tool catalog ~13KB + few-shot examples
+    # ~5KB) which is fixed. The variable part is user_msg (history
+    # context + current query, already pruned at call site). We pass
+    # explicit num_ctx so Ollama allocates a sufficient window;
+    # otherwise it falls back to model default (8k for qwen3:14b)
+    # which barely fits the system prompt.
+    from scripts.v2.token_budget import TokenBudget
+    budget = TokenBudget(model=LLM_PLANNER_MODEL)
     payload = {
         "model": LLM_PLANNER_MODEL,
         "messages": [
@@ -347,6 +356,7 @@ def _call_ollama(user_msg: str) -> str:
         "options": {
             "temperature": 0.0,
             "num_predict": LLM_PLANNER_NUM_PREDICT,
+            "num_ctx": budget.ctx,
         },
         "keep_alive": -1,
     }

@@ -190,6 +190,24 @@ def review(answer: str, tool_results_summary: list[dict], *,
     payload_for_critic = _build_payload_for_critic(
         answer, tool_results_summary, intent)
 
+    # Sprint 22+ alpha5 — Token Budget Layer. Critic was overflow-prone
+    # on large tool_results just like the renderer (Stan Christie case
+    # had critic clean ⇒ critic also confabulating). Now adaptive
+    # shrink before the request goes to Ollama, plus explicit num_ctx.
+    from scripts.v2.token_budget import TokenBudget
+    budget = TokenBudget(model=model)
+    payload_for_critic, shrink_report = budget.shrink_to_fit(payload_for_critic)
+    if shrink_report.actions:
+        log.info("critic shrink applied: %s (initial=%d → final=%d, "
+                 "util=%d%%)",
+                 shrink_report.actions, shrink_report.initial_tokens,
+                 shrink_report.final_tokens,
+                 shrink_report.utilization_pct())
+    if not shrink_report.fits:
+        log.warning("critic payload over budget after ladder: "
+                    "est=%d, budget=%d (still attempting)",
+                    shrink_report.final_tokens, shrink_report.budget)
+
     messages = [
         {"role": "system", "content": _CRITIC_PROMPT},
         {"role": "user", "content": "Контекст:\n```json\n"
@@ -202,7 +220,7 @@ def review(answer: str, tool_results_summary: list[dict], *,
         "messages": messages,
         "stream": False,
         "keep_alive": -1,
-        "options": {"temperature": 0.1},
+        "options": {"temperature": 0.1, "num_ctx": budget.ctx},
         "think": False,
         "format": "json",
     }
