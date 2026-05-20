@@ -80,6 +80,94 @@ class B100_LexicalSearchTitleEnrichment(unittest.TestCase):
         self.assertNotIn("title", m)
 
 
+class B100_HybridSearchMergesTitleFromLexical(unittest.TestCase):
+    """Stan prod 2026-05-20 evening: «примеры ajar» surfaced PG65232 /
+    PG13304 / PG14663 without titles. Root cause: hybrid_search merge
+    took title only from semantic side; lexical-only matches lost their
+    titles even though alpha3 lexical_search attaches them.
+
+    The fix: hybrid_search now reads title/author from EITHER side,
+    semantic-first, lexical fallback.
+    """
+
+    def test_lexical_only_match_keeps_title(self):
+        from scripts.v2.tools.search import hybrid
+        # Lexical returned a match WITH title (alpha3 enrichment);
+        # semantic returned nothing for this pg_id.
+        lex_result = ToolResult.success(
+            tool="lexical_search",
+            data={"matches": [
+                {"pg_id": "PG13304", "score": -1.2,
+                 "snippet": "[ajar]", "title": "The Gates Ajar",
+                 "author": "Phelps, Elizabeth Stuart"},
+            ]},
+            coverage=Coverage(books_matched=1, books_total=-1),
+        )
+        # Semantic returned nothing
+        sem_result = ToolResult.success(
+            tool="semantic_search",
+            data={"results": []},
+            coverage=Coverage(books_matched=0, books_total=-1),
+        )
+        # Dispatch shim — return appropriate fake per name.
+        def fake_v2_dispatch(name, args):
+            if name == "lexical_search":
+                return lex_result
+            raise AssertionError(f"unexpected v2_dispatch({name})")
+        def fake_dispatch_any(name, args):
+            if name == "semantic_search":
+                return sem_result
+            raise AssertionError(f"unexpected dispatch_any({name})")
+        with mock.patch.object(hybrid, "v2_dispatch", side_effect=fake_v2_dispatch), \
+             mock.patch.object(hybrid, "dispatch_any", side_effect=fake_dispatch_any):
+            r = hybrid.hybrid_search("ajar", k=5)
+        matches = r.data["matches"]
+        self.assertEqual(len(matches), 1)
+        m = matches[0]
+        self.assertEqual(m["pg_id"], "PG13304")
+        # Title MUST be preserved from lexical side
+        self.assertEqual(m["title"], "The Gates Ajar")
+        self.assertEqual(m["author"], "Phelps, Elizabeth Stuart")
+
+    def test_semantic_title_wins_when_both_sides_have_one(self):
+        """Semantic title takes precedence — it's the chunk-level metadata
+        which is what downstream tools (e.g. find_book_by_topic) already
+        consume as source of truth."""
+        from scripts.v2.tools.search import hybrid
+        lex_result = ToolResult.success(
+            tool="lexical_search",
+            data={"matches": [
+                {"pg_id": "PG2554", "score": -1.0,
+                 "snippet": "[axe]",
+                 "title": "Crime and Punishment (lexical)",
+                 "author": "lex-author"},
+            ]},
+            coverage=Coverage(books_matched=1, books_total=-1),
+        )
+        sem_result = ToolResult.success(
+            tool="semantic_search",
+            data={"results": [
+                {"pg_id": "PG2554", "text": "axe semantic",
+                 "metadata": {"title": "Crime and Punishment",
+                              "author": "Dostoyevsky, Fyodor"}},
+            ]},
+            coverage=Coverage(books_matched=1, books_total=-1),
+        )
+        def fake_v2_dispatch(name, args):
+            if name == "lexical_search":
+                return lex_result
+        def fake_dispatch_any(name, args):
+            if name == "semantic_search":
+                return sem_result
+        with mock.patch.object(hybrid, "v2_dispatch", side_effect=fake_v2_dispatch), \
+             mock.patch.object(hybrid, "dispatch_any", side_effect=fake_dispatch_any):
+            r = hybrid.hybrid_search("axe", k=3)
+        m = r.data["matches"][0]
+        # Semantic wins
+        self.assertEqual(m["title"], "Crime and Punishment")
+        self.assertEqual(m["author"], "Dostoyevsky, Fyodor")
+
+
 class B100_RenderPromptRule(unittest.TestCase):
     """RENDER_PROMPT must teach the LLM to prefer titles over PG ids."""
 

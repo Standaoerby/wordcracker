@@ -131,14 +131,25 @@ def hybrid_search(query: str, k: int = 12, per_retriever: int = 50,
 
     out_matches = []
     for pg, score, lm, sm in top:
+        # Sprint 21+ B100 hotfix — title/author can come from EITHER side:
+        # lexical_search (alpha3 patch attaches them via v1 metadata
+        # lookup) or semantic_search (chunk metadata from ChromaDB).
+        # Stan 2026-05-20 prod screenshot: «ajar» query lexical-only
+        # matches surfaced PG65232/PG13304/PG14663 with no titles because
+        # this merge dropped lm.title and sm was empty. Now try both
+        # sides; semantic side wins on tie (chunk metadata is what
+        # the rest of the pipeline expects).
+        sm_meta = sm.get("metadata") if isinstance(sm.get("metadata"), dict) else {}
+        title = (sm_meta.get("title") if sm_meta else None) or lm.get("title")
+        author = (sm_meta.get("author") if sm_meta else None) or lm.get("author")
         out_matches.append({
             "pg_id": pg,
             "rrf_score": round(score, 6),
             "lexical_rank": lex_ranks.get(pg),
             "semantic_rank": sem_ranks.get(pg),
             "snippet": lm.get("snippet") or sm.get("text") or sm.get("snippet"),
-            "title": sm.get("metadata", {}).get("title") if isinstance(sm.get("metadata"), dict) else None,
-            "author": sm.get("metadata", {}).get("author") if isinstance(sm.get("metadata"), dict) else None,
+            "title": title,
+            "author": author,
         })
 
     # Optional cross-encoder rerank — bi-encoder pool → cross-encoder top-k
