@@ -29,6 +29,13 @@ _LITERARY_PROPN_BLACKLIST = frozenset({
     "ernest", "algernon", "bunbury", "cecily", "gwendolen", "lady bracknell",
     "tetrarch", "cardew", "daubeny", "phipps", "simone", "symonds", "otis",
     "raff", "yeats", "topazes", "salome", "herodias", "lord goring",
+    # Sprint 22+ Round 12 Q10 — Wilde character names that slipped through:
+    # goring (Lord Goring — Ideal Husband), worthing (Jack Worthing —
+    # Earnest), chasuble (Canon Chasuble — Earnest). Plain surname forms.
+    "goring", "worthing", "chasuble", "prism",  # Miss Prism
+    "moncrieff", "fairfax",                       # other Earnest names
+    "wotton", "hallward", "sibyl",               # Dorian Gray
+    "windermere", "darlington", "berwick",       # Lady Windermere
     # «The Tempest» (Shakespeare) — Caliban, Prospero
     "caliban", "prospero", "ariel", "miranda",
     # Religious / classical proper nouns mis-tagged as ADJ

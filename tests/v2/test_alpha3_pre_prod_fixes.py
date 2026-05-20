@@ -504,11 +504,13 @@ class CacheKey_WrapperVersionInvalidation(unittest.TestCase):
         self.assertEqual(explicit, default)
 
     def test_bumped_tools_carry_new_version(self):
-        """The 3 tools I changed in alpha3 announce their new version
+        """Tools I changed in alpha3/alpha4 announce their new version
         so prod naturally rebuilds cache on next call instead of
-        serving stale data."""
+        serving stale data. alpha4 bumped hybrid_search again to add
+        lang post-filter (Round 12 B4)."""
         from scripts.v2.tool_registry import REGISTRY
-        self.assertEqual(REGISTRY["hybrid_search"].wrapper_version, "v2-titles")
+        # alpha4 bumped past v2-titles to v3-lang
+        self.assertEqual(REGISTRY["hybrid_search"].wrapper_version, "v3-lang")
         self.assertEqual(REGISTRY["lexical_search"].wrapper_version, "v2-titles")
         self.assertEqual(REGISTRY["compare_authors"].wrapper_version, "v2-autoretry")
 

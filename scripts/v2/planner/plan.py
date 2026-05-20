@@ -214,6 +214,112 @@ def _with_copyright_check(builder):
     return wrapped
 
 
+# Sprint 22+ Round 12 Q17 — per-author copyright OOS. Hemingway has
+# metadata in SPGC (resolve_author_name finds him) but no tokenized
+# books in /workspace/spgc (estate enforces copyright). When user
+# asks «vocab passport Hemingway» the resolver succeeds but tools
+# return empty → renderer hallucinated «not found», critic caught
+# the contradiction. Now we surface a graceful 3-part OOS instead,
+# matching the book-level B102 pattern.
+#
+# Inclusions: authors whose major works are still under US copyright
+# (typically died after 1929 for US, 1953 for UK life+70). Some have
+# scattered PG public-domain juvenilia but the corpus story is
+# «mostly absent». For these authors, return the OOS BEFORE running
+# heavy author-level tools and getting empty results.
+AUTHORS_UNDER_COPYRIGHT: frozenset[str] = frozenset({
+    # English/American — died 1950+, mostly under US copyright
+    "hemingway",
+    "steinbeck",
+    "faulkner",
+    "salinger",
+    "harper lee", "lee harper",
+    "fitzgerald",       # F. Scott Fitzgerald
+    "orwell",
+    "tolkien",
+    "lewis", "c.s. lewis",   # C.S. Lewis
+    "huxley",           # Aldous Huxley
+    "nabokov",
+    # Russian — modern Soviet/post-Soviet, no PG public-domain
+    "булгаков", "bulgakov",
+    "пастернак", "pasternak",
+    "solzhenitsyn", "солженицын",
+    "набоков",
+    # Add as observed
+})
+
+
+def _author_label_lc(e: Entities) -> str:
+    """Lowercase author label for copyright matching. Pulls from
+    e.author_label (canonical) or strips e.author_regex of regex
+    metachars."""
+    if e.author_label:
+        return e.author_label.lower().strip()
+    if e.author_regex:
+        # «^Hemingway,» → «hemingway»
+        import re as _re
+        cleaned = _re.sub(r"[\^$,\\.]", " ", e.author_regex).strip().lower()
+        # Take first token (surname usually)
+        return cleaned.split()[0] if cleaned.split() else ""
+    return ""
+
+
+def _copyright_refusal_if_author_under_copyright(e: Entities) -> QueryPlan | None:
+    """Stan Round 12 Q17 — per-author copyright OOS.
+
+    Returns a 3-part OOS QueryPlan (same shape as the book-level helper)
+    when the named author is in AUTHORS_UNDER_COPYRIGHT. Without this,
+    tools that lookup by author_regex returned empty (because copyright-
+    locked authors have no SPGC tokens), and the renderer fabricated
+    «not found» or empty content.
+
+    Returns None when the author is either public-domain or
+    unrecognized (clarify-class — book-level check still runs).
+    """
+    label = _author_label_lc(e)
+    if not label:
+        return None
+    # Match by token; e.g. «hemingway» catches «Hemingway, Ernest»
+    for locked in AUTHORS_UNDER_COPYRIGHT:
+        if locked in label or label in locked:
+            display = (e.author_label or label).strip()
+            return QueryPlan(
+                intent="out_of_scope", entities=e, steps=[],
+                out_of_scope_reason=(
+                    f"Стилометрический анализ {display} **недоступен в "
+                    f"каноническом корпусе**: его работы всё ещё под "
+                    f"защитой copyright (US ~1929 / UK life+70 — этот "
+                    f"автор не успел стать public-domain).\n\n"
+                    f"**Что доступно:**\n"
+                    f"• **Мета-информация** (биография, годы, число книг "
+                    f"в PG если есть юношеские public-domain работы);\n"
+                    f"• **Полный анализ из загруженных копий** — если "
+                    f"вы загрузили работы через `/admin/`, работаем "
+                    f"с U-id (fair use для исследовательских целей).\n\n"
+                    f"Без локальной загрузки vocab passport / affinity / "
+                    f"compare_authors не считаются — токенизированного "
+                    f"текста под этим автором в SPGC нет."
+                ),
+                explain=f"author under copyright: {label}",
+            )
+    return None
+
+
+def _with_author_copyright_check(builder):
+    """Decorator: short-circuit author-level plan builders with the
+    per-author copyright OOS when applicable. Apply to vocab_passport,
+    author_profile, author_vocab — anything that ASSUMES tokens exist
+    under e.author_regex."""
+    def wrapped(e: Entities) -> QueryPlan:
+        refusal = _copyright_refusal_if_author_under_copyright(e)
+        if refusal:
+            return refusal
+        return builder(e)
+    wrapped.__name__ = builder.__name__
+    wrapped.__doc__ = builder.__doc__
+    return wrapped
+
+
 def _need_word(e: Entities) -> QueryPlan:
     return QueryPlan(
         intent="clarify", entities=e, steps=[],
@@ -316,6 +422,7 @@ def _plan_corpus_meta(e: Entities) -> QueryPlan:
     )
 
 
+@_with_author_copyright_check
 def _plan_author_metadata(e: Entities) -> QueryPlan:
     if not e.author_regex:
         return _need_author(e)
@@ -402,6 +509,7 @@ def _plan_top_authors(e: Entities) -> QueryPlan:
     )
 
 
+@_with_author_copyright_check
 def _plan_author_top_words(e: Entities) -> QueryPlan:
     """«самое частотное слово автора» / «топ слов X» — raw unigram counts,
     not affinity. Routes to top_ngrams_by_author(n=1) so the user gets the
@@ -433,6 +541,7 @@ def _plan_author_top_words(e: Entities) -> QueryPlan:
 
 
 @_with_copyright_check
+@_with_author_copyright_check
 def _plan_author_vocab(e: Entities) -> QueryPlan:
     # Sprint 18 — book-scope override. «характерные прилагательные в
     # "Dorian Gray"» matched author_vocab intent (pattern «характерные
@@ -521,6 +630,7 @@ def _plan_book_compare(e: Entities) -> QueryPlan:
     )
 
 
+@_with_author_copyright_check
 def _plan_author_compare(e: Entities) -> QueryPlan:
     others = e.multi_author_regex
     if not e.author_regex or not others:
@@ -869,19 +979,25 @@ def _plan_word_contexts(e: Entities) -> QueryPlan:
     # word queries without author scope are the «расскажи мне про
     # слово X» case (Stan B101: «отдавать перевод слова, примеры в
     # контексте и этимологию» вместе).
+    # Sprint 22+ B4: pass lang_hint through so «английская классика»
+    # / «русский корпус» actually filter (Round 12 Q5 regression — 8/10
+    # results were Finnish/Hungarian/Italian without filter).
+    hs_args = {"query": e.word, "k": 12,
+               "per_retriever": 50,
+               "rerank_with": "bge_reranker"}
+    if e.lang_hint:
+        hs_args["lang"] = e.lang_hint
     return QueryPlan(
         intent="word_contexts", entities=e,
         steps=[
-            PlanStep(tool="hybrid_search",
-                     args={"query": e.word, "k": 12,
-                           "per_retriever": 50,
-                           "rerank_with": "bge_reranker"}),
+            PlanStep(tool="hybrid_search", args=hs_args),
             PlanStep(tool="enrich_word",
                      args={"word": e.word, "target_lang": "ru"},
                      optional=True),
         ],
         expected_cost="medium",
-        explain=(f"hybrid_search({e.word}) — FTS5+Chroma RRF + BGE rerank, "
+        explain=(f"hybrid_search({e.word}, lang={e.lang_hint or '*'}) "
+                 f"— FTS5+Chroma RRF + BGE rerank, "
                  f"+ enrich_word in parallel (translation+etymology)"),
     )
 
@@ -1357,6 +1473,7 @@ def _plan_lexical_wealth(e: Entities) -> QueryPlan:
     )
 
 
+@_with_author_copyright_check
 def _plan_vocab_passport(e: Entities) -> QueryPlan:
     if not e.author_regex:
         return _need_author(e)

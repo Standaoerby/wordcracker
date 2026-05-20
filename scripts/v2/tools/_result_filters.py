@@ -69,6 +69,17 @@ _NULL_AUTHOR_TOKENS = frozenset({
     "", "nan", "null", "none", "n/a", "na", "unknown",
     # Generic stand-ins that survive metadata cleaning
     "anonymous", "various", "(anonymous)", "(various)",
+    # Sprint 22+ Round 12 minor — institutional/agency «authors» that
+    # are aggregate buckets, not real writers. Stan Q1: CIA showed up
+    # as #3 in top_authors_by(metric=tokens) — millions of declassified
+    # PDFs released to Internet Archive collapse under one «author»
+    # field but it's not literary.
+    "central intelligence agency", "cia",
+    "united states", "u.s. government", "us government",
+    "great britain", "uk government",
+    "library of congress",
+    "internet archive",
+    "various authors", "miscellaneous",
 })
 
 

@@ -61,6 +61,12 @@ def _title_lookup() -> dict[str, dict[str, str]]:
         out: dict[str, dict[str, str]] = {}
         title_col = "title" if "title" in df.columns else None
         author_col = "author" if "author" in df.columns else None
+        # Sprint 22 B4: also pull `language` so hybrid_search can post-
+        # filter by lang_hint (Stan Round 12 Q5 — «английская классика»
+        # surfaced Finnish/Hungarian/Italian books because no lang
+        # filter was applied anywhere in the pipeline).
+        lang_col = next((c for c in ("language", "lang") if c in df.columns),
+                        None)
         id_col = "pg_id" if "pg_id" in df.columns else (
             "id" if "id" in df.columns else None)
         if id_col is None:
@@ -78,6 +84,11 @@ def _title_lookup() -> dict[str, dict[str, str]]:
                 a = row.get(author_col)
                 if a and not (isinstance(a, float) and a != a):
                     entry["author"] = str(a)
+            if lang_col:
+                lv = row.get(lang_col)
+                if lv and not (isinstance(lv, float) and lv != lv):
+                    # Normalize «en», «English», «en-US» → "en"
+                    entry["language"] = str(lv).lower().strip().split("-")[0][:3]
             if entry:
                 out[pid] = entry
         _TITLE_CACHE = out

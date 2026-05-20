@@ -54,20 +54,20 @@ def _rank_map(items: list[dict[str, Any]], key: str = "pg_id") -> dict[str, int]
             "per_retriever": {"type": "integer", "description": "k for each retriever before merge (default 50)"},
             "author_filter": {"type": "string", "description": "regex passed to semantic_search"},
             "rerank_with":   {"type": "string", "description": "plugin name from scoring.REGISTRY, e.g. 'bge_reranker' (slow but accurate)"},
+            "lang":          {"type": "string", "description": "post-filter matches to books in this ISO-639-1 lang (e.g. 'en'). Stan Round 12 B4."},
         },
         "required": ["query"],
     },
     requires=["word"],
     cost="medium",
     cacheable=True,
-    # Sprint 21+ Stan B100: output schema gained `title`/`author` fields
-    # on every match. Bump to invalidate pre-alpha3 cached entries that
-    # lack these fields.
-    wrapper_version="v2-titles",
+    # Sprint 22+ Stan B4: `lang` filter changes the output set. Bump.
+    wrapper_version="v3-lang",
 )
 def hybrid_search(query: str, k: int = 12, per_retriever: int = 50,
                   author_filter: str | None = None,
-                  rerank_with: str | None = None) -> ToolResult:
+                  rerank_with: str | None = None,
+                  lang: str | None = None) -> ToolResult:
     warnings: list[ToolWarning] = []
 
     # Lexical via v2 lexical_search
@@ -187,6 +187,32 @@ def hybrid_search(query: str, k: int = 12, per_retriever: int = 50,
             "title": title,
             "author": author,
         })
+
+    # Sprint 22+ Stan B4 — lang post-filter. Round 12 Q5: «английская
+    # классика» surfaced Finnish/Hungarian/Italian books because no
+    # filter applied anywhere. Now: when `lang` is set, drop matches
+    # whose book metadata.language doesn't match. Falls back to lookup
+    # via _meta_lookup helper (same v1 metadata cache used for titles).
+    lang_dropped = 0
+    if lang:
+        want = lang.lower().strip().split("-")[0][:3]
+        filtered: list[dict] = []
+        for m in out_matches:
+            meta = _meta_lookup(m["pg_id"])
+            book_lang = (meta.get("language") or "").lower().strip()
+            # Books with no language metadata are kept (better than
+            # over-aggressive filter). Books with mismatched lang are
+            # dropped — this is the actual user-visible fix.
+            if not book_lang or book_lang == want:
+                filtered.append(m)
+            else:
+                lang_dropped += 1
+        out_matches = filtered
+    if lang_dropped:
+        warnings.append(ToolWarning(
+            code="lang_filtered",
+            message=f"dropped {lang_dropped} matches not in lang={lang!r}",
+        ))
 
     # Optional cross-encoder rerank — bi-encoder pool → cross-encoder top-k
     rerank_applied: str | None = None

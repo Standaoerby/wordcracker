@@ -570,20 +570,67 @@ def ask(
                 plan = rr_v4.plan
                 rr = rr_v4
             elif pres is not None and pres.clarify:
-                # LLM produced an honest clarify after seeing the
-                # conversation — better than rules clarify.
-                intent = int_mod.IntentMatch(
-                    label="clarify", confidence=0.5,
-                    matched_pattern="v4-followup-clarify",
-                )
-                entities = ent_mod.Entities()
-                plan = plan_mod.QueryPlan(
-                    intent="clarify", entities=entities, steps=[],
-                    needs_clarify=True,
-                    clarify_question=pres.clarify,
-                    explain="v4 LLM planner clarify on followup",
-                )
-                v4_followup_report = pres
+                # Sprint 22+ Round 12 Q11/Q12 fix: v4 LLM-planner returned
+                # clarify on followup. BEFORE accepting it, try the v3
+                # rules path — translate_word_list and export_word_list
+                # have working prior-words extraction from markdown. If
+                # v3 produces a non-clarify plan with steps, prefer it.
+                # Only fall to v4's clarify when v3 ALSO clarifies.
+                v3_intent_label = None
+                try:
+                    inferred = history_mod.infer_followup_intent(
+                        question, history)
+                    if inferred and inferred not in ("clarify",):
+                        v3_intent_label = inferred
+                except Exception:
+                    log.exception("v3 followup fallback failed")
+                if v3_intent_label:
+                    # Build a v3 plan with that intent
+                    v3_entities = ent_mod.extract(question)
+                    v3_entities = history_mod.merge_with_history(
+                        v3_entities, history, question)
+                    try:
+                        v3_plan = plan_mod.build(v3_intent_label, v3_entities)
+                    except Exception:
+                        log.exception("v3 plan build failed for %s",
+                                      v3_intent_label)
+                        v3_plan = None
+                    if v3_plan and not v3_plan.needs_clarify and v3_plan.steps:
+                        # v3 has a real plan — use it instead of v4 clarify.
+                        intent = int_mod.IntentMatch(
+                            label=v3_intent_label, confidence=0.7,
+                            matched_pattern="v4-clarify-then-v3-rescue",
+                        )
+                        entities = v3_entities
+                        plan = v3_plan
+                        v4_followup_report = pres
+                    else:
+                        intent = int_mod.IntentMatch(
+                            label="clarify", confidence=0.5,
+                            matched_pattern="v4-followup-clarify",
+                        )
+                        entities = ent_mod.Entities()
+                        plan = plan_mod.QueryPlan(
+                            intent="clarify", entities=entities, steps=[],
+                            needs_clarify=True,
+                            clarify_question=pres.clarify,
+                            explain="v4 clarify, v3 also clarified",
+                        )
+                        v4_followup_report = pres
+                else:
+                    # v3 has nothing to add → use v4's clarify.
+                    intent = int_mod.IntentMatch(
+                        label="clarify", confidence=0.5,
+                        matched_pattern="v4-followup-clarify",
+                    )
+                    entities = ent_mod.Entities()
+                    plan = plan_mod.QueryPlan(
+                        intent="clarify", entities=entities, steps=[],
+                        needs_clarify=True,
+                        clarify_question=pres.clarify,
+                        explain="v4 LLM planner clarify on followup",
+                    )
+                    v4_followup_report = pres
 
     llm_used_for = None
     if v4_followup_used or (v4_followup_report is not None
@@ -932,18 +979,59 @@ def ask_stream(
                                "ms": tr.runtime_ms, "ok": tr.ok,
                                "summary": tr.to_llm_string(max_chars=240)}
             elif pres is not None and pres.clarify:
-                v4_followup_report = pres
-                intent = int_mod.IntentMatch(
-                    label="clarify", confidence=0.5,
-                    matched_pattern="v4-followup-clarify",
-                )
-                entities = ent_mod.Entities()
-                plan = plan_mod.QueryPlan(
-                    intent="clarify", entities=entities, steps=[],
-                    needs_clarify=True,
-                    clarify_question=pres.clarify,
-                    explain="v4 LLM planner clarify on followup (stream)",
-                )
+                # Sprint 22+ Round 12 Q11/Q12: v3 rules fallback before
+                # accepting v4 clarify. Same logic as the non-stream path.
+                v3_intent_label = None
+                try:
+                    inferred = history_mod.infer_followup_intent(
+                        question, history)
+                    if inferred and inferred not in ("clarify",):
+                        v3_intent_label = inferred
+                except Exception:
+                    log.exception("v3 followup fallback failed (stream)")
+                if v3_intent_label:
+                    v3_entities = ent_mod.extract(question)
+                    v3_entities = history_mod.merge_with_history(
+                        v3_entities, history, question)
+                    try:
+                        v3_plan = plan_mod.build(v3_intent_label, v3_entities)
+                    except Exception:
+                        log.exception("v3 plan build failed (stream)")
+                        v3_plan = None
+                    if v3_plan and not v3_plan.needs_clarify and v3_plan.steps:
+                        v4_followup_report = pres
+                        intent = int_mod.IntentMatch(
+                            label=v3_intent_label, confidence=0.7,
+                            matched_pattern="v4-clarify-then-v3-rescue",
+                        )
+                        entities = v3_entities
+                        plan = v3_plan
+                    else:
+                        v4_followup_report = pres
+                        intent = int_mod.IntentMatch(
+                            label="clarify", confidence=0.5,
+                            matched_pattern="v4-followup-clarify",
+                        )
+                        entities = ent_mod.Entities()
+                        plan = plan_mod.QueryPlan(
+                            intent="clarify", entities=entities, steps=[],
+                            needs_clarify=True,
+                            clarify_question=pres.clarify,
+                            explain="v4 clarify, v3 also clarified (stream)",
+                        )
+                else:
+                    v4_followup_report = pres
+                    intent = int_mod.IntentMatch(
+                        label="clarify", confidence=0.5,
+                        matched_pattern="v4-followup-clarify",
+                    )
+                    entities = ent_mod.Entities()
+                    plan = plan_mod.QueryPlan(
+                        intent="clarify", entities=entities, steps=[],
+                        needs_clarify=True,
+                        clarify_question=pres.clarify,
+                        explain="v4 LLM planner clarify on followup (stream)",
+                    )
 
     if not v4_followup_used and (v4_followup_report is None
                                   or v4_followup_report.clarify is None):
