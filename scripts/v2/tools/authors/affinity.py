@@ -1,8 +1,11 @@
 """v2 affinity_by_author + compare_authors — author-level stylistic stats."""
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
+
+log = logging.getLogger("wordcracker.v2.tools.authors.affinity")
 
 _REPO = Path(__file__).resolve().parents[3]
 if str(_REPO) not in sys.path:
@@ -238,6 +241,38 @@ def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
     query = {"author1_regex": author1_regex, "author2_regex": author2_regex,
              "top": top, "min_corpus_count": min_corpus_count}
 
+    # Sprint 21+ Q15 P0 hotfix — auto-retry with lower threshold when
+    # BOTH sides return empty. Stan prod 2026-05-20: «сравни По и
+    # Лавкрафта» with default min_corpus_count=2000 yielded empty top
+    # both sides because rare stylistic markers («cthonic», «eldritch»,
+    # «raven») don't meet a 2000-occurrence corpus-wide floor for
+    # authors with only 22-33 books indexed. Auto-retry once at //4
+    # threshold so small-corpus authors get a real comparison instead
+    # of an empty-result hallucination footer. The retry is silent —
+    # we just report the threshold actually used in `min_corpus_count_used`.
+    if isinstance(raw, dict) and min_corpus_count >= 1000:
+        both_empty = (not raw.get("top_unique_a")
+                       and not raw.get("top_unique_b"))
+        if both_empty:
+            retry_threshold = max(min_corpus_count // 4, 100)
+            log.info("compare_authors both-empty at min_corpus_count=%d → "
+                     "retry at %d (Q15 anti-empty)",
+                     min_corpus_count, retry_threshold)
+            try:
+                retry_raw = _v1(author1_regex=author1_regex,
+                                 author2_regex=author2_regex,
+                                 top=top, min_corpus_count=retry_threshold)
+            except Exception:
+                retry_raw = None
+            if isinstance(retry_raw, dict) and (retry_raw.get("top_unique_a")
+                                                  or retry_raw.get("top_unique_b")):
+                raw = retry_raw
+                raw["min_corpus_count_used"] = retry_threshold
+                raw["min_corpus_count_requested"] = min_corpus_count
+                raw["_threshold_auto_lowered"] = True
+                # Update query so the renderer sees both numbers
+                query["min_corpus_count_used"] = retry_threshold
+
     if isinstance(raw, dict) and raw.get("error"):
         err = str(raw["error"])
         # Surface the "no matching books" case as not_found, so the renderer
@@ -306,8 +341,17 @@ def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
                 "top_unique НЕ пустой. "
                 if len(empty_sides) == 1
                 else "ОБЕ стороны пусты — скажи прямо: «не нашлось "
-                "signature words ни у одной из двух сторон». "
-            )
+                "signature words ни у одной из двух сторон при текущем "
+                "threshold». ВАЖНО: НЕ интерпретируй это как «авторы "
+                "разные» / «авторы похожи» / «структурная метрика "
+                "показывает…» — это НЕ метрика стилистической дистанции, "
+                "это empty-result артефакт фильтра. Скажи user'у "
+                "буквально: «при min_corpus_count={mcc} оба top-списка "
+                "пустые; попробуй явный compare с пониженным threshold» "
+                "и предложи concrete alternative tool: «спроси "
+                "“affinity_by_author Poe min_corpus_count=200” чтобы "
+                "посмотреть signature words по одному автору». "
+            ).format(mcc=min_corpus_count)
             existing = raw.get("_render_note", "")
             raw["_render_note"] = (
                 (existing + " | " if existing else "")
@@ -316,11 +360,9 @@ def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
                 f"min_corpus_count={min_corpus_count}). "
                 + present_text
                 + "ЗАПРЕЩЕНО изобретать слова чтобы заполнить пустую "
-                "сторону — это галлюцинация. Скажи пользователю честно: "
-                "«у этого автора в нашем индексе не нашлось уникальных "
-                "стилистических маркеров; возможно мало книг под этим "
-                "author_regex или нужно понизить min_corpus_count». "
-                "6-round persistent bug Q15."
+                "сторону — это галлюцинация. ЗАПРЕЩЕНО рационализировать "
+                "пустоту через cosine_similarity или другие метрики — "
+                "это empty-result, не метрика. Q15 6-round persistent bug."
             )
 
     # Sprint 20+ B2 — stamp metric_explanations so renderer doesn't

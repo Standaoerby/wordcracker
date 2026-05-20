@@ -294,5 +294,101 @@ class B104_FriendlyRenderError(unittest.TestCase):
         self.assertIn("инструменты тоже не дали", msg)
 
 
+class Q15_CompareAuthorsAutoRetry(unittest.TestCase):
+    """Stan prod 2026-05-20 evening: «сравни По и Лавкрафта по стилю»
+    yielded BOTH top_unique empty at default min_corpus_count=2000 (Plan
+    cranks high for anti-PROPN). For small-corpus authors (Poe 33 books,
+    Lovecraft 22 books) signature words rarely cross a 2000-occurrence
+    corpus-wide floor → empty result → renderer hallucinated «cosine_
+    similarity показывает что не найдены маркеры».
+
+    Auto-retry: when both sides empty at min_corpus_count >= 1000, try
+    once more at //4 threshold (silent, ~5s extra). If retry yields
+    matches, return them with `_threshold_auto_lowered: true` + a
+    `min_corpus_count_used` field so the renderer can disclose.
+    """
+
+    def test_both_empty_triggers_retry_with_lower_threshold(self):
+        from scripts.v2.tools.authors import affinity
+        call_log = []
+        def fake_v1(author1_regex, author2_regex, top, min_corpus_count):
+            call_log.append(min_corpus_count)
+            if min_corpus_count >= 1000:
+                return {"top_unique_a": [], "top_unique_b": [],
+                        "cosine_similarity": 0.0, "books_a": 33, "books_b": 22}
+            # Retry threshold → actual data
+            return {"top_unique_a": [{"word": "raven", "affinity": 12.3}],
+                    "top_unique_b": [{"word": "eldritch", "affinity": 9.8}],
+                    "cosine_similarity": 0.06,
+                    "shared_high_affinity": [],
+                    "books_a": 33, "books_b": 22}
+        with mock.patch("scripts.rag_tools.compare_authors", new=fake_v1):
+            r = affinity.compare_authors("^Poe,", "^Lovecraft, H",
+                                          top=20, min_corpus_count=2000)
+        # Verify retry happened
+        self.assertEqual(len(call_log), 2, msg=f"expected 2 calls, got {call_log}")
+        self.assertEqual(call_log[0], 2000)
+        self.assertEqual(call_log[1], 500)
+        # Data carries threshold trace
+        self.assertEqual(r.data.get("min_corpus_count_requested"), 2000)
+        self.assertEqual(r.data.get("min_corpus_count_used"), 500)
+        self.assertTrue(r.data.get("_threshold_auto_lowered"))
+        # And the retry-result words made it through
+        self.assertEqual(len(r.data["top_unique_a"]), 1)
+        self.assertEqual(r.data["top_unique_a"][0]["word"], "raven")
+        self.assertEqual(r.data["top_unique_b"][0]["word"], "eldritch")
+
+    def test_first_call_with_results_skips_retry(self):
+        """When the first call succeeds, no retry needed."""
+        from scripts.v2.tools.authors import affinity
+        call_log = []
+        def fake_v1(author1_regex, author2_regex, top, min_corpus_count):
+            call_log.append(min_corpus_count)
+            return {"top_unique_a": [{"word": "cheerily", "affinity": 8}],
+                    "top_unique_b": [{"word": "drawing-room", "affinity": 7}],
+                    "cosine_similarity": 0.15,
+                    "shared_high_affinity": [],
+                    "books_a": 80, "books_b": 30}
+        with mock.patch("scripts.rag_tools.compare_authors", new=fake_v1):
+            r = affinity.compare_authors("^Dickens,", "^Twain,",
+                                          top=20, min_corpus_count=2000)
+        # Single call — no retry
+        self.assertEqual(len(call_log), 1)
+        self.assertIsNone(r.data.get("min_corpus_count_used"))
+        self.assertFalse(r.data.get("_threshold_auto_lowered"))
+
+    def test_low_initial_threshold_skips_retry(self):
+        """Don't retry when caller already used a low threshold — they
+        chose it explicitly."""
+        from scripts.v2.tools.authors import affinity
+        call_log = []
+        def fake_v1(author1_regex, author2_regex, top, min_corpus_count):
+            call_log.append(min_corpus_count)
+            return {"top_unique_a": [], "top_unique_b": [],
+                    "cosine_similarity": 0.0, "books_a": 33, "books_b": 22}
+        with mock.patch("scripts.rag_tools.compare_authors", new=fake_v1):
+            r = affinity.compare_authors("^Poe,", "^Lovecraft, H",
+                                          top=20, min_corpus_count=200)
+        # Single call — already low, don't try lower
+        self.assertEqual(len(call_log), 1)
+
+    def test_both_still_empty_after_retry_strong_render_note(self):
+        """When retry ALSO returns empty, original data stands, plus
+        the empty-sides logic appends a hard NO-rationalize render note
+        forbidding interpretation through cosine_similarity."""
+        from scripts.v2.tools.authors import affinity
+        def fake_v1(author1_regex, author2_regex, top, min_corpus_count):
+            return {"top_unique_a": [], "top_unique_b": [],
+                    "cosine_similarity": 0.0, "books_a": 5, "books_b": 3}
+        with mock.patch("scripts.rag_tools.compare_authors", new=fake_v1):
+            r = affinity.compare_authors("^Unknown1,", "^Unknown2,",
+                                          top=20, min_corpus_count=2000)
+        note = r.data.get("_render_note", "")
+        # Stronger forbid against rationalization
+        self.assertIn("НЕ интерпретируй", note)
+        self.assertIn("empty-result", note)
+        self.assertIn("affinity_by_author", note)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
