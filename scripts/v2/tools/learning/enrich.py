@@ -50,6 +50,38 @@ def enrich_word(word: str, contexts=None, lemma_hint: str = "",
     if isinstance(raw, dict) and raw.get("error"):
         return ToolResult.fail(tool="enrich_word", err_type="internal",
                                message=str(raw["error"]), query=query)
+    # Sprint 20+ B7 — filter ISO-639 language codes leaking into
+    # related_forms / etymology output. Stan Round 11 Q28: «связанные
+    # формы: enm-wmi, ang, gmw-pro, gem-pro, ine-pro, swerd, sweard» —
+    # first 5 are language codes, only swerd/sweard are real attested
+    # forms. Wrapper-level filter, not v1 change.
+    if isinstance(raw, dict):
+        from scripts.v2.tools._result_filters import (
+            looks_like_iso_code,
+        )
+        for related_key in ("related_forms", "etymology_chain",
+                              "cognates", "derived_from"):
+            forms = raw.get(related_key)
+            if not isinstance(forms, list):
+                continue
+            kept = []
+            dropped = []
+            for item in forms:
+                # item can be str «ang» or dict {"word": "ang", "lang": "OE"}
+                token = item if isinstance(item, str) else (
+                    item.get("word") if isinstance(item, dict) else None
+                )
+                if isinstance(token, str) and looks_like_iso_code(token):
+                    dropped.append(token)
+                else:
+                    kept.append(item)
+            if dropped:
+                raw[related_key] = kept
+                note = (f"v2 filter dropped ISO-639 language codes from "
+                         f"{related_key}: {', '.join(dropped[:5])}"
+                         f"{'…' if len(dropped) > 5 else ''}")
+                prev = raw.get("_render_note", "")
+                raw["_render_note"] = (prev + " | " + note if prev else note)
     return ToolResult.success(tool="enrich_word", data=raw, query=query)
 
 

@@ -70,6 +70,15 @@ RENDER_PROMPT = """Тебя зовут {name}. Ты — литературный
     - Если хочешь упомянуть оба числа для прозрачности — формулируй явно: «запросил 100, после фильтра имён собственных / OOV-токенов осталось 19». Это окей и часто полезно.
     - Numeric audit и critic в любом случае поймают расхождение — но это пост-фактум, и пользователь уже прочитал кривой ответ. Лучше написать правду сразу.
 
+15. **Метрики — направление и интерпретация ВСЕГДА из tool data, не из общих знаний.** Если в data есть поле `metric_explanations` — используй его описание direction/scale/interpret буквально, не выдумывай. Базовые правила направления (Stan Round 11 B2 hard-block — renderer писал обратное про Burrows Delta):
+    - **Burrows Delta** — это РАССТОЯНИЕ стилометрическое. **LOWER value = MORE similar style** (ближе по стилю). НИКОГДА не пиши «чем выше delta, тем сильнее влияние» — это неверно. Stevenson 0.4385 ближе к Doyle чем Twain 0.6021.
+    - **Flesch Reading Ease** — выше = легче читать (90-100 школьник, 60-70 средний, 30-50 трудный).
+    - **TTR / lexical diversity** — выше = богаче словарь. Sample-size-sensitive — упомяни при сравнении книг разной длины.
+    - **PMI / NPMI / Dice (collocates)** — выше = сильнее связь между словами. NPMI нормирован в [-1, 1].
+    - **Affinity** — выше = более характерно для автора относительно корпуса (формула в spgc_author_affinity.py).
+    - **Jaccard top-200** — выше = больше пересечение топ-200 фирменных слов авторов (similarity, не distance).
+    Если direction не очевиден из имени метрики и нет `metric_explanations` — НЕ интерпретируй, просто покажи число.
+
 Tool trace тебе передан как JSON. Каждая запись — {{tool, query, data, warnings, coverage}}. Возьми оттуда factual content. **Ничего вне этих данных.**"""
 
 
@@ -425,6 +434,12 @@ def _llm_render(question: str, plan: plan_mod.QueryPlan,
     feed obs_mod.log_request so the admin dashboard can answer «do we
     need more num_ctx» data-driven instead of by guessing."""
     render_instructions = _collect_render_instructions(results)
+    # Sprint 20+ — plan-level render notes (e.g. exclude_archaic flag).
+    # These are stamped by the plan builder, not by any individual tool,
+    # so they aren't reachable via data._render_note.
+    for note in getattr(plan, "render_notes", []) or []:
+        if isinstance(note, str) and note.strip():
+            render_instructions.append(f"[plan] {note.strip()}")
     # Sprint 19 — surface user-upload usage to the renderer.
     has_uploads, upload_count, upload_sample = _detect_user_uploads(results)
     # Sprint 19+ — copyright-via-upload (HP / LOTR / 1984 / etc.

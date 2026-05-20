@@ -45,11 +45,31 @@ def word_contexts(author_regex: str, word: str, window: int = 10,
         return ToolResult.fail(tool="word_contexts", err_type="not_found",
                                message=str(raw["error"]), query=query)
     samples = (raw.get("samples") if isinstance(raw, dict) else None) or []
+    # Sprint 20+ B17 — multi-author word_contexts had identical snippets
+    # under different PG ids (Doyle contexts 1=3, 2=4 in Stan Round 11
+    # Q30). Generic snippet dedup.
+    dedup_dropped = 0
+    if samples:
+        from scripts.v2.tools._result_filters import dedup_by_key
+        samples, dedup_dropped = dedup_by_key(samples, key="snippet")
+        if dedup_dropped and isinstance(raw, dict):
+            raw["samples"] = samples
+            raw["_filter_drops"] = {"dedup_by_key": dedup_dropped}
+    warnings: list[ToolWarning] = []
+    if not samples:
+        warnings.append(ToolWarning(
+            "no_samples", "word not found in author's corpus",
+        ))
+    elif dedup_dropped:
+        warnings.append(ToolWarning(
+            "snippet_dedup",
+            f"deduped {dedup_dropped} identical snippet(s) — "
+            f"same passage indexed under multiple PG ids",
+        ))
     return ToolResult.success(
         tool="word_contexts", data=raw,
         coverage=Coverage(books_matched=len(samples), books_total=-1),
-        warnings=[ToolWarning("no_samples", "word not found in author's corpus")]
-                 if not samples else [],
+        warnings=warnings,
         query=query,
     )
 

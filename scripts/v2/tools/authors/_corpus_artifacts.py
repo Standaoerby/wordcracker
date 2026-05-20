@@ -71,11 +71,13 @@ def is_corpus_artifact(word: str) -> bool:
         # The 2+ char Roman patterns are safe to drop.
         if len(w) >= 2:
             return True
-    # Consonant-only ≥3: «pqr» / «wxyz» / «lll» / «xyz».
+    # Consonant-only ≥2: «pqr» / «wxyz» / «lll» / «xyz» / «th» / «pp».
+    # Stan Round 11 B19 (2026-05-20): «th» 188 leaked through ≥3 filter
+    # as a collocate of «fog» — single OCR fragment from broken
+    # Gutenberg markup. Tighten to ≥2.
     # Only apply to fully-alpha tokens — digit-containing tokens like
-    # «w11» / «t9» are placeholder strings the caller already cares
-    # about (and they're not corpus markup in the OCR sense).
-    if len(w) >= 3 and w.isalpha() and not any(ch in _VOWELS for ch in w):
+    # «w11» / «t9» are placeholder strings (not corpus markup).
+    if len(w) >= 2 and w.isalpha() and not any(ch in _VOWELS for ch in w):
         return True
     return False
 

@@ -463,6 +463,16 @@ class Entities:
     # title lives at the same index in multi_book_titles.
     multi_book_ids: list[str | None] = field(default_factory=list)
     multi_book_titles: list[str] = field(default_factory=list)
+    # Sprint 20+ (Stan Round 11 B4 + B9): hint fields that plan builders
+    # use to constrain tool args. lang_hint defaults to None — plan
+    # builders only apply when explicitly set (e.g. «английская
+    # классика» → 'en'). exclude_archaic flag for book_recommendation.
+    lang_hint: str | None = None
+    exclude_archaic: bool = False
+    # Sprint 20+ (Stan Round 11 B3): export-format hint for
+    # export_word_list followups. csv / anki / markdown / json. None
+    # means «no explicit format requested» (default to csv).
+    export_format: str | None = None
     raw_misc: dict = field(default_factory=dict)
 
 
@@ -1348,7 +1358,117 @@ def extract(text: str) -> Entities:
         multi_author_regex=multi,
         multi_book_ids=multi_book_ids,
         multi_book_titles=multi_book_titles,
+        # Sprint 20+ B4 + B9: language hint + exclude_archaic flag
+        lang_hint=_find_lang_hint(text),
+        exclude_archaic=_find_exclude_archaic(text),
+        # Sprint 20+ B3: export-format hint for export_word_list followups
+        export_format=_find_export_format(text),
         raw_misc={"raw_text": text,
                   **({"attribution_text": attribution_text}
                      if attribution_text else {})},
     )
+
+
+# ---------- Sprint 20+ — lang_hint + exclude_archaic ----------
+
+
+_LANG_HINT_PATTERNS = (
+    # English literature context — Stan Round 11 B4
+    # «английская классика», «english literature», «in English»
+    (re.compile(
+        r"\b(?:английск\w+|англоязычн\w+|english(?:[\s-]language)?|"
+        r"in\s+english|на\s+английском)\b",
+        re.IGNORECASE,
+    ), "en"),
+    # Russian context — for explicitly Russian-corpus queries. The
+    # alternation stems may end on a Cyrillic letter, so we can't use
+    # trailing `\b` (Python \b between two Cyrillic word chars never
+    # matches). Allow optional `\w*` to consume the inflection tail.
+    (re.compile(
+        r"\b(?:русск\w+\s+(?:литератур|классик|книг|автор|поэз)\w*|"
+        r"russian\s+(?:literature|classics?|books?)|"
+        r"на\s+русском(?:\s+языке)?)",
+        re.IGNORECASE,
+    ), "ru"),
+    # Add other languages as observed
+    (re.compile(
+        r"\b(?:французск\w+\s+(?:литератур|классик)\w*|"
+        r"french\s+(?:literature|classics?))",
+        re.IGNORECASE,
+    ), "fr"),
+)
+
+
+def _find_lang_hint(text: str) -> str | None:
+    """Detect explicit language filter from the query («английская
+    классика» / «english literature»). Used by lexical_search and
+    find_book_by_topic to pass `lang='en'` etc, preventing the «имена
+    в английской классике» bug where lexical_search returned Finnish /
+    Hungarian / Italian results because language wasn't filtered.
+    """
+    if not text:
+        return None
+    for pat, lang in _LANG_HINT_PATTERNS:
+        if pat.search(text):
+            return lang
+    return None
+
+
+_EXCLUDE_ARCHAIC_PATTERNS = re.compile(
+    r"\bбез\s+архаизм\w*|"
+    r"\bне\s+архаичн\w+|"
+    r"\bno\s+archaic|"
+    r"\bexclude\s+archaic|"
+    r"\bсовременн\w+\s+язык|"
+    r"\bmodern\s+(?:english|language)",
+    re.IGNORECASE,
+)
+
+
+def _find_exclude_archaic(text: str) -> bool:
+    """Detect «без архаизмов» / «no archaic» — used by book_recommendation
+    to filter out books with high archaic_density. Stan Round 11 B9:
+    «B2 без архаизмов» — filter ignored, returned Pliny / Roman Stoicism."""
+    if not text:
+        return False
+    return bool(_EXCLUDE_ARCHAIC_PATTERNS.search(text))
+
+
+# ---------- Sprint 20+ B3 — export-format detection ----------
+# Round 11 beginner-researcher test: «выгрузи в anki», «csv pls»,
+# «дай в markdown» / «json plz» — followups after a word-list turn.
+# Was: classified as clarify (no matching rule), now: export_word_list.
+
+_EXPORT_FORMAT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    # Anki — TSV for word-card import. Most common request.
+    (re.compile(r"\banki\b", re.IGNORECASE), "anki"),
+    # CSV — generic spreadsheet
+    (re.compile(r"\bcsv\b|\bspreadsheet\b|\bexcel\b|\bтаблиц\w+", re.IGNORECASE),
+     "csv"),
+    # JSON — for programmatic consumers
+    (re.compile(r"\bjson\b", re.IGNORECASE), "json"),
+    # Markdown — for note-taking apps (Obsidian, Notion, etc.)
+    (re.compile(r"\bmarkdown\b|\bmd\b|\.md\b|"
+                r"\bобсидиан\w*|\bobsidian\b|\bnotion\b",
+                re.IGNORECASE), "markdown"),
+    # Plain TSV — when user says «tab separated» / «tsv» without anki
+    (re.compile(r"\btsv\b|\btab[\s\-]separat\w+", re.IGNORECASE), "tsv"),
+)
+
+
+def _find_export_format(text: str) -> str | None:
+    """Return canonical format token when text mentions an export target.
+
+    Recognized:
+      anki      — TSV optimized for Anki desktop card-import
+      csv       — comma-separated for spreadsheets
+      json      — array of word objects
+      markdown  — pipe-table for note-taking apps
+      tsv       — bare tab-separated, no Anki conventions
+    """
+    if not text:
+        return None
+    for pat, fmt in _EXPORT_FORMAT_PATTERNS:
+        if pat.search(text):
+            return fmt
+    return None

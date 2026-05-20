@@ -124,6 +124,10 @@ _INTENT_HINTS: dict[str, str] = {
     "similar_to":            "«в стиле X» где X неясно — книга или автор; plan disambiguates",
     # Sprint 20 — translate-followup escape hatch
     "translate_word_list":   "«переведи эти слова», prior word-list, honest clarify with actionable advice",
+    # Sprint 20+ B3 — export-followup. «выгрузи в anki/csv/markdown/json»
+    # after a word-list turn. Plan extracts prior words + format and
+    # renders directly without new tool calls.
+    "export_word_list":      "«выгрузи в anki/csv/markdown/json/excel», prior word-list, format dump",
     "out_of_scope":          "написать рассказ/стих, prompt injection, генерация контента",
     "clarify":               "запрос совсем непонятен или слишком расплывчат",
 }

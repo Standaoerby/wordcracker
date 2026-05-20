@@ -323,6 +323,26 @@ def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
                 "6-round persistent bug Q15."
             )
 
+    # Sprint 20+ B2 — stamp metric_explanations so renderer doesn't
+    # invent direction. Stan Round 11: «чем выше delta, тем сильнее
+    # влияние» — НЕВЕРНО, distance metric, lower = closer.
+    if isinstance(raw, dict):
+        raw.setdefault("metric_explanations", []).extend([
+            {"metric": "burrows_delta",
+              "direction": "LOWER = more similar style (distance metric)",
+              "scale": "typically 0.3-1.5; <0.5 close, >0.8 distinct",
+              "interpret": "Stevenson 0.4385 closer to Doyle than Twain 0.6021"},
+            {"metric": "cosine_similarity",
+              "direction": "HIGHER = more similar (affinity vectors)",
+              "scale": "0-1; cosine on top-N affinity word vectors",
+              "interpret": "structural near-zero common — see "
+                           "cosine_is_structural_zero flag"},
+            {"metric": "shared_high_affinity",
+              "direction": "count of overlapping signature words; "
+                           "more shared = more aligned vocabulary",
+              "scale": "0+; integer",
+              "interpret": "0 shared between distinct genres is normal"},
+        ])
     return ToolResult.success(
         tool="compare_authors", data=raw,
         coverage=Coverage(

@@ -112,6 +112,23 @@ def author_influences(author_regex: str, top: int = 10) -> ToolResult:
         # are just whoever happens to sit closest to mean — not real
         # stylistic siblings. Better to say so than mislead.
         _annotate_confidence(raw, author_regex)
+        # Sprint 20+ B2 — metric_explanations so renderer doesn't reverse
+        # Burrows Delta direction (Stan Round 11 Q19: «чем выше delta,
+        # тем сильнее влияние» — НЕВЕРНО). Stamp authoritative direction.
+        raw.setdefault("metric_explanations", []).extend([
+            {"metric": "burrows_delta",
+              "direction": "LOWER = closer style (distance metric, NOT influence strength)",
+              "scale": "typically 0.3-1.5; <0.5 stylistic kin, >0.8 distant",
+              "interpret": "Hawthorne 0.4506 closer to Melville's style than Stevenson 0.4763 — the LOWER, the more similar"},
+            {"metric": "jaccard_top200",
+              "direction": "HIGHER = more shared signature words (similarity, not distance)",
+              "scale": "0-1; intersection ÷ union of top-200 affinity words",
+              "interpret": "0.15 jaccard = 30 shared words out of 200"},
+            {"metric": "ensemble_score",
+              "direction": "LOWER = closer (Borda rank average of Burrows + Jaccard, normalized as distance)",
+              "scale": "0-1",
+              "interpret": "ensemble combines two metrics — robust against single-metric outliers"},
+        ])
     return ToolResult.success(
         tool="author_influences", data=raw,
         coverage=Coverage(),

@@ -48,9 +48,18 @@ class RerankScoreThreshold(unittest.TestCase):
             self.assertGreaterEqual(m["rerank_score"], 0.4)
 
     def test_skip_filter_when_no_reranker(self):
-        """Without rerank_with, no rerank_score → threshold ignored."""
+        """Without rerank_with, no rerank_score → threshold ignored.
+
+        Sprint 20+ note: each chunk needs a UNIQUE snippet, else the
+        new B18 dedup_by_key('snippet') filter would collapse them.
+        Real Gutenberg snippets are unique per chunk; this fixture
+        now matches reality.
+        """
         from scripts.v2.tools.books.find_book_by_topic import find_book_by_topic
-        chunks = [{"pg_id": f"PG{i}", "rrf_score": 0.5, "snippet": "x"}
+        chunks = [{"pg_id": f"PG{i}", "rrf_score": 0.5,
+                    "snippet": f"unique passage {i} from a fictional book",
+                    "title": f"Book {i}",
+                    "author": f"Author {i}"}
                   for i in range(3)]
         fake = ToolResult.success(
             tool="hybrid_search",

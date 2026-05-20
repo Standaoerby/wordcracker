@@ -131,6 +131,41 @@ def _extract_numbers(text: str) -> list[tuple[float, str, str]]:
     return out
 
 
+# Sprint 20+ B13 — markdown table detection. Numbers inside table cells
+# are deterministically formatted from tool data (counts, percentages,
+# row indices); auditing them produces a high false-positive rate when
+# the LLM renders a derived column (e.g. share-of-total %) that the
+# tool didn't surface verbatim. We strip the table region from audit
+# input — narrative claims in prose are still checked.
+_TABLE_LINE_RE = re.compile(
+    r"^\s*\|.*\|\s*$",   # « | cell | cell | »
+    re.MULTILINE,
+)
+# Markdown table separator: « | --- | --- | » — between header and rows.
+_TABLE_SEP_RE = re.compile(
+    r"^\s*\|?\s*:?[-=]{2,}\s*[:|]?(?:\s*[-=]{2,}.*)?\s*\|?\s*$",
+    re.MULTILINE,
+)
+
+
+def _strip_table_content(text: str) -> str:
+    """Remove markdown table rows and separator lines from `text`.
+
+    Returns the remaining prose / list / heading lines. Audit operates
+    on the remainder. Detection is line-based: a line is treated as a
+    table cell row when it has both a leading and trailing pipe with
+    content between them.
+
+    We don't try to detect HTML tables or grid tables — markdown pipe
+    tables are what the renderer emits.
+    """
+    if "|" not in text:
+        return text
+    stripped = _TABLE_LINE_RE.sub("", text)
+    stripped = _TABLE_SEP_RE.sub("", stripped)
+    return stripped
+
+
 # ----- Data-side number harvest -----
 
 def _walk_numbers(obj: Any, out: set[float], *, depth: int = 0) -> None:
@@ -275,7 +310,13 @@ def audit_numbers(
     if not data_numbers and not count_report.mismatches:
         return AuditReport.trust("(no numbers in tool data)")
 
-    extracted = _extract_numbers(answer)
+    # Sprint 20+ B13 — strip markdown table content before extracting
+    # numbers. Table cells are formatted deterministically from tool
+    # data; counts and derived percentages produced false positives
+    # at high rate in Round 11. Prose / list / heading numbers still
+    # get audited from `prose_only`.
+    prose_only = _strip_table_content(answer)
+    extracted = _extract_numbers(prose_only)
     report = AuditReport(numbers_checked=len(extracted),
                          mismatches=list(count_report.mismatches))
     seen_values: set[float] = {m.value for m in report.mismatches}

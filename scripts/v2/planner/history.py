@@ -196,10 +196,40 @@ _EXPAND_PATTERNS = re.compile(
 )
 
 
+def _is_export_followup(text: str) -> bool:
+    """True if the text asks to export prior output to a known format.
+
+    Stan Round 11 B3 — «выгрузи в anki», «csv pls», «save as markdown».
+    Combined with a prior word-list assistant turn, this routes to the
+    export_word_list intent whose plan formats without new tool calls.
+    """
+    if not text:
+        return False
+    # «выгрузи / export / save / dump / convert» + format token.
+    if re.search(
+        r"\b(выгрузи|выгрузить|выгрузь|сохрани|конвертируй|дай(те)?|"
+        r"export|save|convert|dump|format)\b"
+        r".{0,40}\b(anki|csv|json|markdown|\.md\b|tsv|"
+        r"excel|spreadsheet|таблиц|obsidian|обсидиан|notion)",
+        text, re.IGNORECASE,
+    ):
+        return True
+    # Bare «csv pls» / «anki» when very short.
+    if re.match(
+        r"^\s*(в\s+|to\s+|as\s+|in\s+)?"
+        r"(anki|csv|json|markdown|tsv)\b"
+        r"(\s+(pls|please|пж|пжл))?\s*[?.!]?\s*$",
+        text, re.IGNORECASE,
+    ):
+        return True
+    return False
+
+
 def _looks_like_followup(text: str) -> bool:
     return bool(_REF_TRIGGERS.search(text) or _CONTEXT_SWAP_TRIGGERS.search(text)
                 or _PROPN_REMOVAL_PATTERNS.search(text)
-                or _is_translate_followup(text))
+                or _is_translate_followup(text)
+                or _is_export_followup(text))
 
 
 def _is_context_swap(text: str) -> bool:
@@ -450,6 +480,29 @@ def infer_followup_intent(text: str,
                 # renderer will see _translate_to=ru and can add
                 # translations to whatever text it generates.
                 return prior_intent.label
+    # Sprint 20+ B3 — export-followup. «выгрузи в anki/csv/markdown/json»
+    # over the prior word-list. Same shape as translate_word_list: when
+    # the prior turn was a word-list intent, return export_word_list and
+    # let merge_with_history extract prior words below.
+    if _is_export_followup(text) and history:
+        from scripts.v2.planner.intent import classify as _classify
+        for msg in reversed(history):
+            if msg.get("role") != "user":
+                continue
+            prior_intent = _classify(msg.get("content") or "")
+            if prior_intent.label in ("author_vocab", "book_vocab",
+                                        "learning", "word_etymology",
+                                        "author_top_words", "topic_words",
+                                        "translate_word_list"):
+                return "export_word_list"
+            if prior_intent.label not in ("clarify", ""):
+                # Prior wasn't a word-list intent → fall back to standalone
+                # export_word_list which will surface an honest clarify
+                # asking for the explicit word list.
+                return "export_word_list"
+        # No prior user turn at all — still route to export_word_list;
+        # plan builder will surface clarify.
+        return "export_word_list"
     # Sprint 19+ — expansion follow-up («покажи все», «полный список»).
     # Same re-classify-prior logic as rerank — same plan, but the
     # plan-builder will see e.top_n bumped (set in merge_with_history).
@@ -575,6 +628,17 @@ def merge_with_history(current: Entities, history: list[dict] | None,
             # 10 × 1.5s = 15s, fits comfortably under chat timeout
             # alongside resolver + render + critic.
             rm["_prior_words"] = prior_words[:10]
+            rm["_prior_words_total"] = len(prior_words)
+        backfilled.raw_misc = rm
+    # Sprint 20+ B3 — export-followup: extract prior word list from the
+    # last assistant markdown table so _plan_export_word_list can format
+    # without re-running the original tool. Larger cap (50) than the
+    # translate path because formatting is local — no Wiktionary RT.
+    if _is_export_followup(text):
+        rm = dict(backfilled.raw_misc or {})
+        prior_words = _last_word_list_from_assistant(history)
+        if prior_words:
+            rm["_prior_words"] = prior_words[:50]
             rm["_prior_words_total"] = len(prior_words)
         backfilled.raw_misc = rm
     return backfilled

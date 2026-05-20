@@ -78,6 +78,9 @@ INTENTS = frozenset({
     # explicitly — 5-10 fit in chat timeout). Real solution lives in
     # v4 LLM planner that can extract words from conversation history.
     "translate_word_list",
+    # Sprint 20+ B3 — export-followup. «выгрузи в anki/csv/markdown/json».
+    # Like translate_word_list, requires a prior word-list assistant turn.
+    "export_word_list",
     "out_of_scope",
     "clarify",
 })
@@ -96,6 +99,10 @@ def _re(pattern: str) -> Pattern[str]:
 
 PRIORITY = {
     "out_of_scope": 200,
+    # Sprint 20+ B3 — export-followup. High priority so «выгрузи в anki»
+    # doesn't get swallowed by book_recommendation or generic clarify.
+    # Below out_of_scope (200) but above all content intents.
+    "export_word_list": 180,
     # Sprint 16 Phase E — meta-query intents above corpus_meta so the
     # generic «корпус» rules don't swallow specific «какие книги у X».
     # Above author_metadata (55) so «какие книги у Doyle» doesn't get
@@ -433,6 +440,31 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     # the capital-letter check.
     (_re(r"\b(в\s+стиле|in\s+the\s+style\s+of|типа\s+как)\s+\w"),
      "similar_to", 0.83),
+    # Sprint 20+ B8 — «sequel to X» / «в продолжение X» / «что почитать
+    # после X / what to read after X» — post-reading-recommendation
+    # queries. Without an explicit «похож на» these fell to clarify or
+    # find_book_by_topic. Now route to book_similar so the plan uses
+    # the reference book.
+    #
+    # The bare Russian «после X» (без verb) is intentionally NOT here —
+    # it's too ambiguous and steals book_recommendation phrasings like
+    # «какие книги читать после Шерлока Холмса для B2 без архаизмов».
+    # Where the verb makes the intent explicit («что почитать после X»),
+    # there's a separate rule at line ~834 («что почитать ... после»).
+    (_re(r"\bв\s+продолжени\w+\s+(?:[«\"„])?[A-ZА-ЯЁ]"),
+     "book_similar", 0.88),
+    (_re(r"\bsequel\s+to\s+[\"«]?[A-Z]"),
+     "book_similar", 0.92),
+    # «what to read after X» / «what to read next after X» / «what to
+    # read next, X». The negative lookahead guards against B2/no archaic
+    # recommendation framings. Accept comma after «next»: «what to read
+    # next, Sherlock Holmes».
+    (_re(r"\bwhat\s+to\s+read\s+(?:after|next)[\s,]+"
+         r"(?!.*\b([A-C][12]\s+level|no\s+archaic))"),
+     "book_similar", 0.85),
+    (_re(r"\bafter\s+reading\s+(?:[\"«]?[A-Z])"
+         r"(?!.*\b([A-C][12]\s+level|no\s+archaic))"),
+     "book_similar", 0.82),
 
     # ===== Sprint 16 Phase G — book_pub_year =====
     # «когда была опубликована Война и мир», «год издания Pride and
@@ -1037,6 +1069,26 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     # ===== word_movement =====
     (_re(r"глагол\w*\s+движени\w*|verbs of (motion|movement)"),
      "word_movement", 0.95),
+
+    # ===== export_word_list (Sprint 20+ B3) =====
+    # Recognized formats: anki / csv / markdown / json / tsv / excel /
+    # spreadsheet / obsidian / notion. Always paired with a verb
+    # («выгрузи», «дай в», «export to», «save as»). We classify standalone
+    # «выгрузи в anki» here; follow-up-context detection (where the prior
+    # turn must be a word-list intent) happens in history.py before the
+    # plan is built.
+    (_re(r"\b(выгрузи|выгрузить|выгрузь|сохрани|конвертируй|"
+         r"дай(те)?|"
+         r"export|save|convert|dump|format)\b"
+         r".{0,40}\b(anki|csv|json|markdown|\.md\b|tsv|"
+         r"excel|spreadsheet|таблиц|obsidian|обсидиан|notion)"),
+     "export_word_list", 0.92),
+    # Bare «в Anki» / «as csv» without a verb when very close to
+    # the start — naïve users sometimes write just «csv pls» or «anki».
+    (_re(r"^\s*(в\s+|to\s+|as\s+|in\s+)?"
+         r"(anki|csv|json|markdown|tsv)\b"
+         r"(\s+(pls|please|пж|пжл))?\s*[?.!]?\s*$"),
+     "export_word_list", 0.85),
 ]
 
 

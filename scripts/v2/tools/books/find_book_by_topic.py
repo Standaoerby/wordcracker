@@ -184,6 +184,19 @@ def find_book_by_topic(
             break
 
     books = list(seen.values())
+    # Sprint 20+ B18 — same book under different PG ids with identical
+    # snippet (Stan Round 11 Q13: PG775 = PG12163 identical snippet,
+    # rerank_score 0.416241). Dedup by snippet hash before truncation.
+    # B10 — also collapse «Moby Dick» + «Moby Dick; Or, The Whale».
+    filter_drops: dict = {}
+    if books:
+        from scripts.v2.tools._result_filters import (
+            apply_filters, dedup_by_key, dedup_book_editions,
+        )
+        books, filter_drops = apply_filters([
+            lambda r: dedup_by_key(r, key="snippet"),
+            dedup_book_editions,
+        ], books)
     warnings = list(sub.warnings) if sub.warnings else []
     if len(books) < top:
         warnings.append(ToolWarning(
@@ -191,6 +204,13 @@ def find_book_by_topic(
             message=f"only {len(books)} unique books survived threshold "
                     f"(min_rerank_score={min_rerank_score}); "
                     f"lower threshold or increase per_retriever",
+        ))
+    if filter_drops:
+        warnings.append(ToolWarning(
+            code="dedup",
+            message=f"deduped {sum(filter_drops.values())} duplicate "
+                    f"book(s) — same content under multiple PG ids "
+                    f"or edition variants",
         ))
 
     # Sprint 19+ — render hint: show rerank_score in the answer table

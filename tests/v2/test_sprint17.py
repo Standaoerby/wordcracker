@@ -363,9 +363,12 @@ class ChtoPochitatPosle(unittest.TestCase):
         e = ent_mod.extract("что почитать после преступления и наказания")
         p = plan_mod.build("book_similar", e)
         self.assertEqual(p.steps[0].tool, "find_book_by_topic")
-        # Topic should be the canonical EN title since embedding lookup
-        # on EN corpus has higher precision than RU.
-        self.assertEqual(p.steps[0].args["topic"], "Crime and Punishment")
+        # Sprint 20+ B8: topic enriched with thematic framing — improves
+        # semantic search precision for «similar to» queries over bare
+        # title (which gave noisy word-cooccurrence results).
+        topic = p.steps[0].args["topic"]
+        self.assertIn("Crime and Punishment", topic)
+        self.assertIn("similar", topic.lower())
 
     def test_declension_dative(self):
         """«подобное Преступлению и наказанию» — dative case."""

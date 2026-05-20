@@ -37,6 +37,11 @@ class QueryPlan:
     clarify_question: str | None = None
     explain: str = ""
     out_of_scope_reason: str | None = None
+    # Sprint 20+ — plan-level render notes (separate from per-tool
+    # data._render_note). Used when a plan must surface a contract /
+    # limitation to the renderer that no individual tool would emit,
+    # e.g. «exclude_archaic flag set but no archaic-density column yet».
+    render_notes: list[str] = field(default_factory=list)
 
 
 # ===== helpers =====
@@ -781,13 +786,35 @@ def _plan_book_recommendation(e: Entities) -> QueryPlan:
 
     Use top_books_by_downloads as a popularity proxy, then renderer says
     'check book_readability for each' — we can't filter by CEFR globally
-    until BookProfile pipeline (Sprint 4) is online."""
+    until BookProfile pipeline (Sprint 4) is online.
+
+    Sprint 20+ B4 + B9: honor lang_hint (defaults to 'en') and
+    exclude_archaic. Since we don't have a per-book archaic-density
+    column yet, exclude_archaic surfaces as a plan-level render note
+    that asks the renderer to disclose the limitation honestly rather
+    than silently returning Pliny / Roman Stoicism for «B2 без архаизмов»."""
+    lang = e.lang_hint or "en"
+    notes: list[str] = []
+    if e.exclude_archaic:
+        # Stamp a render-time note so the renderer warns the user honestly
+        # that we don't filter by archaic content automatically (B9). When
+        # BookProfile.archaic_density lands (Sprint 4), this becomes a real
+        # filter on top_books output.
+        notes.append(
+            "Пользователь просил «без архаизмов», но per-book archaic_density "
+            "filter ещё не онлайн. DISCLOSE честно: «отсортировал по "
+            "популярности; архаичность тайтла проверь через book_readability — "
+            "Pliny/Бэкон/Шекспир заведомо архаичны, исключи их вручную». "
+            "НЕ замалчивай это ограничение."
+        )
     return QueryPlan(
         intent="book_recommendation", entities=e,
         steps=[PlanStep(tool="top_books_by_downloads",
-                        args={"top": 20, "lang": "en"})],
+                        args={"top": 20, "lang": lang})],
         expected_cost="medium",
-        explain="topular books → user filters by readability manually",
+        explain=(f"popular books (lang={lang}) → user filters by readability"
+                 + (" [exclude_archaic flagged]" if e.exclude_archaic else "")),
+        render_notes=notes,
     )
 
 
@@ -1362,7 +1389,7 @@ def _plan_similar_to(e: Entities) -> QueryPlan:
 
 
 def _plan_book_similar(e: Entities) -> QueryPlan:
-    """«Книги похожие на X», «продолжение X», «similar to X».
+    """«Книги похожие на X», «продолжение X», «similar to X», «после X».
 
     Strategy: use X's canonical title as the semantic topic for
     find_book_by_topic. hybrid_search (semantic + lexical) finds
@@ -1371,27 +1398,56 @@ def _plan_book_similar(e: Entities) -> QueryPlan:
     can also note «excluding the reference book»).
 
     Requires a reference book. Without it the intent is meaningless —
-    fall back to clarify with a hint."""
+    fall back to clarify with a hint.
+
+    Sprint 20+ B8: enrich the topic query — bare title gives noisy
+    word-cooccurrence results («Crime and Punishment» surfaces unrelated
+    books with «crime»/«punishment» mentions). Adding «similar to / in
+    theme of» framing biases semantic search toward thematic neighbours
+    rather than lexical hits. Renderer also receives a note that the
+    reference book itself should be excluded from the list (post-filter
+    by pg_id at render time)."""
     if not e.book_id and not e.book_title:
         return _need_book(e)
     # Prefer the canonical English title — embeddings index is English,
     # so «Преступление и наказание» as topic returns less than
     # «Crime and Punishment».
-    topic = e.book_title or (e.raw_misc or {}).get("raw_text", "") or "books"
+    title = e.book_title or (e.raw_misc or {}).get("raw_text", "") or "books"
+    # Sprint 20+ B8: enriched topic. "books with similar themes to X"
+    # primes the embeddings toward thematic relatives. Empirically
+    # better than bare title for "после X" / "sequel" queries.
+    topic = f"books with similar themes and style to {title}"
+    notes = []
+    if e.book_id:
+        notes.append(
+            f"Это запрос «похожие на {title}» (book_similar). "
+            f"Исходная книга — `{e.book_id}` ({title}). "
+            f"ВАЖНО: при перечислении результатов EXCLUDE саму книгу "
+            f"`{e.book_id}` из списка — у пользователя она уже прочитана. "
+            f"Если она первая в результатах — пропусти и упомяни этот факт."
+        )
+    else:
+        notes.append(
+            f"Это запрос «похожие на {title}» (book_similar). "
+            f"PG/U id исходной книги не разрешился (book_title только); "
+            f"при перечислении проверь, не попадает ли сам тайтл «{title}» "
+            f"в результаты — если да, EXCLUDE его."
+        )
     steps = [PlanStep(
         tool="find_book_by_topic",
         # Sprint 18 — BGE rerank default. For «похожие на X» queries the
         # bi-encoder pool surfaces noisy neighbours (book mentions, not
         # thematic relatives); cross-encoder reorder is the win.
-        args={"topic": topic, "top": 8, "rerank_with": "bge_reranker"},
+        args={"topic": topic, "top": 10, "rerank_with": "bge_reranker"},
     )]
     return QueryPlan(
         intent="book_similar", entities=e,
         steps=steps,
         expected_cost="medium",
         explain=(f"book_similar → find_book_by_topic(topic={topic!r}, "
-                 f"rerank=bge_reranker) — semantic neighbours of "
-                 f"{e.book_title or e.book_id}"),
+                 f"rerank=bge_reranker) — thematic neighbours of "
+                 f"{title} (excluding reference)"),
+        render_notes=notes,
     )
 
 
@@ -1484,9 +1540,32 @@ def _plan_topic_book_search(e: Entities) -> QueryPlan:
 
     The full raw query goes in as the topic — hybrid_search's semantic
     side is robust to filler («найди книгу про …»), and the BGE rerank
-    (if available) further suppresses non-topical results."""
+    (if available) further suppresses non-topical results.
+
+    Sprint 20+ B4: when lang_hint is set («английская классика про X»),
+    surface a render note. The corpus is ~95% English but contains
+    multilingual chunks (Finnish, Hungarian, Italian) that can leak
+    into topical search; renderer is told to disclose if non-matching
+    language results appear."""
     raw = (e.raw_misc or {}).get("raw_text", "") or ""
     topic = _strip_topic_filler(raw) or raw
+    notes: list[str] = []
+    if e.lang_hint and e.lang_hint != "en":
+        # Non-English requested → highlight that our corpus is mostly EN
+        notes.append(
+            f"Пользователь явно просил язык '{e.lang_hint}', но корпус "
+            f"в основном английский. Если в результатах смесь языков — "
+            f"DISCLOSE: «корпус Project Gutenberg в основном английский, "
+            f"для целевого языка результаты могут быть ограничены»."
+        )
+    elif e.lang_hint == "en":
+        # English explicit → guard against leaking non-EN chunks
+        notes.append(
+            "Пользователь явно просил английскую литературу. Если в "
+            "результатах появятся книги на других языках (Finnish, "
+            "Hungarian, Italian — встречаются в Project Gutenberg), "
+            "EXCLUDE их из ответа или DISCLOSE отдельно."
+        )
     return QueryPlan(
         intent="topic_book_search", entities=e,
         steps=[PlanStep(tool="find_book_by_topic",
@@ -1499,6 +1578,7 @@ def _plan_topic_book_search(e: Entities) -> QueryPlan:
         expected_cost="medium",
         explain=f"topic_book_search → find_book_by_topic(topic={topic!r}, "
                 "rerank=bge_reranker)",
+        render_notes=notes,
     )
 
 
@@ -1733,6 +1813,114 @@ def _plan_translate_word_list(e: Entities) -> QueryPlan:
 
 # Wire builder into the dispatch table now that the function exists.
 PLAN_BUILDERS["translate_word_list"] = _plan_translate_word_list
+
+
+def _plan_export_word_list(e: Entities) -> QueryPlan:
+    """Sprint 20+ B3 — export-followup with prior-words handoff.
+
+    Stan Round 11 test «выгрузи в anki» / «csv pls» after a word-list
+    turn used to fall to clarify because no rule matched and there was
+    no plan to format prior words. Now:
+
+    1. Intent classifier catches the export verb + format token.
+    2. history.merge_with_history (existing translate-followup branch)
+       extracts up to 10 prior words and stashes them on
+       raw_misc._prior_words.
+    3. This plan builder builds a NO-TOOL plan with render_notes
+       containing the prior words + format hint. The renderer outputs
+       a code-block formatted per format.
+
+    No new tools needed — the formatting is deterministic enough that
+    we can let the renderer LLM do it directly. Format hints describe
+    the exact line shape so the LLM doesn't guess.
+    """
+    prior_words = (e.raw_misc or {}).get("_prior_words") or []
+    total = (e.raw_misc or {}).get("_prior_words_total") or len(prior_words)
+    fmt = e.export_format or "csv"
+
+    if not prior_words:
+        # Either there's no prior word-list turn, or extraction failed.
+        # Surface an honest clarify with a copy-paste recipe so the user
+        # can list 5-10 words and re-ask.
+        return QueryPlan(
+            intent="export_word_list", entities=e, steps=[],
+            needs_clarify=True,
+            clarify_question=(
+                f"Хочешь выгрузить список слов в формате {fmt!r}? "
+                f"Я не нашёл в предыдущем ответе таблицы со словами "
+                f"(либо это первое сообщение, либо формат прошлого ответа "
+                f"не распознался).\n\n"
+                f"Перечисли явно слова, и я выгружу их:\n"
+                f"• «выгрузи в {fmt}: tuppence, embroidery, stitching, vavasour»\n\n"
+                f"Поддерживаемые форматы: anki (TSV), csv, json, markdown, tsv."
+            ),
+            explain=f"export_word_list — no prior words, surfacing clarify (fmt={fmt})",
+        )
+
+    # Build a render-only plan. Steps = [] is intentional; the renderer
+    # uses render_notes + prior word list to format the output. This
+    # avoids a useless Ollama round-trip for what is essentially
+    # string transformation.
+    spec = _format_spec(fmt)
+    capped = prior_words[:50]    # safety cap — at 100 words renderer
+                                 # output gets long but token-cheap
+    notes = [
+        f"EXPORT REQUEST: пользователь хочет prior word-list в формате "
+        f"`{fmt}`. Слов извлечено: {len(capped)} из {total} (capped at 50 "
+        f"if total > 50). Список (сохрани порядок!):\n"
+        f"{capped}\n\n"
+        f"{spec}\n\n"
+        f"ВАЖНО: НЕ вызывай новые tools (steps=[] намеренно). Просто "
+        f"отформатируй слова в указанном виде, оберни в ```код-блок```. "
+        f"Если у тебя в context есть переводы/IPA/POS из предыдущих "
+        f"enrich_word вызовов — добавь их. Иначе ОДНА колонка `word` "
+        f"+ предупреждение «для перевода спроси отдельно»."
+    ]
+    return QueryPlan(
+        intent="export_word_list", entities=e, steps=[],
+        expected_cost="cheap",
+        explain=(f"export_word_list: fmt={fmt}, n={len(capped)}/{total} "
+                 f"(render-only, no tools)"),
+        render_notes=notes,
+    )
+
+
+def _format_spec(fmt: str) -> str:
+    """Human-readable description of the expected output shape per
+    format. Renderer LLM reads this and produces the code block.
+    Kept inline so format additions are one-place edits."""
+    table = {
+        "anki": (
+            "ANKI TSV format: одна строка на слово, поля разделены TAB. "
+            "Минимум: `word\\ttranslation\\tdefinition`. Header row НЕ "
+            "нужен (Anki Desktop читает без header). Если у тебя нет "
+            "перевода — оставь поле пустым между двумя \\t."
+        ),
+        "csv": (
+            "CSV format: header `word,translation,definition` затем "
+            "строки. Escape запятые в значениях двойными кавычками. "
+            "Если перевода нет, оставь поле пустым (`word1,,definition1`)."
+        ),
+        "tsv": (
+            "TSV (tab-separated): header `word\\ttranslation\\tdefinition` "
+            "затем строки. Используй ровно TAB между полями (не пробелы)."
+        ),
+        "json": (
+            "JSON format: массив объектов "
+            "`[{\"word\": ..., \"translation\": ..., \"definition\": ...}, ...]`. "
+            "Pretty-print с indent=2 для читаемости."
+        ),
+        "markdown": (
+            "Markdown pipe-table:\n"
+            "`| word | translation | definition |`\n"
+            "`|------|-------------|------------|`\n"
+            "Per-row после header. Подходит для Obsidian / Notion paste."
+        ),
+    }
+    return table.get(fmt, table["csv"])
+
+
+PLAN_BUILDERS["export_word_list"] = _plan_export_word_list
 
 
 def _regex_to_canonical(regex: str | None) -> str | None:

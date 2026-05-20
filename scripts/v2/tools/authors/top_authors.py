@@ -19,6 +19,9 @@ if str(_REPO) not in sys.path:
 
 from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
+from scripts.v2.tools._result_filters import (
+    apply_filters, drop_null_authors, dedup_book_editions,
+)
 
 
 # Sprint 11.2 cache: pre-built author → tokens lookup table. Built by
@@ -94,11 +97,17 @@ def top_authors_by(metric: str = "books", top: int = 10, lang: str = "en",
                              "tokens": int(info.get("tokens", 0)),
                              "books_with_counts": int(info.get("books", 0))})
             rows.sort(key=lambda r: r["tokens"], reverse=True)
+            # Sprint 20+ B5 — NaN-author #1 with 204M tokens (Stan Round
+            # 11 Q36). The metadata JSON occasionally has rows where the
+            # author key serialized as «NaN» / null / empty (pandas → JSON
+            # null). Drop them before truncating to top-N.
+            rows, drops = apply_filters([drop_null_authors], rows)
             rows = rows[:top]
             return ToolResult.success(
                 tool="top_authors_by",
                 data={"metric": "tokens", "top_n": top, "lang": lang,
-                      "top": rows, "_cache_hit": True},
+                      "top": rows, "_cache_hit": True,
+                      "_filter_drops": drops if drops else None},
                 coverage=Coverage(books_matched=len(rows), books_total=-1),
                 warnings=[ToolWarning(
                     "cached_aggregate",
@@ -127,6 +136,13 @@ def top_authors_by(metric: str = "books", top: int = 10, lang: str = "en",
         )
 
     rows = raw.get("top", []) if isinstance(raw, dict) else []
+    # Sprint 20+ B5 — also filter NaN/null authors from the live-scan path.
+    if rows:
+        rows, drops = apply_filters([drop_null_authors], rows)
+        if isinstance(raw, dict):
+            raw["top"] = rows
+            if drops:
+                raw["_filter_drops"] = drops
     return ToolResult.success(
         tool="top_authors_by", data=raw,
         coverage=Coverage(books_matched=len(rows), books_total=-1),
@@ -182,6 +198,13 @@ def top_authors_by_country(country: str, metric: str = "books", top: int = 20) -
         )
 
     rows = raw.get("top", []) if isinstance(raw, dict) else []
+    # Sprint 20+ B5 — apply same NaN-author filter on country path.
+    if rows:
+        rows, drops = apply_filters([drop_null_authors], rows)
+        if isinstance(raw, dict):
+            raw["top"] = rows
+            if drops:
+                raw["_filter_drops"] = drops
     return ToolResult.success(
         tool="top_authors_by_country", data=raw,
         coverage=Coverage(books_matched=len(rows), books_total=-1),
