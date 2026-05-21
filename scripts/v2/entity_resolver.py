@@ -305,24 +305,49 @@ _prom_state: dict = {
 
 
 def _build_prominence_index() -> dict:
-    """Aggregate downloads + book counts per author regex.
+    """Aggregate downloads + book counts at TWO granularities.
 
-    Returns dict like `{"^Doyle,": {"downloads": 123456, "books": 22}, …}`.
-    O(N) over the SPGC metadata once. Mtime-cached so reloading metadata
-    rebuilds.
+    Returns dict with two sub-keys:
+
+      {
+        "by_surname": {"^Doyle,": {"downloads": 123456, "books": 22, ...}, …},
+        "by_canonical": {"Doyle, Arthur Conan": {"downloads": 120000,
+                          "books": 21}, "Doyle, Charles": {"downloads": 0,
+                          "books": 1}, …},
+      }
+
+    B-R17-1 stage3.2 fix (2026-05-21): previously the index was keyed
+    ONLY by surname regex, so every "Wells, X" author got the same
+    aggregated prominence value. When `_candidates_from_corpus_fuzzy`
+    produced 5 candidates ("Wells, H. G.", "Wells, Basil", …), they all
+    received identical 48,208 downloads / 226 books — ranking by
+    prominence was a no-op, fuzz scores were equal, and the resolver
+    flagged "ambiguous (fuzz gap 0, prom ratio 1.0x) → clarify_needed".
+    Result: «какие книги у Wells» returned the aggregate Wells card
+    (1820–? birth, 10 books) instead of H.G. Wells specifically.
+
+    With two-level indexing, the ranker uses per-canonical downloads
+    to pick H.G. Wells (15K) over Wells, Basil (0). Aliases still
+    return the surname-aggregate for backwards-compat (some callers
+    want "all Wells under this surname"); ranking switches to
+    per-canonical via `prominence_for_canonical()`.
+
+    O(N) over the SPGC metadata once. Mtime-cached so reloading
+    metadata rebuilds.
     """
     try:
         from scripts.rag_tools import _metadata_df
         df = _metadata_df()
     except Exception as e:
         log.warning("prominence index: _metadata_df unavailable: %s", e)
-        return {}
+        return {"by_surname": {}, "by_canonical": {}}
     if df is None or "author" not in df.columns:
-        return {}
+        return {"by_surname": {}, "by_canonical": {}}
 
     has_downloads = "downloads" in df.columns
 
-    out: dict[str, dict] = {}
+    by_surname: dict[str, dict] = {}
+    by_canonical: dict[str, dict] = {}
     # Iterate fast — group-by would copy; just walk rows.
     # Defensive: _metadata_df concatenates multiple sources (SPGC +
     # user_uploads + orphan_pg). When source dtypes differ (object vs
@@ -346,16 +371,26 @@ def _build_prominence_index() -> dict:
             dl = int(float(dl_raw)) if dl_raw is not None else 0
         except (TypeError, ValueError):
             dl = 0
-        key = f"^{surname},"
-        ent = out.setdefault(key, {"downloads": 0, "books": 0,
-                                    "canonical_first": a})
-        ent["downloads"] += dl
-        ent["books"] += 1
-    return out
+        # Surname aggregate (backwards-compat — alias path still uses this)
+        sn_key = f"^{surname},"
+        sn_ent = by_surname.setdefault(sn_key, {"downloads": 0, "books": 0,
+                                                  "canonical_first": a})
+        sn_ent["downloads"] += dl
+        sn_ent["books"] += 1
+        # Per-canonical (new — used by candidate ranking)
+        can_ent = by_canonical.setdefault(a, {"downloads": 0, "books": 0,
+                                                "canonical_name": a})
+        can_ent["downloads"] += dl
+        can_ent["books"] += 1
+    return {"by_surname": by_surname, "by_canonical": by_canonical}
 
 
 def get_prominence_index(force_reload: bool = False) -> dict:
-    """Thread-safe accessor. Rebuilds when metadata file mtime changes."""
+    """Thread-safe accessor. Rebuilds when metadata file mtime changes.
+
+    Returns the full two-level index dict. Most callers want the
+    helpers below, which extract the right sub-table.
+    """
     with _prom_lock:
         if force_reload or _prom_state["data"] is None:
             _prom_state["data"] = _build_prominence_index()
@@ -364,9 +399,38 @@ def get_prominence_index(force_reload: bool = False) -> dict:
 
 
 def prominence_for(author_regex: str) -> dict:
-    """Get prominence for a single author_regex. Empty dict if unknown."""
+    """Get prominence for a single author_regex (surname aggregate).
+
+    Used by the alias path — when user typed «Wells» with no first
+    name, this returns the aggregate Wells card. The ranker uses
+    `prominence_for_canonical()` instead.
+
+    Returns empty dict if unknown surname. Handles both new two-level
+    schema and any legacy state (defensive — single-level dicts
+    pre-stage3.2 would have keys that look like "^Wells,").
+    """
     idx = get_prominence_index()
-    return idx.get(author_regex, {})
+    # Defensive — handle the pre-stage3.2 single-level shape if any
+    # in-process state survives a hot reload.
+    if "by_surname" not in idx:
+        return idx.get(author_regex, {})
+    return idx["by_surname"].get(author_regex, {})
+
+
+def prominence_for_canonical(canonical_name: str) -> dict:
+    """Get prominence for an exact canonical author name.
+
+    B-R17-1 stage3.2 — used by `_candidates_from_corpus_fuzzy` so each
+    candidate gets its OWN per-author downloads/books, not the surname
+    aggregate. Lets the ranker prefer "Wells, H. G." (15K dl) over
+    "Wells, Basil" (0 dl) instead of treating them as equally prominent.
+
+    Returns empty dict if `canonical_name` not present in metadata.
+    """
+    idx = get_prominence_index()
+    if "by_canonical" not in idx:
+        return {}
+    return idx["by_canonical"].get(canonical_name, {})
 
 
 # =====================================================================
@@ -453,7 +517,23 @@ def _simple_token_score(q: str, a: str) -> int:
 
 
 def _candidates_from_alias(q_lc: str) -> list[Candidate]:
-    """Curated alias hit — at most one candidate, score 100."""
+    """Curated alias hit — at most one candidate, score 100.
+
+    B-R17-1 stage3.2 (2026-05-21): when the curated alias is a bare
+    surname (e.g. `wells → ^Wells,` matching multiple distinct
+    canonical authors), pick the most prominent specific author and
+    tighten the regex to match only that one. Without this, queries
+    like «какие книги у Wells» got the aggregate card spanning all
+    Wells authors (1820–? birth, 10 books) instead of H.G. Wells
+    specifically.
+
+    Heuristic: if the alias regex is exactly `^Surname,` and 2+ distinct
+    canonical names share that surname, find the dominant one (top
+    downloads). If it has ≥5× the downloads of the runner-up, tighten
+    the regex to `^Surname, First` so author_metadata returns just
+    that author's data. Otherwise leave the surname regex and let the
+    aggregate behave as before (no obvious leader → aggregate is fine).
+    """
     try:
         from scripts.v2.planner.entities import AUTHOR_ALIASES
     except ImportError:
@@ -470,6 +550,20 @@ def _candidates_from_alias(q_lc: str) -> list[Candidate]:
     if not regex:
         return []
     prom = prominence_for(regex)
+    # Try to specialize bare-surname regex to the dominant canonical.
+    # Only attempt for `^Surname,` shape (the most ambiguous form).
+    specialized_regex, specialized_display, specialized_prom = (
+        _specialize_surname_to_dominant(regex)
+    )
+    if specialized_regex is not None:
+        return [Candidate(
+            key=specialized_regex,
+            display=specialized_display,
+            score=100,
+            source="alias_curated",
+            prominence=specialized_prom.get("downloads", 0),
+            books_in_corpus=specialized_prom.get("books", 0),
+        )]
     return [Candidate(
         key=regex,
         display=prom.get("canonical_first") or _regex_to_display(regex),
@@ -478,6 +572,61 @@ def _candidates_from_alias(q_lc: str) -> list[Candidate]:
         prominence=prom.get("downloads", 0),
         books_in_corpus=prom.get("books", 0),
     )]
+
+
+def _specialize_surname_to_dominant(
+    regex: str, *, dominance_ratio: float = 5.0,
+) -> tuple[str | None, str | None, dict]:
+    """Pick the most prominent canonical author whose name matches `regex`.
+
+    Returns `(tightened_regex, display_name, prominence_dict)` if a
+    dominant winner exists, else `(None, None, {})`. Dominance means
+    the top canonical has ≥ `dominance_ratio` × runner-up downloads
+    (or the runner-up has 0). For ambiguous surnames (e.g. Lewis with
+    no obvious leader between C.S. Lewis and M.G. Lewis when both have
+    similar download counts), returns None and the caller keeps the
+    aggregate alias resolution.
+
+    Skipped entirely when:
+      * regex is already specific (contains a comma followed by anything)
+      * <2 canonical names match the surname (no ambiguity to resolve)
+    """
+    import re as _re
+    # Skip if regex is more specific than `^Surname,$` — already targeted.
+    m = _re.fullmatch(r"\^([A-Za-zЀ-ӿ' -]+),", regex)
+    if not m:
+        return None, None, {}
+    surname = m.group(1)
+    idx = get_prominence_index()
+    by_canonical = idx.get("by_canonical", {}) if isinstance(idx, dict) else {}
+    if not by_canonical:
+        return None, None, {}
+    # Find all canonicals starting with `Surname,`
+    surname_prefix = f"{surname},"
+    matches = [(name, ent) for name, ent in by_canonical.items()
+               if name.startswith(surname_prefix)]
+    if len(matches) < 2:
+        return None, None, {}
+    matches.sort(key=lambda x: x[1].get("downloads", 0), reverse=True)
+    top_name, top_ent = matches[0]
+    runner_dl = matches[1][1].get("downloads", 0)
+    top_dl = top_ent.get("downloads", 0)
+    if top_dl == 0:
+        return None, None, {}
+    if runner_dl > 0 and (top_dl / runner_dl) < dominance_ratio:
+        # Genuinely ambiguous — leave aggregate, let resolver clarify
+        # downstream if needed.
+        return None, None, {}
+    # Tighten to "^Surname, First" — first token after the comma.
+    # `top_name` looks like "Wells, H. G." or "Hawthorne, Nathaniel".
+    parts = top_name.split(",", 1)
+    if len(parts) != 2:
+        return None, None, {}
+    first_token = parts[1].strip().split(" ", 1)[0].rstrip(".")
+    if not first_token:
+        return None, None, {}
+    tighter = f"^{surname}, {first_token}"
+    return tighter, top_name, top_ent
 
 
 def _candidates_from_corpus_fuzzy(
@@ -528,7 +677,12 @@ def _candidates_from_corpus_fuzzy(
         if not surname:
             continue
         regex = f"^{surname},"
-        prom = prominence_for(regex)
+        # B-R17-1 stage3.2: use per-canonical prominence, not surname
+        # aggregate. Previously all "Wells, X" candidates got the same
+        # 48K downloads → prom_ratio always 1.0x → clarify_needed
+        # spam on every multi-author surname. Per-canonical lets
+        # H.G. Wells (15K) win over Wells, Basil (0).
+        prom = prominence_for_canonical(choice)
         out.append(Candidate(
             key=regex,
             display=choice,

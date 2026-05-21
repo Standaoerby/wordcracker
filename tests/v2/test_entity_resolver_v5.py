@@ -428,6 +428,9 @@ class ProminenceIndexCache(unittest.TestCase):
         self.assertEqual(m.call_count, 2)
 
     def test_aggregates_downloads_and_books(self):
+        """stage3.2: index is now two-level (by_surname + by_canonical).
+        Surname-aggregate still works; canonical-level adds per-author
+        granularity for the ranker."""
         fake_df = _mock_metadata_df([
             {"author": "Doyle, Arthur Conan", "downloads": 5000, "id": 1},
             {"author": "Doyle, Arthur Conan", "downloads": 3000, "id": 2},
@@ -435,9 +438,13 @@ class ProminenceIndexCache(unittest.TestCase):
         ])
         with mock.patch("scripts.rag_tools._metadata_df", return_value=fake_df):
             idx = er.get_prominence_index()
-        prom = idx["^Doyle,"]
+        prom = idx["by_surname"]["^Doyle,"]
         self.assertEqual(prom["downloads"], 9000)
         self.assertEqual(prom["books"], 3)
+        # Same canonical name across 3 rows → per-canonical aggregate
+        can = idx["by_canonical"]["Doyle, Arthur Conan"]
+        self.assertEqual(can["downloads"], 9000)
+        self.assertEqual(can["books"], 3)
 
     def test_handles_missing_downloads_column(self):
         fake_df = pd.DataFrame([
@@ -445,13 +452,14 @@ class ProminenceIndexCache(unittest.TestCase):
         ])
         with mock.patch("scripts.rag_tools._metadata_df", return_value=fake_df):
             idx = er.get_prominence_index()
-        self.assertEqual(idx["^Doyle,"]["downloads"], 0)
-        self.assertEqual(idx["^Doyle,"]["books"], 1)
+        self.assertEqual(idx["by_surname"]["^Doyle,"]["downloads"], 0)
+        self.assertEqual(idx["by_surname"]["^Doyle,"]["books"], 1)
 
     def test_handles_missing_metadata(self):
         with mock.patch("scripts.rag_tools._metadata_df", return_value=None):
             idx = er.get_prominence_index()
-        self.assertEqual(idx, {})
+        # stage3.2: returns two-level empty dict, not flat empty
+        self.assertEqual(idx, {"by_surname": {}, "by_canonical": {}})
 
     def test_handles_nan_and_mixed_types_in_author_column(self):
         """Prod crash 2026-05-21 06:02 — _metadata_df concatenates SPGC
@@ -478,15 +486,17 @@ class ProminenceIndexCache(unittest.TestCase):
         with mock.patch("scripts.rag_tools._metadata_df", return_value=fake_df):
             idx = er.get_prominence_index(force_reload=True)
         # Must NOT raise. Must contain the 3 real authors, skip nulls.
-        self.assertIn("^Doyle,",  idx)
-        self.assertIn("^Hugo,",   idx)
-        self.assertIn("^Tolstoy,", idx)
+        by_surname = idx["by_surname"]
+        self.assertIn("^Doyle,",  by_surname)
+        self.assertIn("^Hugo,",   by_surname)
+        self.assertIn("^Tolstoy,", by_surname)
         # And NOT contain any junk entries
         for bad_key in ("^nan,", "^None,", "^,", "^<NA>,"):
-            self.assertNotIn(bad_key, idx, f"junk key leaked: {bad_key!r}")
+            self.assertNotIn(bad_key, by_surname,
+                              f"junk key leaked: {bad_key!r}")
         # Downloads aggregated correctly
-        self.assertEqual(idx["^Hugo,"]["downloads"], 12000)
-        self.assertEqual(idx["^Doyle,"]["downloads"], 5000)
+        self.assertEqual(by_surname["^Hugo,"]["downloads"], 12000)
+        self.assertEqual(by_surname["^Doyle,"]["downloads"], 5000)
 
     def test_handles_string_downloads_via_coercion(self):
         """Defensive — downloads column with string values (rare but
@@ -499,10 +509,127 @@ class ProminenceIndexCache(unittest.TestCase):
         ])
         with mock.patch("scripts.rag_tools._metadata_df", return_value=fake_df):
             idx = er.get_prominence_index(force_reload=True)
-        self.assertEqual(idx["^Doyle,"]["downloads"], 5000)
-        self.assertEqual(idx["^Hugo,"]["downloads"], 12000)
+        by_surname = idx["by_surname"]
+        self.assertEqual(by_surname["^Doyle,"]["downloads"], 5000)
+        self.assertEqual(by_surname["^Hugo,"]["downloads"], 12000)
         # Bad row's downloads coerced to 0 (not a crash)
-        self.assertEqual(idx["^Bad,"]["downloads"], 0)
+        self.assertEqual(by_surname["^Bad,"]["downloads"], 0)
+
+
+# =====================================================================
+# stage3.2 — per-canonical prominence + surname-to-dominant specialization
+# =====================================================================
+
+
+class PerCanonicalProminence(unittest.TestCase):
+    """B-R17-1 stage3.2 (2026-05-21): when surname matches multiple
+    canonicals, ranker uses per-canonical downloads, not surname
+    aggregate. Closes «какие книги у Wells» returning aggregate card
+    instead of H.G. Wells."""
+
+    def setUp(self):
+        with er._prom_lock:
+            er._prom_state["data"] = None
+
+    def test_per_canonical_returns_individual_downloads(self):
+        fake_df = _mock_metadata_df([
+            {"author": "Wells, H. G.",   "downloads": 50000, "id": 1},
+            {"author": "Wells, H. G.",   "downloads": 30000, "id": 2},
+            {"author": "Wells, Basil",   "downloads": 0,     "id": 3},
+            {"author": "Wells, Carolyn", "downloads": 0,     "id": 4},
+        ])
+        with mock.patch("scripts.rag_tools._metadata_df", return_value=fake_df):
+            er.get_prominence_index(force_reload=True)
+            hg = er.prominence_for_canonical("Wells, H. G.")
+            basil = er.prominence_for_canonical("Wells, Basil")
+            agg = er.prominence_for("^Wells,")
+        # H.G. has its own per-author tally
+        self.assertEqual(hg["downloads"], 80000)
+        self.assertEqual(hg["books"], 2)
+        self.assertEqual(basil["downloads"], 0)
+        self.assertEqual(basil["books"], 1)
+        # Surname aggregate still works for backwards-compat
+        self.assertEqual(agg["downloads"], 80000)
+        self.assertEqual(agg["books"], 4)
+
+    def test_specialize_picks_dominant_canonical(self):
+        """Alias path: bare «Wells» surname regex should specialize to
+        Wells, H. G. when he dominates downloads by ≥5×."""
+        fake_df = _mock_metadata_df([
+            {"author": "Wells, H. G.",   "downloads": 50000, "id": 1},
+            {"author": "Wells, Basil",   "downloads": 0,     "id": 2},
+            {"author": "Wells, Carolyn", "downloads": 0,     "id": 3},
+        ])
+        with mock.patch("scripts.rag_tools._metadata_df", return_value=fake_df):
+            er.get_prominence_index(force_reload=True)
+            tight, display, prom = er._specialize_surname_to_dominant("^Wells,")
+        self.assertEqual(tight, "^Wells, H")
+        self.assertEqual(display, "Wells, H. G.")
+        self.assertEqual(prom["downloads"], 50000)
+
+    def test_specialize_skips_when_ambiguous(self):
+        """When two canonicals are close in downloads (<5× ratio), leave
+        the alias as the surname aggregate — let resolver clarify."""
+        fake_df = _mock_metadata_df([
+            {"author": "Lewis, C. S.",   "downloads": 10000, "id": 1},
+            {"author": "Lewis, M. G.",   "downloads":  4000, "id": 2},  # ratio 2.5
+        ])
+        with mock.patch("scripts.rag_tools._metadata_df", return_value=fake_df):
+            er.get_prominence_index(force_reload=True)
+            tight, display, prom = er._specialize_surname_to_dominant("^Lewis,")
+        self.assertIsNone(tight)
+        self.assertIsNone(display)
+        self.assertEqual(prom, {})
+
+    def test_specialize_skips_when_only_one_canonical(self):
+        """When surname has only one canonical author, no specialization
+        needed — caller keeps the bare-surname regex."""
+        fake_df = _mock_metadata_df([
+            {"author": "Wodehouse, P. G.", "downloads": 5000, "id": 1},
+        ])
+        with mock.patch("scripts.rag_tools._metadata_df", return_value=fake_df):
+            er.get_prominence_index(force_reload=True)
+            tight, _, _ = er._specialize_surname_to_dominant("^Wodehouse,")
+        self.assertIsNone(tight)
+
+    def test_alias_returns_specialized_regex_for_dominant_surname(self):
+        """End-to-end: `_candidates_from_alias('wells')` returns a
+        Candidate with the tightened regex `^Wells, H` and the H.G.
+        canonical display, not the aggregate surname."""
+        fake_df = _mock_metadata_df([
+            {"author": "Wells, H. G.",   "downloads": 50000, "id": 1},
+            {"author": "Wells, Basil",   "downloads": 0,     "id": 2},
+        ])
+        with mock.patch("scripts.rag_tools._metadata_df", return_value=fake_df):
+            er.get_prominence_index(force_reload=True)
+            cands = er._candidates_from_alias("wells")
+        self.assertEqual(len(cands), 1)
+        c = cands[0]
+        self.assertEqual(c.source, "alias_curated")
+        self.assertEqual(c.key, "^Wells, H")
+        self.assertEqual(c.display, "Wells, H. G.")
+        self.assertEqual(c.prominence, 50000)
+
+    def test_fuzzy_candidates_use_per_canonical_prominence(self):
+        """B-R17-1 ROOT FIX: each fuzzy candidate gets its OWN per-
+        canonical prominence, not the surname aggregate. Previously
+        all Wellses got 50K each → ranker couldn't disambiguate."""
+        fake_df = _mock_metadata_df([
+            {"author": "Wells, H. G.",   "downloads": 50000, "id": 1},
+            {"author": "Wells, Basil",   "downloads": 0,     "id": 2},
+        ])
+        with mock.patch("scripts.rag_tools._metadata_df", return_value=fake_df):
+            er.get_prominence_index(force_reload=True)
+            cands = er._candidates_from_corpus_fuzzy("wells")
+        # Ensure ALL fuzzy hits got their per-canonical prominence
+        hg = next(c for c in cands if c.display == "Wells, H. G.")
+        basil = next(c for c in cands if c.display == "Wells, Basil")
+        self.assertEqual(hg.prominence, 50000)
+        self.assertEqual(basil.prominence, 0)
+        # And ranker should put H.G. first
+        from scripts.v2.entity_resolver import rank_author_candidates
+        ranked = rank_author_candidates(cands)
+        self.assertEqual(ranked[0].display, "Wells, H. G.")
 
 
 # =====================================================================
