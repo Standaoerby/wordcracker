@@ -208,6 +208,85 @@ AUTHOR_ALIASES_CURATED: dict[str, str] = {
     "элиот":            "^Eliot, George",
     "элиота":           "^Eliot, George",
     "джордж элиот":     "^Eliot, George",
+    # R17 hotfix (B-R17-1) — bare English surnames missing from CURATED
+    # were forcing LLM-fallback path on prod, racking up 45-50s latency
+    # before timeout. Q20 «какие книги у Wells» was the trigger
+    # (only «уэллс» + «h. g. wells» existed pre-fix). Adding the full
+    # bare-English coverage for commonly-asked classics + Russian
+    # transliterations. Cyrillic stems (already present above) cover
+    # RU declension via _is_right_boundary ≤5-char suffix tolerance.
+    "wells":            "^Wells,",              # H. G. Wells — Q20 trigger
+    "tolstoy":          "^Tolstoy,",            # already имел «толсто» stem (RU)
+    "leo tolstoy":      "^Tolstoy,",
+    "dostoyevsky":      "^Dostoyevsky,",        # already имел «достоевск»
+    "dostoevsky":       "^Dostoyevsky,",        # alternative transliteration
+    "fyodor dostoyevsky": "^Dostoyevsky,",
+    "chekhov":          "^Chekhov,",            # already имел «чехов» (RU stem)
+    "anton chekhov":    "^Chekhov,",
+    "turgenev":         "^Turgenev,",
+    "ivan turgenev":    "^Turgenev,",
+    "pushkin":          "^Pushkin,",
+    "alexander pushkin": "^Pushkin,",
+    "gogol":            "^Gogol,",
+    "nikolai gogol":    "^Gogol,",
+    # R17-tested authors (Q81 Hawthorne/Hardy/Hugo) — worked through
+    # v5 resolver prominence ranking, but bare-alias fallback is cheaper.
+    "hardy":            "^Hardy, Thomas",       # disambiguate from Thomas Hardy Jr.
+    "thomas hardy":     "^Hardy, Thomas",
+    "харди":            "^Hardy, Thomas",
+    "томас харди":      "^Hardy, Thomas",
+    "hawthorne":        "^Hawthorne, Nathaniel",
+    "nathaniel hawthorne": "^Hawthorne, Nathaniel",
+    "готорн":           "^Hawthorne, Nathaniel",
+    "натаниэль готорн": "^Hawthorne, Nathaniel",
+    "hugo":             "^Hugo, Victor",        # disambiguate from Hugo Walpole etc.
+    "victor hugo":      "^Hugo, Victor",
+    "гюго":             "^Hugo, Victor",
+    "виктор гюго":      "^Hugo, Victor",
+    # Common classic English-language gaps — Stan's questions reference
+    # these regularly, but they were never added to CURATED. Pre-empt
+    # the same B-R17-1 latency trap on the obvious next set.
+    "kipling":          "^Kipling,",
+    "rudyard kipling":  "^Kipling,",
+    "киплинг":          "^Kipling,",
+    "редьярд киплинг":  "^Kipling,",
+    "chesterton":       "^Chesterton,",
+    "g. k. chesterton": "^Chesterton,",
+    "честертон":        "^Chesterton,",
+    "verne":            "^Verne, Jules",        # disambiguate from Jules Verne Jr.
+    "jules verne":      "^Verne, Jules",
+    "верн":             "^Verne, Jules",
+    "жюль верн":        "^Verne, Jules",
+    "huxley":           "^Huxley,",             # Aldous Huxley (also T.H. Huxley)
+    "aldous huxley":    "^Huxley, Aldous",
+    "хаксли":           "^Huxley,",
+    "joyce":            "^Joyce, James",        # disambiguate from anyone else
+    "james joyce":      "^Joyce, James",
+    "джойс":            "^Joyce, James",
+    "forster":          "^Forster, E",          # E. M. Forster
+    "e. m. forster":    "^Forster, E",
+    "форстер":          "^Forster, E",
+    "yeats":            "^Yeats,",
+    "w. b. yeats":      "^Yeats,",
+    "йейтс":            "^Yeats,",
+    "shaw":             "^Shaw, George",        # George Bernard Shaw
+    "bernard shaw":     "^Shaw, George",
+    "шоу":              "^Shaw, George",
+    "бернард шоу":      "^Shaw, George",
+    "gaskell":          "^Gaskell,",            # Elizabeth Gaskell
+    "elizabeth gaskell": "^Gaskell,",
+    "гаскелл":          "^Gaskell,",
+    "wilkie collins":   "^Collins, Wilkie",     # disambiguate from any other Collins
+    "уилки коллинз":    "^Collins, Wilkie",
+    "haggard":          "^Haggard,",            # H. Rider Haggard
+    "rider haggard":    "^Haggard,",
+    "хаггард":          "^Haggard,",
+    "jerome":           "^Jerome, Jerome",      # Jerome K. Jerome
+    "jerome k. jerome": "^Jerome, Jerome",
+    "джером":           "^Jerome, Jerome",
+    "machen":           "^Machen,",             # Arthur Machen
+    "arthur machen":    "^Machen,",
+    "мейчен":           "^Machen,",
 }
 
 
