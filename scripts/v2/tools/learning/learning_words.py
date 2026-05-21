@@ -80,7 +80,20 @@ def learning_words(scope, level: str = "intermediate", top: int = 30,
                                      else "not_found",
             message=str(raw["error"]), query=query,
         )
-    rows = (raw.get("words") if isinstance(raw, dict) else None) or []
+    # B-R14-7 ROOT CAUSE FIX (2026-05-21): v1 scripts/learning_tools.py
+    # returns rows under "results" key (line 564), NOT "words". The v2
+    # wrapper had been reading raw.get("words") since Sprint 22+ → always
+    # got None → empty rows → looks_broken=True → renderer reported
+    # «0 слов уровня B2» on EVERY query. Unit-tests passed because
+    # test_router.py:97 mock returns {"words": [...]} (the wrong shape),
+    # accidentally matching the wrong read key. Live behavioural golden
+    # catches it but is skipUnless(WC_GOLDEN_LIVE) gated.
+    # Fix: read "results" (true v1 key) with "words" fallback for
+    # backwards-compat with test mocks + any legacy callers.
+    rows = None
+    if isinstance(raw, dict):
+        rows = raw.get("results") or raw.get("words")
+    rows = rows or []
     # Drop literary locations (Stan round 2 Q9: Lambton/Shire in P&P
     # learning list). The v1 NER misses some place names; this hardcoded
     # backstop keeps the user-facing study list clean.
@@ -90,6 +103,7 @@ def learning_words(scope, level: str = "intermediate", top: int = 30,
                 if (r.get("lemma") or r.get("word") or "").lower()
                 not in _LITERARY_LOCATION_BLACKLIST]
         if len(rows) < before and isinstance(raw, dict):
+            raw["results"] = rows
             raw["words"] = rows
     # Sprint 20 — Stan 2026-05-19: translate-followup routes here, output
     # included character names (quin/kettering/giraud/lorraine — all
@@ -122,6 +136,7 @@ def learning_words(scope, level: str = "intermediate", top: int = 30,
         for r in rows:
             r.pop("_word_for_filter", None)
         if (surname_dropped or artifact_dropped) and isinstance(raw, dict):
+            raw["results"] = rows
             raw["words"] = rows
             prev = raw.get("_render_note", "")
             notes = []
