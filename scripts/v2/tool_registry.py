@@ -20,17 +20,51 @@ OpenAI/Ollama schema for the LLM is built from the registry:
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import signal
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Literal
+from typing import Any, Callable, Iterable, Iterator, Literal
 
 from scripts.v2.corpus_version import current_source_info
 from scripts.v2.filters import FilterSpec
 from scripts.v2._types import ToolError, ToolResult, now_ms_since
 
 log = logging.getLogger("wordcracker.v2.registry")
+
+
+# v3.3.1 prod observation 2026-05-21 — book_similar (find_book_by_topic)
+# burned 5 minutes per call. dispatch had timeout_s field but never
+# enforced it. Closes Q25/Q114-class for SINGLE-step plans (where router
+# inter-step budget can't trip — only one step to begin with).
+@contextlib.contextmanager
+def _signal_timeout(seconds: int) -> Iterator[None]:
+    """Raise TimeoutError if block doesn't finish within `seconds`.
+
+    Signal-based (Linux only — needs SIGALRM). On Windows / non-Unix
+    the context manager is a no-op so dev boxes keep working without
+    enforcement; prod (Server-on-Wheels = Ubuntu) enforces."""
+    if not hasattr(signal, "SIGALRM") or seconds <= 0:
+        yield
+        return
+
+    def _handler(signum, frame):
+        raise TimeoutError(f"tool exceeded {seconds}s timeout")
+
+    try:
+        old_handler = signal.signal(signal.SIGALRM, _handler)
+    except ValueError:
+        # Not in main thread → signal API unavailable; fall through.
+        yield
+        return
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
 
 Category = Literal[
     "search", "statistics", "authors", "books",
@@ -48,7 +82,12 @@ class ToolSpec:
     input_schema: dict
     requires: list[str] = field(default_factory=list)
     cost: Cost = "medium"
-    timeout_s: int = 30
+    # v3.3.1 — default bumped 30→60. Per-tool wrappers override when
+    # they legitimately need longer (e.g. author_profile composite,
+    # vocab_passport). Was 30 + unenforced; now 60 + enforced via
+    # signal.alarm in dispatch(). Tools that don't fit in 60s either
+    # need optimization OR explicit higher timeout_s in their @tool.
+    timeout_s: int = 60
     cacheable: bool = True
     output_data_schema: dict | None = None
     # Sprint 21+ (Stan B100 cache invalidation): bump this when the
@@ -71,7 +110,7 @@ def tool(
     input_schema: dict,
     requires: Iterable[str] = (),
     cost: Cost = "medium",
-    timeout_s: int = 30,
+    timeout_s: int = 60,         # v3.3.1: was 30; now enforced via signal.alarm
     cacheable: bool = True,
     output_data_schema: dict | None = None,
     wrapper_version: str = "v1",
@@ -153,7 +192,20 @@ def dispatch(name: str, args: dict | None = None) -> ToolResult:
 
     t0 = time.perf_counter()
     try:
-        result = spec.fn(**args)
+        # v3.3.1 — enforce timeout_s. Closes Q25/Q114/book_similar 5min
+        # runaways on single-step plans (where router inter-step budget
+        # can't trip).
+        with _signal_timeout(spec.timeout_s):
+            result = spec.fn(**args)
+    except TimeoutError as e:
+        log.warning("tool %s timed out after %ds", name, spec.timeout_s)
+        result = ToolResult.fail(
+            tool=name, err_type="timeout",
+            message=str(e),
+            details={"timeout_s": spec.timeout_s,
+                     "wall_clock_ms": now_ms_since(t0)},
+            retryable=True,
+        )
     except TypeError as e:
         result = ToolResult.fail(
             tool=name, err_type="invalid_args",
