@@ -610,6 +610,36 @@ class PerCanonicalProminence(unittest.TestCase):
         self.assertEqual(c.display, "Wells, H. G.")
         self.assertEqual(c.prominence, 50000)
 
+    def test_multi_token_disambig_followup_picks_correct_author(self):
+        """B-R17-1 stage3.2 v4 — when user types «Basil Wells» as
+        disambiguation followup (after clarify list showed multiple
+        Wells), resolver must pick Wells, Basil — NOT silently
+        substitute the dominant Wells, H. G. via surname-specialize."""
+        import pandas as pd
+        import unittest.mock as mock
+        fake_df = pd.DataFrame([
+            {"author": "Wells, H. G.",   "downloads": 50000, "id": 1},
+            {"author": "Wells, Basil",   "downloads": 100,   "id": 2},
+            {"author": "Wells, Carolyn", "downloads": 500,   "id": 3},
+        ])
+        with mock.patch("scripts.rag_tools._metadata_df",
+                         return_value=fake_df):
+            with er._prom_lock:
+                er._prom_state["data"] = None
+            r1 = er.resolve_author("Basil Wells")
+            r2 = er.resolve_author("Carolyn Wells")
+            r3 = er.resolve_author("Wells")  # bare = still goes to dominant
+        # Basil → Basil, not H.G.
+        self.assertEqual(r1.decision, "resolved")
+        self.assertIn("Basil", r1.resolved["display"])
+        self.assertNotIn("H. G.", r1.resolved["display"])
+        # Carolyn → Carolyn
+        self.assertEqual(r2.decision, "resolved")
+        self.assertIn("Carolyn", r2.resolved["display"])
+        # Bare «Wells» still resolves to dominant H.G. via specialize path
+        self.assertEqual(r3.decision, "resolved")
+        self.assertIn("H. G.", r3.resolved["display"])
+
     def test_fuzzy_candidates_use_per_canonical_prominence(self):
         """B-R17-1 ROOT FIX: each fuzzy candidate gets its OWN per-
         canonical prominence, not the surname aggregate. Previously

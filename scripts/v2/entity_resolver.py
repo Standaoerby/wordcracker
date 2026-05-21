@@ -539,6 +539,14 @@ def _candidates_from_alias(q_lc: str) -> list[Candidate]:
     except ImportError:
         return []
     regex = AUTHOR_ALIASES.get(q_lc)
+    # B-R17-1 stage3.2 v4 (2026-05-21 late evening) — track whether
+    # the alias hit was on the FULL q_lc or via surname-only fallback.
+    # When the user types "Basil Wells" (multi-token), q_lc has more
+    # info than just "wells". If we hit alias via parts[-1]="wells"
+    # fallback AND then specialize to dominant ^Wells, H, we'd resolve
+    # "Basil Wells" → H.G. Wells which is WRONG. Disambiguation
+    # followups from clarify-list must respect the first name.
+    alias_hit_via_surname_fallback = False
     if not regex:
         # Also try last word (surname) and first+last
         parts = q_lc.split()
@@ -546,12 +554,39 @@ def _candidates_from_alias(q_lc: str) -> list[Candidate]:
             for k in (parts[-1], f"{parts[0]} {parts[-1]}"):
                 regex = AUTHOR_ALIASES.get(k)
                 if regex:
+                    # Only the parts[-1] hit is "surname-only fallback";
+                    # f"{first} {last}" is a real full-name alias.
+                    alias_hit_via_surname_fallback = (k == parts[-1])
                     break
     if not regex:
         return []
     prom = prominence_for(regex)
     # Try to specialize bare-surname regex to the dominant canonical.
     # Only attempt for `^Surname,` shape (the most ambiguous form).
+    # SKIP specialization when alias hit via surname-fallback — the
+    # full q_lc carries first-name info we should not lose.
+    if alias_hit_via_surname_fallback:
+        # Try direct canonical-token-overlap match against by_canonical
+        # entries with matching surname. «Basil Wells» → look for
+        # canonicals starting with `Wells,` AND containing token "basil"
+        # in the canonical name. This handles disambiguation followups
+        # from clarify-list (user picked one of the alternatives).
+        first_match = _match_canonical_by_tokens(q_lc, regex)
+        if first_match is not None:
+            specific_regex, specific_display, specific_prom = first_match
+            return [Candidate(
+                key=specific_regex,
+                display=specific_display,
+                score=100,
+                source="alias_curated",
+                prominence=specific_prom.get("downloads", 0),
+                books_in_corpus=specific_prom.get("books", 0),
+            )]
+        # No direct token overlap — fall through to fuzzy path or
+        # eventually clarify_needed. Don't specialize to dominant
+        # surname (that would silently substitute H.G. Wells for
+        # any "X Wells" query — wrong UX).
+        return []
     specialized_regex, specialized_display, specialized_prom = (
         _specialize_surname_to_dominant(regex)
     )
@@ -572,6 +607,70 @@ def _candidates_from_alias(q_lc: str) -> list[Candidate]:
         prominence=prom.get("downloads", 0),
         books_in_corpus=prom.get("books", 0),
     )]
+
+
+def _match_canonical_by_tokens(
+    q_lc: str, regex: str,
+) -> tuple[str, str, dict] | None:
+    """Disambiguation-followup helper. When user typed «Basil Wells»
+    (multi-token, alias matched `^Wells,` via surname-fallback), find
+    the canonical author whose name contains BOTH the surname AND the
+    extra first-name tokens. Returns `(tighter_regex, canonical_name,
+    prominence)` or None.
+
+    Used when alias path can't auto-resolve to a single author but
+    the user supplied enough tokens to pick one canonical from
+    the surname's candidate set.
+
+    Strategy:
+      * Extract surname from `regex` (`^Surname,` → `Surname`)
+      * Get all by_canonical entries starting with `Surname,`
+      * For each, count how many extra q_lc tokens (other than the
+        surname token) appear inside the canonical name (lower-case)
+      * Return the canonical with highest token-overlap score
+      * Tie-break by prominence (downloads desc)
+      * Require score ≥ 1 (at least one first-name token matched)
+    """
+    import re as _re
+    m = _re.fullmatch(r"\^([A-Za-zЀ-ӿ' -]+),", regex)
+    if not m:
+        return None
+    surname = m.group(1)
+    surname_lc = surname.lower()
+    # Tokens from q_lc except the surname itself
+    q_tokens = [t.strip(".,") for t in q_lc.split()]
+    extra_tokens = [t for t in q_tokens if t and t.lower() != surname_lc]
+    if not extra_tokens:
+        return None  # no first-name signal
+    idx = get_prominence_index()
+    by_canonical = idx.get("by_canonical", {}) if isinstance(idx, dict) else {}
+    if not by_canonical:
+        return None
+    surname_prefix = f"{surname},"
+    best: tuple[int, int, str, dict] | None = None  # (score, dl, name, ent)
+    for name, ent in by_canonical.items():
+        if not name.startswith(surname_prefix):
+            continue
+        name_lc = name.lower()
+        score = sum(1 for t in extra_tokens if t and t in name_lc)
+        if score < 1:
+            continue
+        dl = int(ent.get("downloads", 0))
+        if best is None or score > best[0] or (
+                score == best[0] and dl > best[1]):
+            best = (score, dl, name, ent)
+    if best is None:
+        return None
+    _, _, name, ent = best
+    # Build a tighter regex from the canonical's first-name token.
+    parts = name.split(",", 1)
+    if len(parts) != 2:
+        return None
+    first_token = parts[1].strip().split(" ", 1)[0].rstrip(".")
+    if not first_token:
+        return None
+    tighter = f"^{surname}, {first_token}"
+    return tighter, name, ent
 
 
 def _specialize_surname_to_dominant(
