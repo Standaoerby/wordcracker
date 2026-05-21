@@ -336,9 +336,17 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     # Forcing the preposition kills that ambiguity. Genitive-only
     # phrasings like «Перечисли произведения Doyle» are routed by the
     # LLM fallback (classify_and_extract) which sees the surname token.
+    # B-R17-1 stage3.2 v5 — admit filler words between «книги» and «у»:
+    # «какие книги ЕСТЬ у Wells?», «какие книги имеются у X», «what books
+    # are by X». Without the filler tolerance, queries like Stan's
+    # «какие книги есть у Wells?» fell through to v4 LLM-planner which
+    # built a top_books_by_downloads plan, bypassing the rules-path
+    # ambiguous-author clarify.
     (_re(r"\b(какие|каких|сколько\s+разных|перечисли|список|"
          r"покажи\s+(все|список|книги)?)\s+"
          r"(книг|произведен|роман|works)\w*\s+"
+         r"(?:(?:есть|имеются|имеется|существуют|написаны|написал\w*|"
+            r"are|exist)\s+)?"
          r"(у\s+|при\s+|of\s+|by\s+|написал\w*\s+)"),
      "author_lookup", 0.92),
     (_re(r"\bwhat\s+(books?|works?|novels?)\s+(does|did|by|of)\s+"
