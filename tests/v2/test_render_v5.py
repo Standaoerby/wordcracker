@@ -96,6 +96,65 @@ class SelectPrimaryView(unittest.TestCase):
         _, primary = r5.select_primary_view([r])
         self.assertIsNone(primary)
 
+    def test_empty_terminal_view_with_explanation_wins_over_probe(self):
+        """Stage 3 prod test 2026-05-21 — «сравни По и Лавкрафта» plan is:
+          step 1: author_metadata(Poe)       — probe
+          step 2: author_metadata(Lovecraft) — probe
+          step 3: compare_authors(...)       — REAL answer
+
+        When compare_authors returns empty (no signature words at default
+        min_corpus_count=2000), it emits COMPARISON_PANEL with empty_state
+        explaining «filter too strict». Previously this view was penalized
+        -200 → renderer picked AUTHOR_METADATA probe (Poe's metadata) as
+        "primary", which is off-topic for a comparison query. The
+        empty_state IS the answer — it explains why compare failed."""
+        from scripts.v2.view_types import EmptyReason
+        probe_view = vb.build_author_metadata(
+            author_canonical="Poe, Edgar Allan",
+            birth_year=1809, death_year=1849,
+            nationality="US", books_in_corpus=22,
+        )
+        compare_empty = vb.build_comparison_panel(
+            entities=[], metrics=[],
+            empty_reason=EmptyReason.FILTERED_OUT,
+            empty_message_ru=("Сравнение не построено: ни у По, ни у "
+                              "Лавкрафта нет фирменных слов при "
+                              "min_corpus_count=2000."),
+            empty_message_en="Comparison empty: filter too strict.",
+            empty_filters_applied={"min_corpus_count": 2000},
+        )
+        results = [
+            _result_with_view("author_metadata", probe_view),
+            _result_with_view("author_metadata", probe_view),
+            _result_with_view("compare_authors", compare_empty),
+        ]
+        _, primary = r5.select_primary_view(results)
+        self.assertEqual(
+            primary.view_type, ViewType.COMPARISON_PANEL,
+            "comparison_panel with empty_state must beat probe AUTHOR_METADATA — "
+            "the empty_state IS the answer",
+        )
+
+    def test_truly_junk_empty_still_penalized(self):
+        """Empty view WITHOUT empty_state (rare — builder enforces it) is
+        still penalized. Non-empty AUTHOR_METADATA wins."""
+        from scripts.v2.view_types import RenderableView, ViewType
+        junk = RenderableView(
+            view_type=ViewType.TOP_N_TABLE,
+            payload={},        # truly empty
+            empty_state=None,  # no explanation
+        )
+        legit = vb.build_author_metadata(
+            author_canonical="Doyle", birth_year=1859, death_year=1930,
+            nationality="GB", books_in_corpus=22,
+        )
+        results = [
+            _result_with_view("x", junk),
+            _result_with_view("author_metadata", legit),
+        ]
+        _, primary = r5.select_primary_view(results)
+        self.assertEqual(primary.view_type, ViewType.AUTHOR_METADATA)
+
 
 # =====================================================================
 # render_v5 — happy paths

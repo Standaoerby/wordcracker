@@ -110,9 +110,16 @@ def select_primary_view(
         if r.data_validity == DataValidity.BROKEN:
             continue
         priority = _VIEW_PRIORITY.get(view.view_type, 40)
-        # Empty views get a hard penalty so a non-empty view of lower
-        # priority still beats them
-        empty_penalty = 0 if not view.is_empty() else -200
+        # Empty-view penalty — but ONLY for "junk empty" (no empty_state
+        # explanation). An empty view WITH empty_state is the canonical
+        # answer for B-R14-3-class cases (e.g. compare_authors returned
+        # nothing → COMPARISON_PANEL.empty_state explains why). That
+        # explanation IS the user-facing answer; it must beat earlier
+        # probe views (AUTHOR_METADATA from chained author_metadata
+        # steps in author_compare plan).
+        is_explained_empty = view.is_empty() and view.empty_state is not None
+        is_junk_empty = view.is_empty() and view.empty_state is None
+        empty_penalty = -200 if is_junk_empty else 0
         # Higher idx = later in plan = closer to the user-facing answer
         candidates.append((priority + empty_penalty, idx, priority, r, view))
 
