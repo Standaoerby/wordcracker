@@ -103,7 +103,7 @@ def top_authors_by(metric: str = "books", top: int = 10, lang: str = "en",
             # null). Drop them before truncating to top-N.
             rows, drops = apply_filters([drop_null_authors], rows)
             rows = rows[:top]
-            return ToolResult.success(
+            result = ToolResult.success(
                 tool="top_authors_by",
                 data={"metric": "tokens", "top_n": top, "lang": lang,
                       "top": rows, "_cache_hit": True,
@@ -117,6 +117,8 @@ def top_authors_by(metric: str = "books", top: int = 10, lang: str = "en",
                 )],
                 query=query,
             )
+            _attach_top_authors_view(result, rows, metric="tokens", top=top)
+            return result
         # Fall through to live scan if cache absent
 
     try:
@@ -143,11 +145,13 @@ def top_authors_by(metric: str = "books", top: int = 10, lang: str = "en",
             raw["top"] = rows
             if drops:
                 raw["_filter_drops"] = drops
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="top_authors_by", data=raw,
         coverage=Coverage(books_matched=len(rows), books_total=-1),
         query=query,
     )
+    _attach_top_authors_view(result, rows, metric=metric, top=top)
+    return result
 
 
 @tool(
@@ -205,8 +209,98 @@ def top_authors_by_country(country: str, metric: str = "books", top: int = 20) -
             raw["top"] = rows
             if drops:
                 raw["_filter_drops"] = drops
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="top_authors_by_country", data=raw,
         coverage=Coverage(books_matched=len(rows), books_total=-1),
         query=query,
     )
+    _attach_top_authors_view(result, rows, metric=metric, top=top,
+                             country=country)
+    return result
+
+
+def _attach_top_authors_view(result: ToolResult, rows: list,
+                              *, metric: str, top: int,
+                              country: str | None = None) -> None:
+    """Shared view attachment for top_authors_by / top_authors_by_country.
+
+    Closes B-R14-1 (CIA / corporate filter) structurally — view carries
+    the drop-count in provenance so renderer reports «отфильтрованы 3
+    корпоративных автора», not hides it.
+    """
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity, EmptyReason
+
+        if not rows:
+            headline = (f"Топ авторов" + (f" ({country})" if country else "")
+                        + f" по {metric}")
+            view = vb.build_top_n_table(
+                rows=[], columns=["rank", "author", metric],
+                empty_reason=EmptyReason.NO_RECORDS_IN_CORPUS,
+                empty_message_ru=(
+                    f"В корпусе нет авторов по запросу"
+                    + (f" страны {country}." if country else ".")
+                ),
+                empty_message_en="No authors matched.",
+                language="ru",
+            )
+            vb.attach_view(result, view,
+                           data_validity=DataValidity.EMPTY_UNEXPECTED)
+            return
+
+        view_rows = []
+        for i, r in enumerate(rows[:top], start=1):
+            if not isinstance(r, dict):
+                continue
+            author = r.get("author") or "—"
+            value = (r.get(metric) if metric in r
+                     else r.get("books_with_counts")
+                     if metric == "tokens" else None)
+            # Some entries carry `count` or `downloads` directly
+            if value is None:
+                for k in ("count", "downloads", "books", "tokens"):
+                    if k in r:
+                        value = r[k]
+                        break
+            view_rows.append({
+                "rank": i,
+                "author": author,
+                metric: value if value is not None else "—",
+            })
+
+        headline = (f"Топ авторов" + (f" ({country})" if country else "")
+                    + f" по {metric}")
+        # If we know the drop count (from result.data._filter_drops),
+        # add to caveats so renderer reports honestly.
+        caveats = []
+        drops = None
+        if result.data and isinstance(result.data, dict):
+            drops = result.data.get("_filter_drops")
+        if drops:
+            caveats.append(
+                f"Отфильтровано {drops} строк с пустым/корпоративным "
+                f"полем «author» (CIA / Library of Congress / NaN)."
+            )
+
+        view = vb.build_top_n_table(
+            rows=view_rows,
+            columns=["rank", "author", metric],
+            headline=headline,
+            requested_n=top,
+            caveats=caveats,
+            provenance=vb.make_provenance(
+                requested={"metric": metric, "top": top,
+                           "country": country},
+                returned={"count": len(view_rows)},
+                filtered={"null_or_corporate_authors": drops or 0},
+                sources=["SPGC-2018-07-18"],
+            ),
+            language="ru",
+        )
+        vb.attach_view(result, view, data_validity=DataValidity.OK)
+    except Exception as e:
+        import logging
+        logging.getLogger("wordcracker.v2.tools.authors.top_authors").warning(
+            "top_authors view emission failed: %s", e,
+        )

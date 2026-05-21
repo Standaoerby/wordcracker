@@ -232,7 +232,7 @@ def find_book_by_topic(
             f"английскому запросу «{topic}» — корпус EN»)."
         )
 
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="find_book_by_topic",
         data={
             "topic":               original_topic,
@@ -251,3 +251,83 @@ def find_book_by_topic(
         coverage=Coverage(books_matched=len(books), books_total=-1),
         query=query,
     )
+
+    # v5 Phase 2 — emit RECOMMENDATION_LIST view. Carries the books +
+    # rerank_score + translation provenance so template_executor can
+    # render a self-contained table without renderer prompt interpretation.
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity, EmptyReason
+
+        if not books:
+            view = vb.build_recommendation_list(
+                items=[],
+                empty_reason=EmptyReason.FILTERED_OUT,
+                empty_message_ru=(
+                    f"По теме «{original_topic}» не нашлось книг с "
+                    f"уверенностью ≥ {min_rerank_score}."
+                ),
+                empty_message_en=(
+                    f"No books matched topic «{topic}» above min_rerank_score={min_rerank_score}."
+                ),
+                provenance=vb.make_provenance(
+                    requested={"topic": original_topic, "top": top,
+                               "min_rerank_score": min_rerank_score},
+                    sources=["SPGC-2018-07-18", "ChromaDB semantic + FTS5 lexical"],
+                ),
+                language="ru",
+            )
+            vb.attach_view(result, view,
+                           data_validity=DataValidity.EMPTY_UNEXPECTED)
+            return result
+
+        items = []
+        for b in books:
+            reasons_bits = []
+            if b.get("rerank_score") is not None:
+                reasons_bits.append(f"rerank: {b['rerank_score']:.3f}")
+            if b.get("snippet"):
+                snip = b["snippet"][:120].replace("\n", " ")
+                reasons_bits.append(f"_«{snip}…»_")
+            items.append({
+                "pg_id":   b.get("pg_id"),
+                "title":   b.get("title"),
+                "author":  b.get("author"),
+                "reasons": " · ".join(reasons_bits),
+                "rerank_score": b.get("rerank_score"),
+            })
+
+        view_caveats = []
+        if translated_from:
+            view_caveats.append(
+                f"Запрос переведён с русского «{translated_from}» → «{topic}» "
+                f"(семантический поиск работает по EN-корпусу)."
+            )
+        if filter_drops:
+            view_caveats.append(
+                f"Свёрнуто {sum(filter_drops.values())} дубликатов "
+                f"(разные PG id для той же книги)."
+            )
+
+        view = vb.build_recommendation_list(
+            items=items,
+            headline=f"Книги по теме «{original_topic}»",
+            caveats=view_caveats,
+            provenance=vb.make_provenance(
+                requested={"topic": original_topic, "top": top,
+                           "min_rerank_score": min_rerank_score,
+                           "translate": translate},
+                returned={"books_n": len(items),
+                          "reranked_by": reranked_by},
+                filtered={"dedup_drops": filter_drops or {}},
+                sources=["SPGC-2018-07-18",
+                          "ChromaDB semantic + FTS5 lexical",
+                          f"BGE rerank: {reranked_by}" if reranked_by else "no rerank"],
+            ),
+            language="ru",
+        )
+        vb.attach_view(result, view, data_validity=DataValidity.OK)
+    except Exception as e:
+        log.warning("find_book_by_topic view emission failed: %s", e)
+
+    return result

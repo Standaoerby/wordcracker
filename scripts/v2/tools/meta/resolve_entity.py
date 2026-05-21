@@ -1,4 +1,4 @@
-"""Entity resolvers — v4.
+"""Entity resolvers — v4 (Phase 1.5 migration to v5 backend).
 
 Two @tool wrappers that the LLM planner composes into plans:
 
@@ -10,33 +10,32 @@ into the canonical inputs that downstream tools (`affinity_by_author`,
 `book_readability`, etc.) expect — *without* requiring the input to
 already be in AUTHOR_ALIASES or KNOWN_BOOKS.
 
-Layered resolution
-==================
+v5 Phase 1.5 ([[architecture_refactor_v5_plan]] §P3):
+When env `WC_V5_RESOLVER=on`, both tools delegate to
+`scripts.v2.entity_resolver` — single canonical path with:
+  - NFKC + homoglyph fold (closes B-R14-4 «Доcтоевский» with Latin c)
+  - RU genitive lemmatization (closes B-R14-9 «Толстого» → Толстой)
+  - RU→EN title alias map (closes B-R14-9 part 2 «Братьев Карамазовых»)
+  - prominence ranking by downloads (closes B-R14-13 «Hugo» → Victor Hugo)
+
+Legacy fields preserved (author_regex, canonical, confidence,
+candidates) — downstream callers unchanged. New v5 fields added:
+  - normalization_trace: list of normalization steps (for trace/debug)
+  - data.view: typed RenderableView for the answer (NOT_FOUND / CLARIFY
+    when applicable). Phase 2 tools will read this; Phase 0 ignores.
+
+When the flag is off, the original layered logic runs unchanged. The
+flag will be flipped on as a final Phase 6 cleanup, after the regression
+suite stays green for one full external Claude test round.
+
+Layered resolution (when flag OFF)
+==================================
 For both tools:
-    1. **Curated alias dict** (existing entities.py tables) — ≤1 ms,
-       matches the v3 rules path. Authoritative when it hits.
+    1. **Curated alias dict** (existing entities.py tables) — ≤1 ms.
     2. **Fuzzy match** against the SPGC metadata authors / titles using
-       rapidfuzz if available, else a simple substring scan. Tuned to
-       80% similarity threshold; below that we don't claim a match.
-    3. **Tool fallback** — when fuzzy is ambiguous (multiple ≥80%
-       candidates within 5 points of each other), return all candidates
-       and let the renderer ask the user to disambiguate.
-
-Confidence
-==========
-Reported on a 0..1 scale. The LLM planner can use it to decide whether
-to clarify (low confidence) or proceed (high confidence). 1.0 means a
-curated alias exact match; ~0.85 means fuzzy match with no rival; ~0.5
-means several candidates within tie-break range.
-
-Why these are tools, not dictionaries
-=====================================
-- They auto-scale as Stan uploads more books (user_uploads_metadata).
-- They handle typos, declensions, multiple-language variants without
-  requiring code changes per Stan-screenshot.
-- They're observable — each resolve call gets logged and Stan can
-  trace why a query went off-rails.
-- They preserve the v3 fast path: curated aliases win on exact match.
+       rapidfuzz if available, else a simple substring scan.
+    3. **Tool fallback** — when fuzzy is ambiguous, return all
+       candidates and let the renderer ask the user to disambiguate.
 """
 from __future__ import annotations
 
@@ -100,6 +99,11 @@ def _try_rapidfuzz() -> Optional[object]:
     cacheable=True,
 )
 def resolve_author_name(query: str) -> ToolResult:
+    # v5 Phase 1.5 — delegate to entity_resolver when feature flag on.
+    # Always emits a typed view alongside legacy fields for forward compat.
+    if _v5_enabled():
+        return _v5_resolve_author(query)
+
     q = _norm_query(query)
     if not q:
         return ToolResult.fail(
@@ -282,6 +286,10 @@ def _fuzzy_author_candidates(q: str, limit: int = 5) -> list[dict]:
     cacheable=True,
 )
 def resolve_book_title(query: str, author: str = "") -> ToolResult:
+    # v5 Phase 1.5 — delegate to entity_resolver when feature flag on.
+    if _v5_enabled():
+        return _v5_resolve_book(query, author_hint=author)
+
     q = _norm_query(query)
     if not q:
         return ToolResult.fail(
@@ -378,6 +386,258 @@ def resolve_book_title(query: str, author: str = "") -> ToolResult:
         coverage=Coverage(books_matched=len(matches), books_total=len(matches)),
         query={"query": query, "author": author or None},
     )
+
+
+# =====================================================================
+# v5 Phase 1.5 — entity_resolver delegation
+# =====================================================================
+
+def _v5_enabled() -> bool:
+    """Phase 1.5 — gate v5 path behind env var. Default off until
+    behavioural goldens (test_golden_v5.py Tier 2) pass on prod.
+    Test code can set this via WC_V5_RESOLVER=on.
+    """
+    import os
+    return os.environ.get("WC_V5_RESOLVER", "off") == "on"
+
+
+def _v5_resolve_author(query: str) -> ToolResult:
+    """Delegate to entity_resolver.resolve_author. Emits both legacy
+    fields (for downstream tools that read `data.author_regex`) AND a
+    typed view (for Phase 2 view-aware renderer).
+    """
+    from scripts.v2 import entity_resolver as er
+    from scripts.v2 import view_builders as vb
+    from scripts.v2.view_types import DataValidity
+
+    if not (query or "").strip():
+        return ToolResult.fail(
+            tool="resolve_author_name", err_type="invalid_args",
+            message="query is required",
+        )
+
+    res = er.resolve_author(query)
+
+    if res.decision == "not_found":
+        out = ToolResult.fail(
+            tool="resolve_author_name", err_type="not_found",
+            message=f"no author matched query {query!r}",
+            details={
+                "query": query,
+                "normalization_trace": res.normalization_trace,
+                "confidence_reason": res.confidence_reason,
+            },
+        )
+        # Even on fail, attach a view so Phase 2 callers can show
+        # candidates ("did you mean") instead of a blank error.
+        try:
+            vb.attach_view(out, vb.build_not_found(
+                entity_type="author",
+                query=query,
+                message_ru="Не нашёл автора. Уточни написание или попробуй "
+                           "канонический англ. вариант (Doyle / Hugo / Tolstoy).",
+                candidates=[c.to_dict() for c in res.candidates[:5]],
+            ), data_validity=DataValidity.EMPTY_UNEXPECTED)
+        except Exception as e:
+            log.debug("attach_view (not_found) failed: %s", e)
+        return out
+
+    if res.decision == "clarify_needed":
+        # Tool returns ok=True with a clarify view + low confidence.
+        # Downstream callers check confidence < threshold; renderer
+        # consumes the view.
+        out = ToolResult.success(
+            tool="resolve_author_name",
+            data={
+                "author_regex": (res.candidates[0].key if res.candidates else None),
+                "canonical": (res.candidates[0].display if res.candidates else ""),
+                "confidence": res.confidence,
+                "source": "v5_resolver",
+                "candidates": [c.to_dict() for c in res.candidates],
+                "normalization_trace": res.normalization_trace,
+                "decision": "clarify_needed",
+                "confidence_reason": res.confidence_reason,
+                "query": query,
+            },
+            warnings=[ToolWarning(
+                code="ambiguous",
+                message=res.confidence_reason or "low confidence resolve",
+            )],
+            coverage=Coverage(books_matched=-1, books_total=-1),
+            query={"query": query},
+        )
+        try:
+            alts = []
+            for c in res.candidates[:5]:
+                alts.append(
+                    f"{c.display} (загрузок: {c.prominence:,}, "
+                    f"книг: {c.books_in_corpus})".replace(",", " ")
+                )
+            vb.attach_view(out, vb.build_clarify(
+                question_ru=f"Несколько авторов подходят под «{query}». Кого из них?",
+                alternatives=alts,
+                why=res.confidence_reason,
+            ), data_validity=DataValidity.PARTIAL)
+        except Exception as e:
+            log.debug("attach_view (clarify) failed: %s", e)
+        return out
+
+    # decision == "resolved"
+    resolved = res.resolved or {}
+    out = ToolResult.success(
+        tool="resolve_author_name",
+        data={
+            "author_regex": resolved.get("author_regex"),
+            "canonical": resolved.get("display"),
+            "confidence": res.confidence,
+            "source": f"v5/{resolved.get('source', 'unknown')}",
+            "prominence": resolved.get("prominence", 0),
+            "books_in_corpus": resolved.get("books_in_corpus", 0),
+            "candidates": [c.to_dict() for c in res.candidates],
+            "normalization_trace": res.normalization_trace,
+            "decision": "resolved",
+            "confidence_reason": res.confidence_reason,
+            "query": query,
+        },
+        coverage=Coverage(books_matched=-1, books_total=-1),
+        query={"query": query},
+    )
+    # Resolved view goes alongside legacy data fields — used by Phase 2
+    # composite views; standalone callers can ignore.
+    try:
+        vb.attach_view(out, vb.build_top_n_table(
+            rows=[{
+                "rank": 1,
+                "display": resolved.get("display"),
+                "regex": resolved.get("author_regex"),
+                "downloads": resolved.get("prominence", 0),
+                "books": resolved.get("books_in_corpus", 0),
+                "confidence": f"{res.confidence:.2f}",
+            }],
+            columns=["rank", "display", "regex", "downloads", "books", "confidence"],
+            headline=f"Резолв «{query}»",
+            requested_n=1,
+            caveats=res.normalization_trace,
+            language="ru",
+        ), data_validity=DataValidity.OK)
+    except Exception as e:
+        log.debug("attach_view (resolved) failed: %s", e)
+    return out
+
+
+def _v5_resolve_book(query: str, *, author_hint: str = "") -> ToolResult:
+    """Delegate to entity_resolver.resolve_book. Same shape as
+    resolve_author — legacy fields preserved, typed view added."""
+    from scripts.v2 import entity_resolver as er
+    from scripts.v2 import view_builders as vb
+    from scripts.v2.view_types import DataValidity
+
+    if not (query or "").strip():
+        return ToolResult.fail(
+            tool="resolve_book_title", err_type="invalid_args",
+            message="query is required",
+        )
+
+    res = er.resolve_book(query, author_hint=author_hint)
+
+    if res.decision == "not_found":
+        out = ToolResult.fail(
+            tool="resolve_book_title", err_type="not_found",
+            message=f"no book matched {query!r}",
+            details={
+                "query": query, "author": author_hint or None,
+                "normalization_trace": res.normalization_trace,
+            },
+        )
+        try:
+            vb.attach_view(out, vb.build_not_found(
+                entity_type="book",
+                query=query,
+                message_ru="Не нашёл книгу. Если она в копирайте — "
+                           "загрузи свою копию через /admin/.",
+                candidates=[c.to_dict() for c in res.candidates[:5]],
+            ), data_validity=DataValidity.EMPTY_UNEXPECTED)
+        except Exception as e:
+            log.debug("attach_view (book not_found) failed: %s", e)
+        return out
+
+    if res.decision == "clarify_needed":
+        out = ToolResult.success(
+            tool="resolve_book_title",
+            data={
+                "pg_id": (res.candidates[0].key if res.candidates else None),
+                "title": (res.candidates[0].display if res.candidates else ""),
+                "confidence": res.confidence,
+                "source": "v5_resolver",
+                "candidates": [c.to_dict() for c in res.candidates],
+                "normalization_trace": res.normalization_trace,
+                "decision": "clarify_needed",
+                "confidence_reason": res.confidence_reason,
+                "query": query,
+            },
+            warnings=[ToolWarning(
+                code="ambiguous",
+                message=res.confidence_reason or "low confidence resolve",
+            )],
+            coverage=Coverage(books_matched=len(res.candidates),
+                              books_total=len(res.candidates)),
+            query={"query": query, "author": author_hint or None},
+        )
+        try:
+            alts = []
+            for c in res.candidates[:5]:
+                a = c.extra.get("author", "") if isinstance(c.extra, dict) else ""
+                bits = [c.display, f"({c.key})"]
+                if a:
+                    bits.append(f"— {a}")
+                if c.prominence:
+                    bits.append(f"загрузок: {c.prominence:,}".replace(",", " "))
+                alts.append(" ".join(bits))
+            vb.attach_view(out, vb.build_clarify(
+                question_ru=f"Несколько книг подходят под «{query}». Какую?",
+                alternatives=alts,
+                why=res.confidence_reason,
+            ), data_validity=DataValidity.PARTIAL)
+        except Exception as e:
+            log.debug("attach_view (book clarify) failed: %s", e)
+        return out
+
+    # decision == "resolved"
+    resolved = res.resolved or {}
+    out = ToolResult.success(
+        tool="resolve_book_title",
+        data={
+            "pg_id": resolved.get("pg_id"),
+            "title": resolved.get("title"),
+            "author": resolved.get("author"),
+            "confidence": res.confidence,
+            "source": f"v5/{resolved.get('source', 'unknown')}",
+            "candidates": [c.to_dict() for c in res.candidates],
+            "normalization_trace": res.normalization_trace,
+            "decision": "resolved",
+            "confidence_reason": res.confidence_reason,
+            "query": query,
+        },
+        coverage=Coverage(books_matched=1, books_total=1),
+        warnings=([] if resolved.get("pg_id") else [ToolWarning(
+            code="copyright",
+            message=f"{resolved.get('title')} resolved but no PG id (copyright)",
+        )]),
+        query={"query": query, "author": author_hint or None},
+    )
+    try:
+        vb.attach_view(out, vb.build_book_lookup(
+            book={
+                "pg_id": resolved.get("pg_id"),
+                "title": resolved.get("title"),
+                "author": resolved.get("author"),
+            },
+            caveats=res.normalization_trace,
+            language="ru",
+        ), data_validity=DataValidity.OK)
+    except Exception as e:
+        log.debug("attach_view (book resolved) failed: %s", e)
+    return out
 
 
 __all__ = ["resolve_author_name", "resolve_book_title"]

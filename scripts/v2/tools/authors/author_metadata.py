@@ -145,8 +145,49 @@ def author_metadata(author_regex: str) -> ToolResult:
             "не подтверждён и сошлись только на год рождения."
         )
 
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="author_metadata", data=raw,
         coverage=Coverage(books_matched=int(book_count or 0), books_total=-1),
         query=query,
     )
+
+    # v5 Phase 2.5 — AUTHOR_METADATA view emission. B-R14-14 closure:
+    # canonical author display name comes from resolver/bio override,
+    # eliminating renderer's chance to make up "Харпер Лавкрафт".
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity
+
+        if not isinstance(raw, dict):
+            return result
+
+        author_canonical = (
+            raw.get("author")
+            or author_regex.lstrip("^").rstrip(",").strip()
+        )
+        view = vb.build_author_metadata(
+            author_canonical=author_canonical,
+            birth_year=raw.get("year_of_birth_min"),
+            death_year=raw.get("year_of_death_max"),
+            nationality=raw.get("nationality") or raw.get("country"),
+            books_in_corpus=int(book_count or 0),
+            bio_source=raw.get("_bio_source"),
+            caveats=([
+                "Year of death dropped as unreliable (>120-year span)."
+            ] if raw.get("year_of_death_max_unreliable") else None),
+            provenance=vb.make_provenance(
+                requested={"author_regex": author_regex},
+                returned={"books": book_count},
+                sources=([raw["_bio_source"]] if raw.get("_bio_source")
+                          else ["SPGC-2018-07-18 metadata"]),
+            ),
+            language="ru",
+        )
+        vb.attach_view(result, view, data_validity=DataValidity.OK)
+    except Exception as e:
+        import logging
+        logging.getLogger("wordcracker.v2.tools.authors.author_metadata").warning(
+            "author_metadata view emission failed: %s", e,
+        )
+
+    return result

@@ -51,7 +51,7 @@ def emotion_collocates(scope, emotion: str, window: int = 4,
             message=err, query=query,
         )
     rows = (raw.get("top") if isinstance(raw, dict) else None) or []
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="emotion_collocates", data=raw,
         coverage=Coverage(
             books_matched=raw.get("n_books", -1) if isinstance(raw, dict) else -1,
@@ -61,3 +61,39 @@ def emotion_collocates(scope, emotion: str, window: int = 4,
                  if not rows else [],
         query=query,
     )
+
+    # v5 Phase 2.5 — COLLOCATES view (treating emotion anchor as
+    # the "word" anchor for the collocate view).
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity
+        scope_str = (str(scope) if not isinstance(scope, dict)
+                     else f"книга {scope.get('book') or scope.get('pg_id')}"
+                     if scope.get("book") or scope.get("pg_id")
+                     else f"автор {scope.get('author')}"
+                     if scope.get("author") else "корпус")
+        collocates = []
+        for c in (rows or [])[:top]:
+            if not isinstance(c, dict):
+                continue
+            collocates.append({
+                "token": c.get("word") or c.get("token") or "—",
+                "npmi": c.get("npmi") or c.get("score"),
+                "count": c.get("count"),
+            })
+        view = vb.build_collocates(
+            word=f"эмоция:{emotion}",
+            collocates=collocates,
+            window=window,
+            scope_label=scope_str,
+            headline=f"Слова рядом с маркерами эмоции «{emotion}» — {scope_str}",
+            language="ru",
+        )
+        validity = DataValidity.OK if collocates else DataValidity.EMPTY_EXPECTED
+        vb.attach_view(result, view, data_validity=validity)
+    except Exception as e:
+        import logging
+        logging.getLogger("wordcracker.v2.tools.words.emotion").warning(
+            "emotion_collocates view emission failed: %s", e,
+        )
+    return result

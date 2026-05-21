@@ -104,7 +104,7 @@ def find_book(title: str, author: str = "", top: int = 5,
             details={"total": total, "returned": len(matches)},
         ))
 
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="find_book",
         data={
             "matches": matches,
@@ -118,3 +118,38 @@ def find_book(title: str, author: str = "", top: int = 5,
         coverage=Coverage(books_matched=total, books_total=-1),
         query=query,
     )
+
+    # v5 Phase 2.5 — BOOK_LOOKUP view emission.
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity
+        best = matches[0] if matches else {}
+        candidates = []
+        for m in matches[:5]:
+            if isinstance(m, dict):
+                candidates.append({
+                    "pg_id": str(m.get("id") or ""),
+                    "title": m.get("title") or "",
+                    "author": m.get("author") or "",
+                    "downloads": m.get("downloads"),
+                })
+        caveats = []
+        if total > top:
+            caveats.append(f"Найдено {total} книг, показано {len(candidates)}. "
+                            f"Уточни через author=…")
+        view = vb.build_book_lookup(
+            book={
+                "pg_id": str(best.get("id") or ""),
+                "title": best.get("title") or title,
+                "author": best.get("author") or "",
+                "pub_year": best.get("pub_year"),
+                "downloads": best.get("downloads"),
+            },
+            candidates=candidates,
+            caveats=caveats,
+            language="ru",
+        )
+        vb.attach_view(result, view, data_validity=DataValidity.OK)
+    except Exception as e:
+        log.warning("find_book view emission failed: %s", e)
+    return result

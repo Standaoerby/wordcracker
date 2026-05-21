@@ -634,6 +634,108 @@ def _llm_render(question: str, plan: plan_mod.QueryPlan,
     return text, meta
 
 
+# ---------- v5 Phase 5 — pipeline envelope (trace + budget) ----------
+
+
+def _v5_pipeline_envelope(question: str, *, engine: str = "v2"):
+    """Create RequestTrace + RequestBudget when WC_V5_PIPELINE=on.
+
+    Returns None when flag is off — callers handle None as no-op.
+    Lightweight: trace is append-only; budget only carries the contract,
+    not enforced here (Phase 6 turns on hard enforcement after
+    acceptance turnir)."""
+    if os.environ.get("WC_V5_PIPELINE") != "on":
+        return None
+    try:
+        from scripts.v2 import observability as _obs
+        from scripts.v2 import budget as _b
+        return {
+            "trace": _obs.start_trace(question, engine=engine),
+            "budget": _b.RequestBudget(),
+            "t0": time.perf_counter(),
+        }
+    except Exception as e:
+        log.warning("v5 envelope init failed: %s", e)
+        return None
+
+
+def _v5_envelope_extras(envelope, *, intent_label: str | None = None,
+                        render_meta: dict | None = None) -> dict:
+    """Build extra log fields from a v5 envelope. Empty dict if no
+    envelope — caller spreads via `**extras` into log_request."""
+    if envelope is None:
+        return {}
+    elapsed = time.perf_counter() - envelope["t0"]
+    budget = envelope["budget"]
+    extras = {
+        "v5_trace_id": envelope["trace"].trace_id,
+        "v5_pipeline_version": envelope["trace"].pipeline_version,
+        "v5_budget_max_s": budget.wall_clock_s,
+        "v5_budget_used_s": round(elapsed, 2),
+        "v5_budget_exceeded": elapsed > budget.wall_clock_s,
+    }
+    if intent_label is not None:
+        envelope["trace"].set_intent(intent_label)
+        extras["v5_intent"] = intent_label
+    if render_meta:
+        extras["v5_render_view_type"] = render_meta.get("view_type")
+        extras["v5_render_prose_used"] = render_meta.get("prose_used", False)
+        extras["v5_render_audit_failed"] = render_meta.get("prose_audit_failed", False)
+        extras["v5_render_phase_a_ms"] = render_meta.get("phase_a_ms", 0)
+        extras["v5_render_phase_b_ms"] = render_meta.get("phase_b_ms", 0)
+        if render_meta.get("fallback_reason"):
+            extras["v5_render_fallback"] = render_meta["fallback_reason"]
+        envelope["trace"].set_render(
+            view_type=render_meta.get("view_type"),
+            phase_a_ms=render_meta.get("phase_a_ms", 0),
+            phase_b_ms=render_meta.get("phase_b_ms", 0),
+            phase_b_used=render_meta.get("prose_used", False),
+            skeleton_chars=render_meta.get("skeleton_chars", 0),
+        )
+    return extras
+
+
+# ---------- v5 Phase 4 — render dispatcher ----------
+
+
+def _dispatch_render(
+    question: str,
+    plan: plan_mod.QueryPlan,
+    results: list[ToolResult],
+    *,
+    model: str,
+    ollama_host: str,
+    history: list[dict] | None = None,
+) -> tuple[str, dict]:
+    """Choose renderer path based on feature flags.
+
+    WC_V5_RENDERER=on → v5 path: select_primary_view → template_executor
+    → optional ProseBinder (gated separately by WC_V5_PROSE). Skeleton
+    is deterministic — fabrication structurally impossible.
+
+    Flag off → legacy `_llm_render` path (RENDER_PROMPT + free-form LLM).
+
+    On unexpected v5 exception, fall back to legacy and log loudly —
+    silent fallback would hide regressions. Phase 6 removes the
+    fallback once v5 is the default."""
+    if os.environ.get("WC_V5_RENDERER") == "on":
+        try:
+            from scripts.v2 import render_v5 as r5
+            return r5.render_v5(
+                question, plan, results,
+                model=model, ollama_host=ollama_host,
+                history=history,
+            )
+        except Exception as e:
+            log.exception("v5 renderer raised, falling back to legacy: %s", e)
+            # fall through to legacy
+    return _llm_render(
+        question, plan, results,
+        model=model, ollama_host=ollama_host,
+        history=history,
+    )
+
+
 # ---------- ask() — non-streaming ----------
 
 
@@ -649,6 +751,8 @@ def ask(
     {"answer", "tool_calls", "iterations", "model", "elapsed_sec", "intent"}
     """
     t0 = time.perf_counter()
+    # v5 Phase 5 — optional envelope (trace + budget). None when flag off.
+    _v5_env = _v5_pipeline_envelope(question, engine="v2")
 
     # Sprint 22+ Round 12 post-deploy — «повтори / repeat» short-circuit.
     # Stan 2026-05-20: «повтори» without other context triggered v4
@@ -942,6 +1046,7 @@ def ask(
                                      if v4_planner_report else None),
             **({"unknown_author_candidates": unknown_authors}
                if unknown_authors else {}),
+            **_v5_envelope_extras(_v5_env, intent_label=intent.label),
         })
         return {
             "answer": clarify_answer,
@@ -969,6 +1074,7 @@ def ask(
             "is_failure": True,
             "failure_kind": "out_of_scope",
             "failure_reason": plan.explain or plan.out_of_scope_reason[:200],
+            **_v5_envelope_extras(_v5_env, intent_label=intent.label),
         })
         return {
             "answer": plan.out_of_scope_reason,
@@ -994,7 +1100,7 @@ def ask(
         answer = _intro_text()
     else:
         try:
-            answer, render_meta = _llm_render(
+            answer, render_meta = _dispatch_render(
                 question, plan, rr.results,
                 model=model, ollama_host=ollama_host,
                 history=history,
@@ -1083,6 +1189,8 @@ def ask(
         "v4_followup_elapsed_s": (round(v4_followup_report.elapsed_s, 2)
                                    if v4_followup_report else None),
         "answer_truncated": answer[:300],
+        **_v5_envelope_extras(_v5_env, intent_label=intent.label,
+                              render_meta=render_meta),
     })
     return {
         "answer": answer,
@@ -1114,6 +1222,8 @@ def ask_stream(
     """SSE events compatible with v1 plus v2-specific intent/plan/clarify."""
     yield {"event": "start"}
     t0 = time.perf_counter()
+    # v5 Phase 5 — optional envelope (trace + budget). None when flag off.
+    _v5_env = _v5_pipeline_envelope(question, engine="v2")
 
     # Sprint 22+ Round 12 post-deploy — «повтори / repeat» short-circuit
     # (stream variant). Same defense as ask() — no LLM, no router, no
@@ -1361,6 +1471,7 @@ def ask_stream(
                                        if v4_followup_report else None),
             **({"unknown_author_candidates": unknown_authors}
                if unknown_authors else {}),
+            **_v5_envelope_extras(_v5_env, intent_label=intent.label),
         })
         yield {"event": "clarify", "question": plan.clarify_question or ""}
         yield {"event": "answer", "text": plan.clarify_question or ""}
@@ -1381,6 +1492,7 @@ def ask_stream(
             "failure_kind": "out_of_scope",
             "failure_reason": plan.explain or plan.out_of_scope_reason[:200],
             "via_stream": True,
+            **_v5_envelope_extras(_v5_env, intent_label=intent.label),
         })
         yield {"event": "out_of_scope", "reason": plan.out_of_scope_reason}
         yield {"event": "answer", "text": plan.out_of_scope_reason}
@@ -1415,7 +1527,7 @@ def ask_stream(
         answer = _intro_text()
     else:
         try:
-            answer, render_meta = _llm_render(
+            answer, render_meta = _dispatch_render(
                 question, plan, results,
                 model=model, ollama_host=ollama_host,
                 history=history,
@@ -1491,6 +1603,8 @@ def ask_stream(
                                    if v4_followup_report else None),
         "answer_truncated": answer[:300],
         "via_stream": True,
+        **_v5_envelope_extras(_v5_env, intent_label=intent.label,
+                              render_meta=render_meta),
     })
 
     yield {"event": "critic",

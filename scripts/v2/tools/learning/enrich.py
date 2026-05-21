@@ -82,7 +82,39 @@ def enrich_word(word: str, contexts=None, lemma_hint: str = "",
                          f"{'…' if len(dropped) > 5 else ''}")
                 prev = raw.get("_render_note", "")
                 raw["_render_note"] = (prev + " | " + note if prev else note)
-    return ToolResult.success(tool="enrich_word", data=raw, query=query)
+    result = ToolResult.success(tool="enrich_word", data=raw, query=query)
+
+    # v5 Phase 2.5 — ETYMOLOGY_BUNDLE view for the enriched word.
+    # Closes B-R14-2 partial-bundle: slots_available makes missing
+    # facets explicit instead of silently skipping.
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity
+        if not isinstance(raw, dict):
+            return result
+        etym = None
+        if raw.get("primary_family") or raw.get("family_chain"):
+            etym = {
+                "primary_family": raw.get("primary_family"),
+                "family_chain": raw.get("family_chain") or raw.get("etymology_chain") or [],
+            }
+        view = vb.build_etymology_bundle(
+            word=word,
+            translation_ru=(raw.get("translation_ru") or raw.get("translation")
+                             if target_lang == "ru" else raw.get("translation")),
+            ipa=raw.get("ipa"),
+            pos=raw.get("pos") or raw.get("pos_tag"),
+            definition_en=raw.get("definition") or raw.get("definition_en"),
+            etymology=etym,
+            language="ru",
+        )
+        vb.attach_view(result, view, data_validity=DataValidity.OK)
+    except Exception as e:
+        import logging
+        logging.getLogger("wordcracker.v2.tools.learning.enrich").warning(
+            "enrich_word view emission failed: %s", e,
+        )
+    return result
 
 
 @tool(
@@ -124,4 +156,30 @@ def export_word_list(words, format: str = "anki_csv",
     if isinstance(raw, dict) and raw.get("error"):
         return ToolResult.fail(tool="export_word_list", err_type="invalid_args",
                                message=str(raw["error"]), query=query)
-    return ToolResult.success(tool="export_word_list", data=raw, query=query)
+    result = ToolResult.success(tool="export_word_list", data=raw, query=query)
+
+    # v5 Phase 2.5 — EXPORT_ARTIFACT view.
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity
+        if not isinstance(raw, dict):
+            return result
+        fmt_map = {"anki_csv": "anki_csv", "anki_apkg": "anki_csv",
+                    "csv": "csv", "tsv": "tsv",
+                    "markdown": "markdown", "json": "json"}
+        fmt_normalized = fmt_map.get(format, "csv")
+        view = vb.build_export_artifact(
+            format=fmt_normalized,
+            content=str(raw.get("content") or raw.get("text") or "")[:8000],
+            filename_suggestion=raw.get("filename") or raw.get("out_path")
+                                  or f"wordcracker_export.{fmt_normalized.split('_')[-1]}",
+            item_count=len(words) if isinstance(words, list) else 0,
+            language="ru",
+        )
+        vb.attach_view(result, view, data_validity=DataValidity.OK)
+    except Exception as e:
+        import logging
+        logging.getLogger("wordcracker.v2.tools.learning.enrich").warning(
+            "export_word_list view emission failed: %s", e,
+        )
+    return result

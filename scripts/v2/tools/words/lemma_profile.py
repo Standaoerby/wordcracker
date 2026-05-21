@@ -47,7 +47,7 @@ def lemma_profile(lemma: str) -> ToolResult:
             )],
             coverage=Coverage(),
         )
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="lemma_profile", data=p,
         coverage=Coverage(
             books_matched=p.get("book_count") or -1,
@@ -55,3 +55,32 @@ def lemma_profile(lemma: str) -> ToolResult:
         ),
         query={"lemma": lemma},
     )
+
+    # v5 Phase 2.5 — TOP_N_TABLE view (lemma stats as key-value rows).
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity
+        rows = [
+            {"metric": "global_count",
+             "value": p.get("global_count") or "—"},
+            {"metric": "rarity (0-1)",
+             "value": (f"{p['rarity']:.3f}"
+                        if isinstance(p.get("rarity"), (int, float))
+                        else (p.get("rarity") or "—"))},
+            {"metric": "difficulty", "value": p.get("difficulty") or "—"},
+            {"metric": "books with lemma",
+             "value": p.get("book_count") or "—"},
+        ]
+        view = vb.build_top_n_table(
+            rows=rows,
+            columns=["metric", "value"],
+            headline=f"Профиль леммы — {lemma}",
+            language="ru",
+        )
+        vb.attach_view(result, view, data_validity=DataValidity.OK)
+    except Exception as e:
+        import logging
+        logging.getLogger("wordcracker.v2.tools.words.lemma_profile").warning(
+            "lemma_profile view emission failed: %s", e,
+        )
+    return result

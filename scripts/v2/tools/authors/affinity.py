@@ -206,12 +206,92 @@ def affinity_by_author(author_regex: str, top: int = 50,
             message=(f"requested top={top}, returned {actual} after "
                       f"filtering — renderer must say {actual}"),
         ))
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="affinity_by_author", data=raw,
         coverage=Coverage(books_matched=raw.get("n_books", -1) if isinstance(raw, dict) else -1,
                           books_total=-1),
         warnings=warnings, query=query,
     )
+
+    # v5 Phase 2 — emit TOP_N_TABLE view with caveats reflecting filter
+    # drops. Closes B-R14-15 (PROPN leak class) and the count-honesty
+    # class structurally: count_returned auto-set by builder; renderer
+    # cannot claim "30" when actually 14.
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity, EmptyReason
+
+        if not isinstance(raw, dict):
+            return result
+
+        author_name = author_regex.lstrip("^").rstrip(",").strip()
+
+        if not rows:
+            view = vb.build_top_n_table(
+                rows=[], columns=["rank", "word", "affinity"],
+                empty_reason=EmptyReason.FILTERED_OUT,
+                empty_message_ru=(
+                    f"Нет фирменных слов автора {author_name} при "
+                    f"min_corpus_count={min_corpus_count}, "
+                    f"min_author_count={min_author_count}."
+                ),
+                empty_message_en=(
+                    f"No signature words for {author_name} at "
+                    f"min_corpus_count={min_corpus_count}."
+                ),
+                empty_filters_applied={
+                    "min_corpus_count": min_corpus_count,
+                    "min_author_count": min_author_count,
+                    "pos_filter": pos_filter,
+                },
+                empty_suggestion="Снизь min_corpus_count или поменяй POS-фильтр.",
+                language="ru",
+            )
+            vb.attach_view(result, view,
+                           data_validity=DataValidity.EMPTY_UNEXPECTED)
+            return result
+
+        # Build rows with rank
+        view_rows = []
+        for i, r in enumerate(rows[:top], start=1):
+            if not isinstance(r, dict):
+                continue
+            view_rows.append({
+                "rank": i,
+                "word": r.get("word") or r.get("token") or "—",
+                "affinity": (f"{r.get('affinity'):.3f}"
+                              if isinstance(r.get("affinity"), (int, float))
+                              else "—"),
+            })
+
+        view_caveats: list[str] = []
+        pn_note = raw.get("proper_noun_filter")
+        if pn_note:
+            view_caveats.append(pn_note)
+
+        view = vb.build_top_n_table(
+            rows=view_rows,
+            columns=["rank", "word", "affinity"],
+            headline=f"Фирменные слова — {author_name}",
+            requested_n=top,
+            caveats=view_caveats,
+            provenance=vb.make_provenance(
+                requested={
+                    "top": top, "min_corpus_count": min_corpus_count,
+                    "min_author_count": min_author_count,
+                    "pos_filter": pos_filter,
+                },
+                returned={"count": len(view_rows),
+                          "n_books": raw.get("n_books")},
+                sources=["SPGC-2018-07-18"],
+            ),
+            language="ru",
+        )
+        vb.attach_view(result, view, data_validity=DataValidity.OK)
+    except Exception as e:
+        log.warning("affinity_by_author view emission failed: %s", e)
+
+    return result
 
 
 @tool(
@@ -407,7 +487,7 @@ def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
               "scale": "0+; integer",
               "interpret": "0 shared between distinct genres is normal"},
         ])
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="compare_authors", data=raw,
         coverage=Coverage(
             books_matched=raw.get("books_a", -1) + raw.get("books_b", -1)
@@ -416,3 +496,132 @@ def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
         ),
         warnings=warnings, query=query,
     )
+
+    # v5 Phase 2 — emit COMPARISON_PANEL view. Closes B-R14-3 structurally:
+    # when both sides empty, view carries explicit empty_state with the
+    # min_corpus_count_used reason, eliminating the renderer's chance to
+    # fabricate signature words.
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity, EmptyReason
+
+        mcc_used = (raw.get("min_corpus_count_used") if isinstance(raw, dict)
+                    else None) or min_corpus_count
+
+        if not isinstance(raw, dict):
+            # Defensive — v1 returned non-dict; skip view emission.
+            return result
+
+        if len(empty_sides) == 2:
+            view = vb.build_comparison_panel(
+                entities=[], metrics=[],
+                empty_reason=EmptyReason.FILTERED_OUT,
+                empty_message_ru=(
+                    f"Сравнение не построено: ни у «{author1_regex}», "
+                    f"ни у «{author2_regex}» нет фирменных слов при "
+                    f"min_corpus_count={mcc_used}."
+                ),
+                empty_message_en=(
+                    f"Comparison empty: neither author yielded signature "
+                    f"words at min_corpus_count={mcc_used}."
+                ),
+                empty_filters_applied={"min_corpus_count": mcc_used,
+                                        "min_corpus_count_requested": min_corpus_count},
+                empty_suggestion=(
+                    "Снизь min_corpus_count до 50 для авторов с малым корпусом, "
+                    "или используй affinity_by_author по одному автору."
+                ),
+                language="ru",
+            )
+            vb.attach_view(result, view,
+                           data_validity=DataValidity.EMPTY_UNEXPECTED)
+            return result
+
+        # Build entities — include only the non-empty sides. The empty
+        # side is mentioned in caveats; renderer template knows to skip
+        # its signature_words block.
+        entities = []
+        if raw.get("top_unique_a"):
+            entities.append({
+                "name": author1_regex.lstrip("^").rstrip(",").strip(),
+                "metrics": {
+                    "Burrows Delta": raw.get("burrows_delta"),
+                    "Cosine similarity": raw.get("cosine_similarity"),
+                },
+                "signature_words": [
+                    w.get("word") if isinstance(w, dict) else str(w)
+                    for w in (raw.get("top_unique_a") or [])[:30]
+                ],
+            })
+        if raw.get("top_unique_b"):
+            entities.append({
+                "name": author2_regex.lstrip("^").rstrip(",").strip(),
+                "metrics": {
+                    "Burrows Delta": raw.get("burrows_delta"),
+                    "Cosine similarity": raw.get("cosine_similarity"),
+                },
+                "signature_words": [
+                    w.get("word") if isinstance(w, dict) else str(w)
+                    for w in (raw.get("top_unique_b") or [])[:30]
+                ],
+            })
+
+        # Translate metric_explanations into the view's metrics schema
+        metrics = []
+        for me in (raw.get("metric_explanations") or []):
+            metrics.append({
+                "name": me.get("metric", "—").replace("_", " ").title(),
+                "direction": me.get("direction", ""),
+                "scale": me.get("scale", ""),
+                "interpret": me.get("interpret", ""),
+            })
+
+        shared = []
+        for s in (raw.get("shared_high_affinity") or [])[:30]:
+            shared.append(s.get("word") if isinstance(s, dict) else str(s))
+
+        view_caveats: list[str] = []
+        if raw.get("_threshold_auto_lowered"):
+            view_caveats.append(
+                f"Порог автоматически снижен до "
+                f"min_corpus_count={mcc_used} (запрошено {min_corpus_count}) — "
+                f"иначе обе стороны были бы пустые."
+            )
+        if len(empty_sides) == 1:
+            empty_lbl = empty_sides[0][0]
+            view_caveats.append(
+                f"Сторона «{empty_lbl}» пустая — нет фирменных слов "
+                f"при min_corpus_count={mcc_used}. Renderer показывает "
+                f"только непустую сторону."
+            )
+        if raw.get("cosine_is_structural_zero"):
+            view_caveats.append(
+                "cosine_similarity < 0.05 — это структурное свойство "
+                "метрики (top-N фирменных слов почти не пересекаются), "
+                "не показатель «совершенно разные»."
+            )
+
+        view = vb.build_comparison_panel(
+            entities=entities,
+            metrics=metrics,
+            shared_signatures=shared,
+            headline=f"Сравнение: {author1_regex} vs {author2_regex}",
+            caveats=view_caveats,
+            provenance=vb.make_provenance(
+                requested={"min_corpus_count": min_corpus_count, "top": top},
+                returned={
+                    "books_a": raw.get("books_a"),
+                    "books_b": raw.get("books_b"),
+                    "shared_n": len(shared),
+                },
+                filtered={"min_corpus_count_used": mcc_used},
+                sources=["SPGC-2018-07-18"],
+            ),
+            language="ru",
+        )
+        validity = (DataValidity.PARTIAL if empty_sides else DataValidity.OK)
+        vb.attach_view(result, view, data_validity=validity)
+    except Exception as e:
+        log.warning("compare_authors view emission failed: %s", e)
+
+    return result

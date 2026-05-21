@@ -101,6 +101,10 @@ MAX_PAYLOAD_BYTES   = 64 * 1024     # ~64 KB request body
 MAX_QUESTION_CHARS  = 4_000         # ~5× the longest Q40 from the vault
 MAX_HISTORY_TURNS   = 50            # past 50 turns = ~1 hour conversation
 MAX_HISTORY_BYTES   = 64 * 1024     # 64 KB clipped from tail
+# v5 Phase 5 P8 — client-side composer cap. Closes B-R14-17: oversized
+# request used to poison localStorage history → next normal request also
+# got HTTP 400. Now composer refuses before send; nothing poisons history.
+COMPOSER_MAX_BYTES  = 8 * 1024      # 8 KB / ~4000-5000 UTF-8 chars
 
 PAGE = r"""<!doctype html>
 <html lang=ru>
@@ -275,7 +279,7 @@ PAGE = r"""<!doctype html>
 </div>
 <header>
   <h1>__ASSISTANT_NAME__ · wordcracker</h1>
-  <span class=meta>v2 engine · wordcracker:v2 · planner→router→renderer→critic</span>
+  <span class=meta title="__VERSION_TOOLTIP__">__VERSION_DISPLAY__</span>
   <span style="flex:1"></span>
   <button class="show-hints-btn" type=button onclick="toggleHints()"
           title="показать примеры запросов">💡 примеры</button>
@@ -819,10 +823,29 @@ for (const m of loadHistory()) {
 }
 renderSuggestions();
 
+// v5 Phase 5 P8 — composer size cap. B-R14-17 closure: prevent oversized
+// inputs from poisoning localStorage history → next normal request 400'ing.
+// Counted in bytes (TextEncoder) since localStorage / SSE think in bytes.
+const COMPOSER_MAX_BYTES = __COMPOSER_MAX_BYTES__;
+function composerByteSize(s) {
+  try { return new Blob([s]).size; } catch { return s.length; }
+}
 document.getElementById('f').addEventListener('submit', e => {
   e.preventDefault();
   const text = q.value.trim();
   if (!text) return;
+  const size = composerByteSize(text);
+  if (size > COMPOSER_MAX_BYTES) {
+    const div = document.createElement('div');
+    div.className = 'msg error';
+    div.innerHTML = '⚠️ Запрос слишком длинный — <b>' + Math.round(size/1024) +
+      ' КБ</b> при лимите ' + Math.round(COMPOSER_MAX_BYTES/1024) + ' КБ. ' +
+      'Большие тексты не отправляются и не пишутся в историю. ' +
+      'Сократи запрос (или загрузи книгу через <code>/admin/</code> и спрашивай по PG id).';
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+    return;
+  }
   q.value = '';
   submit(text);
 });
@@ -836,6 +859,44 @@ q.addEventListener('keydown', e => {
 </body>
 </html>
 """
+
+
+def _build_version_strings() -> tuple[str, str]:
+    """v5 Phase 5 P8 — render version + active v5 flags for the UI header.
+
+    Returns (display, tooltip) where:
+      display — short string for the header pill ("v2.3.1 · planner→…")
+      tooltip — longer string with active feature flags, exposed via
+                `title=` attribute (mouse-hover).
+
+    Closes the R14 TL;DR concern «версия не подтверждена — alphaX нигде
+    не выводится в UI». Now the deployed version is always visible.
+    """
+    try:
+        from scripts.v2.__version__ import ANALYTICS_VERSION as _v
+    except Exception:
+        _v = "unknown"
+    # Surface active v5 toggles so the test operator can see what's on
+    flags_on = []
+    for env_key, label in (
+        ("WC_V5_FOUNDATION",  "foundation"),
+        ("WC_V5_RESOLVER",    "resolver"),
+        ("WC_V5_RENDERER",    "renderer"),
+        ("WC_V5_PROSE",       "prose"),
+        ("WC_V5_PIPELINE",    "pipeline"),
+    ):
+        if os.environ.get(env_key) == "on":
+            flags_on.append(label)
+    flags_str = ("v5:" + "+".join(flags_on)) if flags_on else "legacy"
+    display = f"v{_v} · {flags_str} · planner→router→renderer→critic"
+    tooltip = (
+        f"wordcracker analytics v{_v}\n"
+        f"engine: v2 (planner → router → renderer → critic)\n"
+        f"v5 flags ON: {', '.join(flags_on) if flags_on else 'none'}\n"
+        f"composer cap: {COMPOSER_MAX_BYTES} bytes\n"
+        f"history clip: {MAX_HISTORY_TURNS} turns / {MAX_HISTORY_BYTES} bytes server-side"
+    )
+    return display, tooltip
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -927,7 +988,16 @@ class Handler(BaseHTTPRequestHandler):
                                          ensure_ascii=False, default=str,
                                          indent=2),
                               "application/json; charset=utf-8")
-        page = PAGE.replace("__ASSISTANT_NAME__", ASSISTANT_NAME)
+        # v5 Phase 5 P8 — surface version + v5 toggles in the UI header.
+        # Stan R14 TL;DR: «версия не подтверждена — `v3.2.0-alphaX` нигде
+        # не выводится в UI». Now resolved at render time, with active
+        # v5 pipeline flags visible as part of the tooltip.
+        version_display, version_tooltip = _build_version_strings()
+        page = (PAGE
+                .replace("__ASSISTANT_NAME__", ASSISTANT_NAME)
+                .replace("__VERSION_DISPLAY__", version_display)
+                .replace("__VERSION_TOOLTIP__", version_tooltip)
+                .replace("__COMPOSER_MAX_BYTES__", str(COMPOSER_MAX_BYTES)))
         return self._send(200, page, "text/html; charset=utf-8")
 
     def _stream_chat(self, payload):

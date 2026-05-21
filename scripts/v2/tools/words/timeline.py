@@ -102,7 +102,7 @@ def word_freq_timeline(word: str, bucket_years: int = 25,
                       "birth_plus_30 for usable timeline"),
         ))
 
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="word_freq_timeline", data=raw,
         coverage=Coverage(
             books_matched=raw.get("books_total", -1) if isinstance(raw, dict) else -1,
@@ -111,6 +111,9 @@ def word_freq_timeline(word: str, bucket_years: int = 25,
         warnings=warnings,
         query=query,
     )
+    _attach_timeline_view(result, buckets, word=word,
+                           basis=raw.get("basis", basis) if isinstance(raw, dict) else basis)
+    return result
 
 
 @tool(
@@ -153,7 +156,7 @@ def words_disappearing_after(year: int = 1920, top: int = 25) -> ToolResult:
             message=f"{raw.get('books_before')} books before {year}, "
                     f"{raw.get('books_after', 0)} after",
         ))
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="words_disappearing_after", data=raw,
         coverage=Coverage(
             books_matched=(raw.get("books_before", 0) + raw.get("books_after", 0))
@@ -162,3 +165,81 @@ def words_disappearing_after(year: int = 1920, top: int = 25) -> ToolResult:
         ),
         warnings=warnings, query=query,
     )
+    _attach_disappearing_view(result, rows, year=year, top=top)
+    return result
+
+
+# =====================================================================
+# v5 Phase 2.5 — view emission helpers
+# =====================================================================
+
+
+def _attach_timeline_view(result, buckets, *, word: str, basis: str) -> None:
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity
+        series = []
+        for b in (buckets or []):
+            if not isinstance(b, dict):
+                continue
+            series.append({
+                "bucket_start": b.get("bucket_start") or b.get("start") or b.get("year"),
+                "bucket_end": b.get("bucket_end") or b.get("end"),
+                "freq_per_million": b.get("freq_per_million") or b.get("fpm"),
+                "count": b.get("occurrences") or b.get("count"),
+            })
+        view = vb.build_timeline_chart(
+            word=word,
+            series=series,
+            basis=basis,
+            language="ru",
+        )
+        validity = DataValidity.OK if series else DataValidity.EMPTY_EXPECTED
+        vb.attach_view(result, view, data_validity=validity)
+    except Exception as e:
+        import logging
+        logging.getLogger("wordcracker.v2.tools.words.timeline").warning(
+            "word_freq_timeline view emission failed: %s", e,
+        )
+
+
+def _attach_disappearing_view(result, rows, *, year: int, top: int) -> None:
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity, EmptyReason
+        headline = f"Слова, исчезнувшие после {year}"
+        if not rows:
+            view = vb.build_top_n_table(
+                rows=[], columns=["rank", "word", "drop_factor"],
+                headline=headline,
+                empty_reason=EmptyReason.NO_RECORDS_IN_CORPUS,
+                empty_message_ru=f"Не нашлось слов с резким падением после {year}.",
+                empty_message_en="No disappearing words.",
+                language="ru",
+            )
+            vb.attach_view(result, view,
+                           data_validity=DataValidity.EMPTY_UNEXPECTED)
+            return
+        view_rows = []
+        for i, r in enumerate(rows[:top], start=1):
+            if not isinstance(r, dict):
+                continue
+            view_rows.append({
+                "rank": i,
+                "word": r.get("word") or r.get("lemma") or "—",
+                "drop_factor": (r.get("drop_factor") or r.get("ratio")
+                                 or r.get("score") or "—"),
+            })
+        view = vb.build_top_n_table(
+            rows=view_rows,
+            columns=["rank", "word", "drop_factor"],
+            headline=headline,
+            requested_n=top,
+            language="ru",
+        )
+        vb.attach_view(result, view, data_validity=DataValidity.OK)
+    except Exception as e:
+        import logging
+        logging.getLogger("wordcracker.v2.tools.words.timeline").warning(
+            "words_disappearing_after view emission failed: %s", e,
+        )

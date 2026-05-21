@@ -9,13 +9,28 @@ Design notes:
   content (drops source_info, runtime_ms — planner logs these separately).
 - `from_legacy()` wraps pre-v2 tool returns so the v1 dispatcher can keep
   working while tools migrate one at a time.
+
+v5 Phase 0 extension ([[architecture_refactor_v5_plan]] §P1):
+- Optional `view: RenderableView | None` — declarative render-schema.
+  Phase 0: tools may emit; renderer ignores. Phase 3: renderer uses it
+  as the single source of truth, eliminating fabrication.
+- Optional `data_validity: DataValidity | None` — semantic-level signal
+  beyond ok/fail. Golden tests assert validity; renderer surfaces
+  EMPTY_UNEXPECTED / BROKEN states explicitly instead of silently
+  rendering empty tables.
+
+Both fields default to None for full backward compatibility — existing
+tools that don't emit them continue to work identically.
 """
 from __future__ import annotations
 
 import json
 import time
 from dataclasses import dataclass, field, asdict
-from typing import Any, Literal
+from typing import Any, Literal, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from scripts.v2.view_types import RenderableView, DataValidity
 
 
 @dataclass
@@ -68,6 +83,14 @@ class ToolResult:
     runtime_ms: int = 0
     cache_hit: bool = False
     error: ToolError | None = None
+    # v5 Phase 0 — declarative render-schema (optional, backward compatible).
+    # When set, the v5 renderer reads this instead of inferring shape from
+    # `data`. Phase 0: emit-only; Phase 3: renderer enforces.
+    view: "RenderableView | None" = None
+    # v5 Phase 0 — semantic-level validity signal beyond ok/fail.
+    # Golden tests assert specific values (e.g. learning_words on PG1342
+    # level=B2 must be DataValidity.OK, never BROKEN).
+    data_validity: "DataValidity | None" = None
 
     # ----- builders -----
 
@@ -120,7 +143,25 @@ class ToolResult:
     # ----- serialization -----
 
     def to_dict(self, *, drop_empty: bool = True) -> dict:
-        d = asdict(self)
+        # Snapshot non-dataclass fields (view, data_validity) before asdict()
+        # so we can render them as plain dicts/strings, not enum objects.
+        view_dict = self.view.to_dict() if self.view is not None else None
+        validity_val = (
+            self.data_validity.value if self.data_validity is not None else None
+        )
+        # Detach v5 fields, call asdict on the dataclass slice, re-attach
+        # them in serializable form. This keeps asdict() happy and gives
+        # downstream consumers JSON-clean output.
+        saved_view, saved_validity = self.view, self.data_validity
+        self.view, self.data_validity = None, None
+        try:
+            d = asdict(self)
+        finally:
+            self.view, self.data_validity = saved_view, saved_validity
+        if view_dict is not None:
+            d["view"] = view_dict
+        if validity_val is not None:
+            d["data_validity"] = validity_val
         if drop_empty:
             d = _strip_empty(d)
         return d

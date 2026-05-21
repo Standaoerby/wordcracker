@@ -42,12 +42,14 @@ def author_profile(author_regex: str, country: str | None = None) -> ToolResult:
     query = {"author_regex": author_regex, "country": country}
     if cached is not None:
         md = cached.get("metadata") or {}
-        return ToolResult.success(
+        result = ToolResult.success(
             tool="author_profile", data=cached,
             coverage=Coverage(books_matched=md.get("books_total", -1),
                               books_total=-1),
             query=query,
         )
+        _attach_author_profile_view(result, cached, author_regex)
+        return result
     # Cache miss + build failed → fall through to direct v1 call so we
     # at least return *something* useful instead of bubbling up an error.
     try:
@@ -60,11 +62,13 @@ def author_profile(author_regex: str, country: str | None = None) -> ToolResult:
         return ToolResult.fail(tool="author_profile", err_type="not_found",
                                message=str(raw["error"]), query=query)
     md = (raw.get("metadata") if isinstance(raw, dict) else None) or {}
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="author_profile", data=raw,
         coverage=Coverage(books_matched=md.get("books_total", -1), books_total=-1),
         query=query,
     )
+    _attach_author_profile_view(result, raw, author_regex)
+    return result
 
 
 @tool(
@@ -129,11 +133,13 @@ def author_influences(author_regex: str, top: int = 10) -> ToolResult:
               "scale": "0-1",
               "interpret": "ensemble combines two metrics — robust against single-metric outliers"},
         ])
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="author_influences", data=raw,
         coverage=Coverage(),
         query=query,
     )
+    _attach_author_influences_view(result, raw, author_regex, top)
+    return result
 
 
 def _annotate_confidence(raw: dict, author_regex: str) -> None:
@@ -228,4 +234,169 @@ def author_attribution(text: str, top: int = 5) -> ToolResult:
     if isinstance(raw, dict) and raw.get("error"):
         return ToolResult.fail(tool="author_attribution", err_type="invalid_args",
                                message=str(raw["error"]), query=query)
-    return ToolResult.success(tool="author_attribution", data=raw, query=query)
+    result = ToolResult.success(tool="author_attribution", data=raw, query=query)
+    _attach_author_attribution_view(result, raw)
+    return result
+
+
+# =====================================================================
+# v5 Phase 2.5 — view emission helpers
+# =====================================================================
+
+
+def _attach_author_profile_view(result, raw, author_regex: str) -> None:
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity
+        if not isinstance(raw, dict):
+            return
+        md = raw.get("metadata") or {}
+        author_canonical = (md.get("author")
+                            or author_regex.lstrip("^").rstrip(",").strip())
+        sig = raw.get("signature_words") or raw.get("top_signature") or []
+        if isinstance(sig, list):
+            sig_words = [s.get("word") if isinstance(s, dict) else str(s)
+                         for s in sig]
+        else:
+            sig_words = []
+        infl = raw.get("influences") or []
+        if isinstance(infl, list):
+            infl_names = [i.get("author") if isinstance(i, dict) else str(i)
+                          for i in infl[:10]]
+        else:
+            infl_names = []
+        diversity = raw.get("lexical_diversity")
+        if isinstance(diversity, dict):
+            diversity = diversity.get("ttr") or diversity.get("value")
+        view = vb.build_top_n_table(  # use TOP_N as fallback since composite stub
+            rows=[],
+            columns=["x"],
+            empty_reason=None,
+            empty_message_ru=None,
+            empty_message_en=None,
+        ) if False else None    # placeholder — using AUTHOR_PROFILE below
+
+        from scripts.v2.view_types import RenderableView, ViewType
+        view = RenderableView(
+            view_type=ViewType.AUTHOR_PROFILE,
+            payload={
+                "author_canonical": author_canonical,
+                "metadata": {
+                    "birth_year": md.get("year_of_birth_min"),
+                    "death_year": md.get("year_of_death_max"),
+                    "books_in_corpus": md.get("books_total"),
+                },
+                "signature_words": sig_words,
+                "lexical_diversity": diversity,
+                "influences": infl_names,
+            },
+            headline=f"Профиль автора — {author_canonical}",
+            language="ru",
+        )
+        vb.attach_view(result, view, data_validity=DataValidity.OK)
+    except Exception as e:
+        import logging
+        logging.getLogger("wordcracker.v2.tools.authors.author_profile").warning(
+            "author_profile view emission failed: %s", e,
+        )
+
+
+def _attach_author_influences_view(result, raw, author_regex: str,
+                                     top: int) -> None:
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import (
+            DataValidity, EmptyReason, RenderableView, ViewType,
+        )
+        if not isinstance(raw, dict):
+            return
+        rows = None
+        for key in ("closest", "neighbours", "top", "authors"):
+            if isinstance(raw.get(key), list) and raw[key]:
+                rows = raw[key]
+                break
+        if not rows:
+            view = vb.build_top_n_table(
+                rows=[], columns=["rank", "author", "delta"],
+                empty_reason=EmptyReason.NO_RECORDS_IN_CORPUS,
+                empty_message_ru="Стилистические соседи не найдены.",
+                empty_message_en="No stylistic neighbours.",
+                language="ru",
+            )
+            vb.attach_view(result, view,
+                           data_validity=DataValidity.EMPTY_UNEXPECTED)
+            return
+
+        author_name = author_regex.lstrip("^").rstrip(",").strip()
+        view_rows = []
+        for i, r in enumerate(rows[:top], start=1):
+            if not isinstance(r, dict):
+                continue
+            d = r.get("delta") or r.get("distance") or r.get("score")
+            view_rows.append({
+                "rank": i,
+                "author": r.get("author") or r.get("name") or "—",
+                "delta": (f"{d:.4f}" if isinstance(d, (int, float)) else "—"),
+            })
+        confidence = raw.get("similarity_confidence")
+        caveats = []
+        if confidence == "low":
+            caveats.append(
+                "Уверенность: НИЗКАЯ — все top-N кандидатов плотно "
+                "сидят у corpus baseline. Это не «эти авторы похожи», "
+                "а «никто чётко не похож»."
+            )
+        view = vb.build_top_n_table(
+            rows=view_rows,
+            columns=["rank", "author", "delta"],
+            headline=f"Стилистические соседи — {author_name}",
+            requested_n=top,
+            caveats=caveats,
+            provenance=vb.make_provenance(
+                requested={"author_regex": author_regex, "top": top},
+                returned={"count": len(view_rows),
+                          "similarity_confidence": confidence},
+                sources=["Burrows Delta on top-200 function words"],
+            ),
+            language="ru",
+        )
+        vb.attach_view(result, view, data_validity=DataValidity.OK)
+    except Exception as e:
+        import logging
+        logging.getLogger("wordcracker.v2.tools.authors.author_profile").warning(
+            "author_influences view emission failed: %s", e,
+        )
+
+
+def _attach_author_attribution_view(result, raw) -> None:
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity
+        if not isinstance(raw, dict):
+            return
+        cands_raw = raw.get("candidates") or raw.get("top") or []
+        cands = []
+        for c in cands_raw[:10]:
+            if not isinstance(c, dict):
+                continue
+            cands.append({
+                "author": c.get("author") or c.get("name", "—"),
+                "score": c.get("delta") or c.get("score") or c.get("distance"),
+                "books_matched": c.get("books_matched") or c.get("books"),
+            })
+        view = vb.build_attribution_result(
+            candidates=cands,
+            primary_metric="Burrows Delta",
+            primary_metric_explanation={
+                "direction": "LOWER = closer match",
+                "scale": "0..2 typically; <0.5 strong match",
+            },
+            headline="Атрибуция авторства (Burrows Delta)",
+            language="ru",
+        )
+        vb.attach_view(result, view, data_validity=DataValidity.OK)
+    except Exception as e:
+        import logging
+        logging.getLogger("wordcracker.v2.tools.authors.author_profile").warning(
+            "author_attribution view emission failed: %s", e,
+        )

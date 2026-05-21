@@ -29,12 +29,15 @@ from scripts.v2._types import ToolResult
 
 @dataclass
 class StepEvent:
-    kind: Literal["step_start", "step_done", "step_skip"]
+    # v5 Phase 5 — `budget_exceeded` event emitted when router aborts a
+    # plan because RequestBudget.wall_clock_s ran out mid-DAG. Closes
+    # B-R14-10/Q114-style runaway latency at the structural level.
+    kind: Literal["step_start", "step_done", "step_skip", "budget_exceeded"]
     step_idx: int
     tool: str
     args: dict | None = None
     result: ToolResult | None = None
-    reason: str | None = None  # for step_skip
+    reason: str | None = None  # for step_skip / budget_exceeded
 
 
 @dataclass
@@ -44,6 +47,10 @@ class RouterResult:
     results: list[ToolResult] = field(default_factory=list)
     message: str | None = None  # clarify question or out_of_scope reason
     events: list[StepEvent] = field(default_factory=list)
+    # v5 Phase 5 — set True when execution aborted on RequestBudget exceed.
+    # Callers (rag_v2) read this to decide between rendering partial or
+    # surfacing an ERROR_FRIENDLY view. Default False keeps backward compat.
+    budget_exceeded: bool = False
 
 
 def _inject(args: dict, prior_results: list[ToolResult],
@@ -86,8 +93,14 @@ def _inject(args: dict, prior_results: list[ToolResult],
     return out
 
 
-def execute(plan: QueryPlan) -> RouterResult:
-    """Run a plan to completion. Always returns a RouterResult."""
+def execute(plan: QueryPlan, *, budget=None) -> RouterResult:
+    """Run a plan to completion. Always returns a RouterResult.
+
+    v5 Phase 5 — `budget` is an optional `RequestBudget`. After each
+    step, router checks `budget.exceeded()` and aborts the remaining
+    steps if true, returning what's already done plus a
+    `budget_exceeded` StepEvent. Closes B-R14-10/Q114 (310s runaway)
+    structurally — no plan can exceed the request envelope."""
     if plan.needs_clarify:
         return RouterResult(kind="clarify", plan=plan,
                             message=plan.clarify_question or "")
@@ -100,13 +113,36 @@ def execute(plan: QueryPlan) -> RouterResult:
 
     results: list[ToolResult] = []
     events: list[StepEvent] = []
+    usage = None
+    if budget is not None:
+        try:
+            from scripts.v2.budget import BudgetUsage
+            usage = BudgetUsage()
+        except Exception:
+            usage = None
 
     for idx, step in enumerate(plan.steps):
+        # Budget check BEFORE dispatching a new step — if we're already
+        # over, surface immediately rather than running another heavy tool.
+        if usage is not None and usage.exceeded(budget):
+            events.append(StepEvent(
+                kind="budget_exceeded",
+                step_idx=idx,
+                tool=step.tool,
+                reason=f"wall_clock {usage.wall_clock_used_s:.1f}s "
+                       f"exceeded budget {budget.wall_clock_s:.1f}s "
+                       f"at step {idx}/{len(plan.steps)}",
+            ))
+            return RouterResult(kind="results", plan=plan,
+                                results=results, events=events,
+                                budget_exceeded=True)
         args = _inject(step.args, results, step.depends_on, step.inject_result_as)
         events.append(StepEvent(kind="step_start", step_idx=idx,
                                 tool=step.tool, args=args))
         result = dispatch_any(step.tool, args)
         results.append(result)
+        if usage is not None:
+            usage.tool_calls_used += 1
         events.append(StepEvent(kind="step_done", step_idx=idx,
                                 tool=step.tool, result=result))
         if not result.ok and not step.optional:
@@ -118,12 +154,18 @@ def execute(plan: QueryPlan) -> RouterResult:
                         results=results, events=events)
 
 
-def execute_spec(spec: PlanSpec) -> RouterResult:
+def execute_spec(spec: PlanSpec, *, budget=None) -> RouterResult:
     """Execute a v4 PlanSpec (DAG with `$sN.field` references).
 
     Steps run in topological order. Before dispatch each step's args
     are resolved against the result map (`step_id → ToolResult.data`).
     Failures abort like the v3 path unless `optional=True`.
+
+    v5 Phase 5 — `budget` is an optional `RequestBudget`. After each
+    step, router checks `budget.exceeded()` and aborts the remaining
+    steps if true, returning a partial RouterResult with
+    `budget_exceeded=True`. Closes B-R14-10/Q114 (310s runaway)
+    structurally — no plan can exceed the request envelope.
 
     Returns a RouterResult with `results` aligned to the topological
     order. The `plan` field is set to a stub QueryPlan with the same
@@ -159,6 +201,13 @@ def execute_spec(spec: PlanSpec) -> RouterResult:
     results_by_id: dict[str, Any] = {}
     results_ordered: list[ToolResult] = []
     events: list[StepEvent] = []
+    usage = None
+    if budget is not None:
+        try:
+            from scripts.v2.budget import BudgetUsage
+            usage = BudgetUsage()
+        except Exception:
+            usage = None
     # Sprint 20 — Stan 2026-05-19 prod: multi-word timeline fan-out
     # (3 parallel word_freq_timeline calls, no deps) aborted on the
     # first failure, killing 2 successful candidates. Pre-compute which
@@ -176,6 +225,23 @@ def execute_spec(spec: PlanSpec) -> RouterResult:
                 dependents[d].add(s.id)
 
     for idx, step in enumerate(ordered):
+        # Budget check BEFORE dispatching a new step — if we're already
+        # over, surface immediately rather than running another heavy tool.
+        if usage is not None and usage.exceeded(budget):
+            events.append(StepEvent(
+                kind="budget_exceeded",
+                step_idx=idx,
+                tool=step.tool,
+                reason=f"wall_clock {usage.wall_clock_used_s:.1f}s "
+                       f"exceeded budget {budget.wall_clock_s:.1f}s "
+                       f"at step {idx}/{len(ordered)}",
+            ))
+            return RouterResult(
+                kind="results",
+                plan=_spec_stub_query_plan(spec),
+                results=results_ordered, events=events,
+                budget_exceeded=True,
+            )
         # Resolve any $sN.field refs in args against prior results.
         resolved_args = _spec_mod.resolve_refs(step.args, results_by_id)
         if not isinstance(resolved_args, dict):
@@ -183,6 +249,8 @@ def execute_spec(spec: PlanSpec) -> RouterResult:
         events.append(StepEvent(kind="step_start", step_idx=idx,
                                  tool=step.tool, args=resolved_args))
         result = dispatch_any(step.tool, resolved_args)
+        if usage is not None:
+            usage.tool_calls_used += 1
         results_ordered.append(result)
         # Make the result's data visible to later $-refs. We attach the
         # whole `data` dict (most common case) under the step id; nested

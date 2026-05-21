@@ -45,11 +45,14 @@ def top_books_by_downloads(top: int = 20, lang: str = "en",
                                err_type="not_found",
                                message=str(raw["error"]), query=query)
     rows = (raw.get("top") if isinstance(raw, dict) else None) or []
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="top_books_by_downloads", data=raw,
         coverage=Coverage(books_matched=len(rows), books_total=-1),
         query=query,
     )
+    _attach_top_books_view(result, rows, metric="downloads", top=top,
+                            author_regex=author_regex)
+    return result
 
 
 @tool(
@@ -94,11 +97,14 @@ def top_books_by_recency(top: int = 20, lang: str = "en",
         return ToolResult.fail(tool="top_books_by_recency", err_type="not_found",
                                message=err, query=query)
     rows = (raw.get("top") if isinstance(raw, dict) else None) or []
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="top_books_by_recency", data=raw,
         coverage=Coverage(books_matched=len(rows), books_total=-1),
         query=query,
     )
+    _attach_top_books_view(result, rows, metric=metric, top=top,
+                            author_regex=author_regex)
+    return result
 
 
 @tool(
@@ -128,8 +134,113 @@ def book_emotion_profile(pg_id: str) -> ToolResult:
     if isinstance(raw, dict) and raw.get("error"):
         return ToolResult.fail(tool="book_emotion_profile", err_type="not_found",
                                message=str(raw["error"]), query=query)
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="book_emotion_profile", data=raw,
         coverage=Coverage(books_matched=1, books_total=1),
         query=query,
     )
+    _attach_emotion_profile_view(result, raw, pg_id)
+    return result
+
+
+# =====================================================================
+# v5 Phase 2.5 — view emission helpers
+# =====================================================================
+
+
+def _attach_top_books_view(result, rows, *, metric: str, top: int,
+                             author_regex: str | None = None) -> None:
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity, EmptyReason
+        headline_parts = [f"Топ книг по {metric}"]
+        if author_regex:
+            headline_parts.append(
+                f"автор {author_regex.lstrip('^').rstrip(',').strip()}"
+            )
+        headline = " — ".join(headline_parts)
+
+        if not rows:
+            view = vb.build_top_n_table(
+                rows=[], columns=["rank", "title", "author", metric],
+                headline=headline,
+                empty_reason=EmptyReason.NO_RECORDS_IN_CORPUS,
+                empty_message_ru="В корпусе нет книг по запросу.",
+                empty_message_en="No matching books.",
+                language="ru",
+            )
+            vb.attach_view(result, view,
+                           data_validity=DataValidity.EMPTY_UNEXPECTED)
+            return
+
+        view_rows = []
+        for i, r in enumerate(rows[:top], start=1):
+            if not isinstance(r, dict):
+                continue
+            v = (r.get(metric) or r.get("downloads") or r.get("pub_year")
+                 or r.get("id"))
+            view_rows.append({
+                "rank": i,
+                "title": r.get("title") or "—",
+                "author": r.get("author") or "—",
+                metric: v if v is not None else "—",
+            })
+        view = vb.build_top_n_table(
+            rows=view_rows,
+            columns=["rank", "title", "author", metric],
+            headline=headline,
+            requested_n=top,
+            language="ru",
+        )
+        vb.attach_view(result, view, data_validity=DataValidity.OK)
+    except Exception as e:
+        import logging
+        logging.getLogger("wordcracker.v2.tools.books.top_books").warning(
+            "top_books view emission failed: %s", e,
+        )
+
+
+def _attach_emotion_profile_view(result, raw, pg_id: str) -> None:
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity
+        if not isinstance(raw, dict):
+            return
+        title = raw.get("book_title") or raw.get("title") or pg_id
+        emotions_raw = (raw.get("emotions") or raw.get("profile")
+                        or raw.get("distribution") or {})
+        emotions: list[dict] = []
+        if isinstance(emotions_raw, dict):
+            total = sum(v for v in emotions_raw.values()
+                        if isinstance(v, (int, float)))
+            for emo, cnt in emotions_raw.items():
+                share = (float(cnt) / total) if total else 0.0
+                emotions.append({
+                    "emotion": emo,
+                    "share": share,
+                    "count": cnt,
+                })
+        elif isinstance(emotions_raw, list):
+            for e in emotions_raw:
+                if isinstance(e, dict):
+                    emotions.append({
+                        "emotion": e.get("emotion") or e.get("name", "—"),
+                        "share": e.get("share"),
+                        "count": e.get("count"),
+                    })
+        dominant = raw.get("dominant") or raw.get("top_emotions") or []
+        if not isinstance(dominant, list):
+            dominant = [str(dominant)]
+        view = vb.build_emotion_profile(
+            book_title=title,
+            pg_id=pg_id,
+            emotions=emotions,
+            dominant=dominant,
+            language="ru",
+        )
+        vb.attach_view(result, view, data_validity=DataValidity.OK)
+    except Exception as e:
+        import logging
+        logging.getLogger("wordcracker.v2.tools.books.top_books").warning(
+            "book_emotion_profile view emission failed: %s", e,
+        )

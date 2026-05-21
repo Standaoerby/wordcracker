@@ -9,6 +9,23 @@ year_from/year_to, country, min_corpus_count) into a single dataclass.
 `from_legacy_scope` accepts the old shapes (`"all_corpus"`, `{"book": "PG1342"}`,
 `{"author": "^Wilde,", "country": "GB"}`) so v2 tools can be called from the v1
 dispatcher while the call sites migrate.
+
+v5 Phase 0 extension ([[architecture_refactor_v5_plan]] §P5):
+Added quality-control fields so the same FilterSpec covers the cases that
+R14 exposed:
+- `exclude_toponyms` — places leaking into author_vocab (B-R14-15: Doyle's
+  burger/uitlanders/belmont/colesberg)
+- `exclude_translit_names` — Cyrillic→Latin transliterations of character
+  names (B-R14-15: Dostoevsky's pyotr/alexandrovna/katerina)
+- `exclude_corporate_authors` — CIA/Library of Congress/anonymous
+  (B-R14-1: CIA #3 in top_authors_by)
+- `level` — CEFR level (was scattered across tool-specific args)
+- `validate()` — returns list of issues; plan-builder MUST check before
+  passing to tool (Phase 4 will enforce this in plan registry)
+
+Defaults are chosen to be SAFE: new fields default to True/sensible values
+so existing tools that don't explicitly pass them get the right behaviour.
+Phase 0 keeps the contract; Phase 2+ wires it into tools one by one.
 """
 from __future__ import annotations
 
@@ -36,6 +53,17 @@ class FilterSpec:
     exclude_proper_nouns: bool = True
     exclude_metalinguistic: bool = True
     pos_filter: list[str] | None = None
+    # v5 Phase 0 — fine-grained noise controls. Default True is safe:
+    # tools that don't yet apply them ignore the field; tools that do
+    # apply them produce cleaner results without extra plan-builder work.
+    exclude_toponyms: bool = True
+    exclude_translit_names: bool = True
+    exclude_corporate_authors: bool = True
+    exclude_archaic: bool = False        # alpha2 land, kept here for FilterSpec unity
+
+    # CEFR / learning level (used by learning_words and downstream filters).
+    # Acceptable: 'basic', 'intermediate', 'advanced', 'rare', 'A1'..'C2', None.
+    level: str | None = None
 
     # limits
     max_books: int = 10_000
@@ -101,4 +129,81 @@ class FilterSpec:
             bits.append(f"POS={','.join(self.pos_filter)}")
         if self.min_corpus_count:
             bits.append(f"min_corpus={self.min_corpus_count}")
+        if self.level:
+            bits.append(f"level={self.level}")
         return ", ".join(bits)
+
+    # ---- v5 Phase 0: validation contract ----
+
+    _VALID_LEVELS = {
+        "basic", "intermediate", "advanced", "rare",
+        "a1", "a2", "b1", "b2", "c1", "c2",
+    }
+    _VALID_YEAR_BASIS = {"auto", "pub_year", "birth_plus_30"}
+    _VALID_POS = {
+        "ADJ", "ADV", "NOUN", "PROPN", "VERB", "AUX", "CCONJ",
+        "DET", "INTJ", "NUM", "PART", "PRON", "SCONJ", "SYM", "X",
+    }
+
+    def validate(self) -> list[str]:
+        """Return list of contract violations. Empty list = valid.
+
+        Plan-builder MUST call this before invoking a tool (Phase 4 will
+        enforce this in the plan registry). For Phase 0, it's available
+        for opt-in use and is exercised by golden tests.
+        """
+        issues: list[str] = []
+
+        # Scope: at most one primary scope identifier
+        scopes_set = sum(1 for s in (self.pg_id, self.user_id, self.author_regex) if s)
+        if scopes_set > 1 and not (self.pg_id and self.author_regex):
+            # author + pg_id is OK (book-scoped affinity for an author);
+            # author + user_id or pg_id + user_id is not.
+            if self.user_id and (self.author_regex or self.pg_id):
+                issues.append("user_id is mutually exclusive with author_regex/pg_id")
+
+        # Year range sanity
+        if self.year_from is not None and self.year_to is not None:
+            if self.year_from > self.year_to:
+                issues.append(
+                    f"year_from={self.year_from} > year_to={self.year_to}"
+                )
+        if self.year_basis not in self._VALID_YEAR_BASIS:
+            issues.append(
+                f"year_basis={self.year_basis!r} not in {self._VALID_YEAR_BASIS}"
+            )
+
+        # Level sanity
+        if self.level is not None and self.level.lower() not in self._VALID_LEVELS:
+            issues.append(
+                f"level={self.level!r} not in {sorted(self._VALID_LEVELS)}"
+            )
+
+        # POS sanity
+        if self.pos_filter:
+            bad = [p for p in self.pos_filter if p.upper() not in self._VALID_POS]
+            if bad:
+                issues.append(f"pos_filter has unknown tags: {bad}")
+
+        # Limits sanity
+        if self.top_n <= 0:
+            issues.append(f"top_n={self.top_n} must be > 0")
+        if self.max_books <= 0:
+            issues.append(f"max_books={self.max_books} must be > 0")
+        if self.min_corpus_count < 0:
+            issues.append(f"min_corpus_count={self.min_corpus_count} must be >= 0")
+
+        # Country sanity (loose — just shape check, not full ISO list)
+        if self.country is not None and len(self.country) not in (2, 3):
+            issues.append(
+                f"country={self.country!r} should be ISO 3166 alpha-2/3"
+            )
+
+        # Lang sanity
+        if self.lang is not None and len(self.lang) not in (2, 3):
+            issues.append(f"lang={self.lang!r} should be ISO 639 code")
+
+        return issues
+
+    def is_valid(self) -> bool:
+        return not self.validate()

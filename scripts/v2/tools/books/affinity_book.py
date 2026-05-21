@@ -112,8 +112,66 @@ def affinity_by_book(pg_id: str, top: int = 50,
             message=(f"requested top={top}, returned {actual} after "
                       f"filtering — renderer must say {actual}"),
         ))
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="affinity_by_book", data=raw,
         coverage=Coverage(books_matched=1, books_total=1),
         warnings=warnings, query=query,
     )
+
+    # v5 Phase 2.5 — TOP_N_TABLE view emission. Same pattern as
+    # affinity_by_author. Book scope means we put the PG id in headline.
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity, EmptyReason
+        if not isinstance(raw, dict):
+            return result
+        title = raw.get("book_title") or raw.get("title") or pg_id
+        if not rows:
+            view = vb.build_top_n_table(
+                rows=[], columns=["rank", "word", "affinity"],
+                empty_reason=EmptyReason.FILTERED_OUT,
+                empty_message_ru=f"Нет фирменных слов для {title} при min_corpus_count={min_corpus_count}.",
+                empty_message_en=f"No signature words for {title}.",
+                empty_filters_applied={"min_corpus_count": min_corpus_count,
+                                        "pos_filter": pos_filter},
+                language="ru",
+            )
+            vb.attach_view(result, view,
+                           data_validity=DataValidity.EMPTY_UNEXPECTED)
+            return result
+        view_rows = []
+        for i, r in enumerate(rows[:top], start=1):
+            if not isinstance(r, dict):
+                continue
+            view_rows.append({
+                "rank": i,
+                "word": r.get("word") or r.get("token") or "—",
+                "affinity": (f"{r.get('affinity'):.3f}"
+                              if isinstance(r.get("affinity"), (int, float))
+                              else "—"),
+            })
+        view_caveats = []
+        if raw.get("proper_noun_filter"):
+            view_caveats.append(raw["proper_noun_filter"])
+        view = vb.build_top_n_table(
+            rows=view_rows,
+            columns=["rank", "word", "affinity"],
+            headline=f"Фирменные слова — {title} ({pg_id})",
+            requested_n=top,
+            caveats=view_caveats,
+            provenance=vb.make_provenance(
+                requested={"pg_id": pg_id, "top": top,
+                           "min_corpus_count": min_corpus_count,
+                           "pos_filter": pos_filter},
+                returned={"count": len(view_rows)},
+                sources=["SPGC-2018-07-18"],
+            ),
+            language="ru",
+        )
+        vb.attach_view(result, view, data_validity=DataValidity.OK)
+    except Exception as e:
+        import logging
+        logging.getLogger("wordcracker.v2.tools.books.affinity_book").warning(
+            "affinity_by_book view emission failed: %s", e,
+        )
+    return result

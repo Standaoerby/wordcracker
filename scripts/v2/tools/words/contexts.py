@@ -66,12 +66,15 @@ def word_contexts(author_regex: str, word: str, window: int = 10,
             f"deduped {dedup_dropped} identical snippet(s) — "
             f"same passage indexed under multiple PG ids",
         ))
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="word_contexts", data=raw,
         coverage=Coverage(books_matched=len(samples), books_total=-1),
         warnings=warnings,
         query=query,
     )
+    _attach_word_contexts_view(result, samples, word=word,
+                                scope_label=author_regex.lstrip("^").rstrip(",").strip())
+    return result
 
 
 @tool(
@@ -104,7 +107,7 @@ def word_contexts_global(word: str, k: int = 12,
         return ToolResult.fail(tool="word_contexts_global", err_type="not_found",
                                message=str(raw["error"]), query=query)
     samples = (raw.get("samples") if isinstance(raw, dict) else None) or []
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="word_contexts_global", data=raw,
         coverage=Coverage(books_matched=len({s.get("pg_id") for s in samples}),
                           books_total=-1),
@@ -112,3 +115,41 @@ def word_contexts_global(word: str, k: int = 12,
                  if not samples else [],
         query=query,
     )
+    _attach_word_contexts_view(result, samples, word=word,
+                                scope_label="весь корпус")
+    return result
+
+
+# =====================================================================
+# v5 Phase 2.5 — view emission helper
+# =====================================================================
+
+
+def _attach_word_contexts_view(result, samples, *, word: str,
+                                 scope_label: str) -> None:
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity
+        contexts = []
+        for s in (samples or [])[:10]:
+            if not isinstance(s, dict):
+                continue
+            contexts.append({
+                "snippet": s.get("snippet") or s.get("text") or "",
+                "pg_id": s.get("pg_id") or s.get("id"),
+                "title": s.get("title"),
+                "author": s.get("author"),
+            })
+        view = vb.build_word_contexts(
+            word=word,
+            contexts=contexts,
+            scope_label=scope_label,
+            language="ru",
+        )
+        validity = DataValidity.OK if contexts else DataValidity.EMPTY_EXPECTED
+        vb.attach_view(result, view, data_validity=validity)
+    except Exception as e:
+        import logging
+        logging.getLogger("wordcracker.v2.tools.words.contexts").warning(
+            "word_contexts view emission failed: %s", e,
+        )

@@ -47,8 +47,48 @@ def corpus_stats_by_author(author_regex: str) -> ToolResult:
             message=err, query=query,
         )
     n_books = (raw.get("books_total") if isinstance(raw, dict) else -1) or -1
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="corpus_stats_by_author", data=raw,
         coverage=Coverage(books_matched=n_books, books_total=-1),
         query=query,
     )
+
+    # v5 Phase 2.5 — TOP_N_TABLE view (key-value rows for stats).
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity
+        if not isinstance(raw, dict):
+            return result
+        author_name = author_regex.lstrip("^").rstrip(",").strip()
+        rows = []
+        for k_human, k_keys in [
+            ("Книг", ("books_total", "book_count")),
+            ("Токенов", ("tokens_total", "n_tokens", "tokens")),
+            ("Словарь (уникальных лемм)",
+             ("vocab_size", "unique_tokens", "n_unique")),
+            ("TTR (lex diversity)", ("ttr", "lex_div")),
+            ("Самая длинная книга", ("longest_book", "longest")),
+            ("Самая короткая книга", ("shortest_book", "shortest")),
+        ]:
+            v = None
+            for key in k_keys:
+                if key in raw and raw[key] is not None:
+                    v = raw[key]
+                    break
+            if v is not None:
+                rows.append({"metric": k_human, "value": v})
+        if not rows:
+            return result    # fall through without view
+        view = vb.build_top_n_table(
+            rows=rows,
+            columns=["metric", "value"],
+            headline=f"Статистика — {author_name}",
+            language="ru",
+        )
+        vb.attach_view(result, view, data_validity=DataValidity.OK)
+    except Exception as e:
+        import logging
+        logging.getLogger("wordcracker.v2.tools.corpus_meta.stats_by_author").warning(
+            "corpus_stats_by_author view emission failed: %s", e,
+        )
+    return result

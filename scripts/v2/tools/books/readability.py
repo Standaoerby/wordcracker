@@ -85,11 +85,40 @@ def book_readability(pg_id: str, sample_chars: int = 200_000) -> ToolResult:
         except Exception:
             pass
 
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="book_readability", data=raw,
         coverage=Coverage(books_matched=1, books_total=1),
         query=query,
     )
+
+    # v5 Phase 2.5 — READABILITY_SUMMARY view emission.
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity
+        if not isinstance(raw, dict):
+            return result
+        title = raw.get("book_title") or raw.get("title") or pg_id
+        flesch = raw.get("flesch") or raw.get("flesch_reading_ease")
+        fk = raw.get("flesch_kincaid") or raw.get("fk_grade") or raw.get("flesch_kincaid_grade")
+        cefr = raw.get("cefr") or raw.get("cefr_estimate")
+        wc = raw.get("total_words_estimate") or raw.get("words")
+        if flesch is not None or fk is not None:
+            view = vb.build_readability_summary(
+                book_title=title,
+                pg_id=pg_id,
+                flesch=flesch,
+                flesch_kincaid=fk,
+                cefr=cefr,
+                word_count=wc,
+                language="ru",
+            )
+            vb.attach_view(result, view, data_validity=DataValidity.OK)
+    except Exception as e:
+        import logging
+        logging.getLogger("wordcracker.v2.tools.books.readability").warning(
+            "book_readability view emission failed: %s", e,
+        )
+    return result
 
 
 @tool(
@@ -119,8 +148,51 @@ def book_archaic_words(pg_id: str, top: int = 30) -> ToolResult:
     if isinstance(raw, dict) and raw.get("error"):
         return ToolResult.fail(tool="book_archaic_words", err_type="not_found",
                                message=str(raw["error"]), query=query)
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="book_archaic_words", data=raw,
         coverage=Coverage(books_matched=1, books_total=1),
         query=query,
     )
+
+    # v5 Phase 2.5 — TOP_N_TABLE view for archaic words.
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity, EmptyReason
+        if not isinstance(raw, dict):
+            return result
+        title = raw.get("book_title") or raw.get("title") or pg_id
+        rows = raw.get("archaic_words") or raw.get("top_words") or raw.get("words") or []
+        if not rows:
+            view = vb.build_top_n_table(
+                rows=[], columns=["rank", "word", "frequency"],
+                empty_reason=EmptyReason.NO_SIGNAL_EXPECTED,
+                empty_message_ru=f"В {title} не найдено архаизмов из seed-словаря.",
+                empty_message_en=f"No archaic words in {title}.",
+                language="ru",
+            )
+            vb.attach_view(result, view,
+                           data_validity=DataValidity.EMPTY_EXPECTED)
+            return result
+        view_rows = []
+        for i, r in enumerate(rows[:top], start=1):
+            if not isinstance(r, dict):
+                continue
+            view_rows.append({
+                "rank": i,
+                "word": r.get("word") or r.get("lemma") or "—",
+                "frequency": r.get("count") or r.get("frequency") or "—",
+            })
+        view = vb.build_top_n_table(
+            rows=view_rows,
+            columns=["rank", "word", "frequency"],
+            headline=f"Архаизмы — {title} ({pg_id})",
+            requested_n=top,
+            language="ru",
+        )
+        vb.attach_view(result, view, data_validity=DataValidity.OK)
+    except Exception as e:
+        import logging
+        logging.getLogger("wordcracker.v2.tools.books.readability").warning(
+            "book_archaic_words view emission failed: %s", e,
+        )
+    return result

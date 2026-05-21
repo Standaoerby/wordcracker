@@ -37,13 +37,38 @@ def word_etymology(word: str) -> ToolResult:
         return ToolResult.fail(tool="word_etymology", err_type="not_found",
                                message=str(raw["error"]), query=query)
     chain = (raw.get("family_chain") if isinstance(raw, dict) else None) or []
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="word_etymology", data=raw,
         coverage=Coverage(),
         warnings=[ToolWarning("no_etymology", "Wiktionary has no etymology section")]
                  if not chain else [],
         query=query,
     )
+
+    # v5 Phase 2.5 — ETYMOLOGY_BUNDLE view. Even standalone etymology
+    # call emits a bundle view (other slots None → slots_available
+    # accurate, renderer says "etymology only" not fabricates ipa/pos).
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity
+        if not isinstance(raw, dict):
+            return result
+        view = vb.build_etymology_bundle(
+            word=word,
+            etymology={
+                "primary_family": raw.get("primary_family") or raw.get("family"),
+                "family_chain": chain,
+            } if chain or raw.get("primary_family") else None,
+            language="ru",
+        )
+        validity = DataValidity.OK if chain else DataValidity.EMPTY_EXPECTED
+        vb.attach_view(result, view, data_validity=validity)
+    except Exception as e:
+        import logging
+        logging.getLogger("wordcracker.v2.tools.words.etymology").warning(
+            "word_etymology view emission failed: %s", e,
+        )
+    return result
 
 
 @tool(
@@ -118,7 +143,7 @@ def find_words_by_etymology(scope, family: str, top: int = 30,
             f"{min_corpus_count}",
         ))
 
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="find_words_by_etymology", data=raw,
         coverage=Coverage(books_matched=raw.get("books_total", -1)
                                        if isinstance(raw, dict) else -1,
@@ -126,3 +151,54 @@ def find_words_by_etymology(scope, family: str, top: int = 30,
         warnings=warnings,
         query=query,
     )
+
+    # v5 Phase 2.5 — TOP_N_TABLE view of found words.
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity, EmptyReason
+        if not isinstance(raw, dict):
+            return result
+        scope_str = (str(scope) if not isinstance(scope, dict)
+                     else f"книга {scope.get('book') or scope.get('pg_id')}"
+                     if scope.get("book") or scope.get("pg_id")
+                     else f"автор {scope.get('author')}"
+                     if scope.get("author") else "корпус")
+        if not rows:
+            view = vb.build_top_n_table(
+                rows=[], columns=["rank", "word", "corpus_count"],
+                empty_reason=EmptyReason.FILTERED_OUT,
+                empty_message_ru=(
+                    f"Не нашлось слов family={family} в {scope_str} "
+                    f"при min_corpus_count={min_corpus_count}."
+                ),
+                empty_message_en=f"No {family} words above threshold.",
+                empty_filters_applied={"family": family,
+                                        "min_corpus_count": min_corpus_count},
+                language="ru",
+            )
+            vb.attach_view(result, view,
+                           data_validity=DataValidity.EMPTY_UNEXPECTED)
+            return result
+        view_rows = []
+        for i, r in enumerate(rows[:top], start=1):
+            if not isinstance(r, dict):
+                continue
+            view_rows.append({
+                "rank": i,
+                "word": r.get("word") or r.get("lemma") or "—",
+                "corpus_count": r.get("corpus_count") or r.get("count") or "—",
+            })
+        view = vb.build_top_n_table(
+            rows=view_rows,
+            columns=["rank", "word", "corpus_count"],
+            headline=f"Слова family={family} — {scope_str}",
+            requested_n=top,
+            language="ru",
+        )
+        vb.attach_view(result, view, data_validity=DataValidity.OK)
+    except Exception as e:
+        import logging
+        logging.getLogger("wordcracker.v2.tools.words.etymology").warning(
+            "find_words_by_etymology view emission failed: %s", e,
+        )
+    return result

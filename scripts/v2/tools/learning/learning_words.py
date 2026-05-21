@@ -190,7 +190,7 @@ def learning_words(scope, level: str = "intermediate", top: int = 30,
             "translate_followup_list_changed",
             "learning_words returns CEFR-band selection, not prior affinity list",
         ))
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="learning_words", data=raw,
         coverage=Coverage(
             books_matched=raw.get("n_books", -1) if isinstance(raw, dict) else -1,
@@ -198,3 +198,80 @@ def learning_words(scope, level: str = "intermediate", top: int = 30,
         ),
         warnings=warnings, query=query,
     )
+
+    # v5 Phase 2 — emit LEARNING_WORDS view. Closes B-R14-7 (P0) at the
+    # data_validity layer: empty result for canonical inputs (level=B2
+    # on Pride and Prejudice) gets data_validity=BROKEN, golden tests
+    # gate the regression in CI, renderer surfaces a friendly
+    # "feature temporarily unavailable" instead of pretending nothing
+    # was wrong.
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity
+
+        if not isinstance(raw, dict):
+            return result
+
+        # Heuristic for "broken": empty result with level in {B1, B2,
+        # intermediate} on a non-trivial scope is suspicious (every R14
+        # test reproduced this).
+        looks_broken = (
+            not rows
+            and (level or "").lower() in {"intermediate", "b1", "b2"}
+            and isinstance(scope, (dict, str))
+            and scope not in (None, "", {})
+        )
+
+        scope_label = _scope_label(scope)
+        view = vb.build_learning_words(
+            words=rows or [],
+            requested_level=level,
+            requested_count=top,
+            scope_label=scope_label,
+            headline=f"Слова уровня {level} — {scope_label}",
+            caveats=(["v5 detect: feature appears broken — golden test "
+                       "expected ≥1 word at this level for this scope."]
+                      if looks_broken else []),
+            provenance=vb.make_provenance(
+                requested={"level": level, "top": top, "scope": scope,
+                           "pos_filter": pos_filter},
+                returned={"count": len(rows or []),
+                          "n_books": raw.get("n_books")},
+                sources=["SPGC-2018-07-18"],
+            ),
+            language="ru",
+            is_broken=looks_broken,
+            broken_reason=(
+                f"learning_words(level={level}) вернул 0 слов для "
+                f"{scope_label}. Это похоже на сбой фильтра уровня — "
+                f"для канонических входов (P&P / Treasure Island / "
+                f"Sherlock Holmes) ожидаемо ≥10 слов."
+            ) if looks_broken else None,
+        )
+        validity = (DataValidity.BROKEN if looks_broken
+                    else DataValidity.OK if rows
+                    else DataValidity.EMPTY_EXPECTED)
+        vb.attach_view(result, view, data_validity=validity)
+    except Exception as e:
+        import logging
+        logging.getLogger("wordcracker.v2.tools.learning").warning(
+            "learning_words view emission failed: %s", e,
+        )
+
+    return result
+
+
+def _scope_label(scope) -> str:
+    """Human-readable label for the scope arg. Used in view headlines."""
+    if scope is None or scope == "" or scope == "all_corpus":
+        return "весь корпус"
+    if isinstance(scope, str):
+        return scope
+    if isinstance(scope, dict):
+        if scope.get("book") or scope.get("pg_id"):
+            return f"книга {scope.get('book') or scope.get('pg_id')}"
+        if scope.get("author"):
+            return f"автор {scope['author']}"
+        if scope.get("user_id"):
+            return f"загрузка {scope['user_id']}"
+    return str(scope)

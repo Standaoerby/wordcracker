@@ -151,7 +151,7 @@ def word_collocates(scope, word: str, window: int = 4, top: int = 20,
                 message=f"{metric_lc}: {type(e).__name__}: {e}",
             ))
 
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="word_collocates", data=raw,
         coverage=Coverage(
             books_matched=raw.get("books_total", len(rows)) if isinstance(raw, dict) else -1,
@@ -159,6 +159,42 @@ def word_collocates(scope, word: str, window: int = 4, top: int = 20,
         ),
         warnings=warnings, query=query,
     )
+
+    # v5 Phase 2.5 — COLLOCATES view.
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity
+        rows_after_metric = (raw.get("top_collocates") or raw.get("top")
+                              if isinstance(raw, dict) else None) or []
+        scope_str = (str(scope) if not isinstance(scope, dict)
+                     else f"книга {scope.get('book') or scope.get('pg_id')}"
+                     if scope.get("book") or scope.get("pg_id")
+                     else f"автор {scope.get('author')}"
+                     if scope.get("author") else "корпус")
+        collocates = []
+        for c in rows_after_metric[:top]:
+            if not isinstance(c, dict):
+                continue
+            collocates.append({
+                "token": c.get("word") or "—",
+                "npmi": c.get("npmi") or c.get(metric_lc) or c.get("score"),
+                "count": c.get("count") or c.get("c_pair"),
+            })
+        view = vb.build_collocates(
+            word=word,
+            collocates=collocates,
+            window=window,
+            scope_label=scope_str,
+            language="ru",
+        )
+        validity = DataValidity.OK if collocates else DataValidity.EMPTY_EXPECTED
+        vb.attach_view(result, view, data_validity=validity)
+    except Exception as e:
+        import logging
+        logging.getLogger("wordcracker.v2.tools.words.collocates").warning(
+            "word_collocates view emission failed: %s", e,
+        )
+    return result
 
 
 def _augment_with_marginals(

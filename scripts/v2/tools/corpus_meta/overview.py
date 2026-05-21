@@ -141,7 +141,7 @@ def corpus_overview() -> ToolResult:
         "user uploads (admin endpoint, EPUB → tokens)",
     ]
 
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="corpus_overview",
         data=data,
         warnings=warnings,
@@ -150,6 +150,30 @@ def corpus_overview() -> ToolResult:
             books_total=data.get("raw_books_available", -1),
         ),
     )
+
+    # v5 Phase 2.5 — CORPUS_META_SNAPSHOT view.
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity
+        chunks = data.get("chromadb_chunks")
+        spgc = data.get("spgc_baseline") or {}
+        view = vb.build_corpus_meta_snapshot(
+            n_books=int(data.get("raw_books_available") or 0),
+            n_authors=int(spgc.get("n_authors") or 0),
+            n_tokens=int(spgc.get("n_tokens") or 0) or None,
+            spgc_baseline="SPGC-2018-07-18",
+            chroma_chunks=chunks if isinstance(chunks, int) else None,
+            user_uploads=int(data.get("raw_books_user_uploads") or 0),
+            headline="Обзор корпуса",
+            language="ru",
+        )
+        vb.attach_view(result, view, data_validity=DataValidity.OK)
+    except Exception as e:
+        import logging
+        logging.getLogger("wordcracker.v2.tools.corpus_meta.overview").warning(
+            "corpus_overview view emission failed: %s", e,
+        )
+    return result
 
 
 def _pgrep_alive(pattern: str) -> bool:
