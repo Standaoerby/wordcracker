@@ -178,6 +178,23 @@ class EmptyState:
             "suggestion": self.suggestion,
         }
 
+    @classmethod
+    def from_dict(cls, d: dict) -> "EmptyState":
+        """Roundtrip from to_dict() output. Used by cache._from_payload
+        to restore EmptyState across disk cache reload."""
+        reason_str = d.get("reason") or "no_signal_expected"
+        try:
+            reason = EmptyReason(reason_str)
+        except ValueError:
+            reason = EmptyReason.NO_SIGNAL_EXPECTED
+        return cls(
+            reason=reason,
+            message_ru=d.get("message_ru", ""),
+            message_en=d.get("message_en", ""),
+            filters_applied=d.get("filters_applied") or {},
+            suggestion=d.get("suggestion"),
+        )
+
 
 # ---------------------------------------------------------------------
 # Provenance — what was requested, what was returned, what was filtered
@@ -203,6 +220,16 @@ class Provenance:
     def to_dict(self) -> dict:
         d = asdict(self)
         return {k: v for k, v in d.items() if v}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Provenance":
+        return cls(
+            requested=d.get("requested") or {},
+            returned=d.get("returned") or {},
+            filtered=d.get("filtered") or {},
+            sources=list(d.get("sources") or []),
+            notes=list(d.get("notes") or []),
+        )
 
 
 # ---------------------------------------------------------------------
@@ -292,6 +319,40 @@ class RenderableView:
             "language": self.language,
         }
         return {k: v for k, v in d.items() if v not in (None, [], {})}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RenderableView":
+        """Roundtrip from to_dict() output.
+
+        v3.3.1 — closes Stage 3 silent failure root cause. cache._from_payload
+        previously did not restore .view across disk roundtrip → every cache
+        hit returned ToolResult with view=None → render_v5 selected
+        ERROR_FRIENDLY fallback ("no_views_in_results"). This classmethod
+        is the missing piece — caches now serve back full view objects.
+        """
+        vt_str = d.get("view_type") or "top_n_table"
+        try:
+            vt = ViewType(vt_str)
+        except ValueError:
+            vt = ViewType.TOP_N_TABLE
+        empty_state_dict = d.get("empty_state")
+        empty_state = (EmptyState.from_dict(empty_state_dict)
+                        if empty_state_dict else None)
+        provenance_dict = d.get("provenance")
+        provenance = (Provenance.from_dict(provenance_dict)
+                       if provenance_dict else None)
+        lang = d.get("language", "ru")
+        if lang not in ("ru", "en"):
+            lang = "ru"
+        return cls(
+            view_type=vt,
+            payload=d.get("payload") or {},
+            headline=d.get("headline"),
+            caveats=list(d.get("caveats") or []),
+            empty_state=empty_state,
+            provenance=provenance,
+            language=lang,
+        )
 
     def is_empty(self) -> bool:
         """View-type-aware empty detection.

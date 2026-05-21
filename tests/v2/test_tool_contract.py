@@ -124,6 +124,7 @@ class RegistryAndDispatch(unittest.TestCase):
                 "required": ["a", "b"],
             },
             cost="cheap",
+            cacheable=False,  # Test isolation — don't contaminate the global disk cache.
         )
         def _add(a, b):
             return ToolResult.success(tool="add", data=a + b)
@@ -194,6 +195,7 @@ class RegistryAndDispatch(unittest.TestCase):
                 "required": ["filter"],
             },
             cost="cheap",
+            cacheable=False,  # Test isolation — don't pull a stale cached ToolResult.
         )
         def _needs_filter(filter):  # noqa: A002 — match schema name
             captured["filter"] = filter

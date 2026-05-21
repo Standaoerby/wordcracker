@@ -483,9 +483,10 @@ class CacheKey_WrapperVersionInvalidation(unittest.TestCase):
         k2 = cache_key("hybrid_search", {"query": "ajar"},
                        wrapper_version="v2-titles")
         self.assertNotEqual(k1, k2)
-        # Tool prefix preserved on both
-        self.assertTrue(k1.startswith("hybrid_search:"))
-        self.assertTrue(k2.startswith("hybrid_search:"))
+        # Tool prefix preserved on both (v3.3.1: separator changed
+        # from ":" to "__" for NTFS compatibility).
+        self.assertTrue(k1.startswith("hybrid_search__"))
+        self.assertTrue(k2.startswith("hybrid_search__"))
 
     def test_same_version_same_args_same_key(self):
         from scripts.v2.cache import cache_key

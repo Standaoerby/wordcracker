@@ -164,12 +164,28 @@ class RouterExecutesSteps(unittest.TestCase):
             if mod.startswith("scripts.v2.tools"):
                 del sys.modules[mod]
         import scripts.v2.tools  # noqa: F401
+        # v3.3.1 — isolate disk cache. Previously test_pipeline_e2e wrote
+        # stale `_stub_tool` payloads under the shared `/data/v2_cache`
+        # which then leaked into these router tests (cache_get returns
+        # the stub before the patched wrapper ever runs). Each test gets
+        # its own tmp cache dir; CACHE_ROOT is restored in tearDown.
+        import tempfile
+        from pathlib import Path
+        from scripts.v2 import cache as _cache
+        self._cache_root_saved = _cache.CACHE_ROOT
+        self._cache_tmp = tempfile.TemporaryDirectory()
+        _cache.CACHE_ROOT = Path(self._cache_tmp.name)
+        _cache.cache_clear()
 
     def tearDown(self):
         from scripts.v2.tool_registry import REGISTRY
         REGISTRY.clear(); REGISTRY.update(self._snap)
         sys.modules.pop("scripts.rag_query", None)
         sys.modules.pop("scripts.rag_tools", None)
+        from scripts.v2 import cache as _cache
+        _cache.CACHE_ROOT = self._cache_root_saved
+        _cache.cache_clear()
+        self._cache_tmp.cleanup()
 
     def test_single_legacy_step(self):
         from scripts.v2.planner.entities import Entities
@@ -212,11 +228,6 @@ class RouterExecutesSteps(unittest.TestCase):
         """Sprint 11.4 — composite_compare plan threads top_authors_by_country's
         top[0].author into affinity_by_author.author_regex. Verify the
         reshape "Surname, First" → "^Surname,"."""
-        # Drop the LRU cache so stale results from earlier tests in the suite
-        # don't pre-empt our patched stub. top_authors_by_country is cacheable.
-        from scripts.v2 import cache as _cache
-        with _cache._lru_lock:
-            _cache._lru.clear()
         # Override the v1 stub to return a known leader. The v2 wrapper around
         # top_authors_by_country already calls into rag_tools.top_authors_by_country,
         # so we don't need to re-register — just swap the underlying function.
@@ -224,6 +235,13 @@ class RouterExecutesSteps(unittest.TestCase):
             "country": kw["country"],
             "top": [{"author": "Dickens, Charles", "books": 50,
                      "downloads": 1000, "country_code": kw["country"]}],
+        }
+        # Also mock affinity_by_author to return a minimal valid shape so the
+        # chained author_regex injection can be asserted on its data.
+        sys.modules["scripts.rag_tools"].affinity_by_author = lambda **kw: {
+            "top_words": [{"word": "wegg", "affinity": 0.9}],
+            "author_regex": kw.get("author_regex"),
+            "n_books": 1,
         }
 
         from scripts.v2.planner.entities import Entities

@@ -42,6 +42,15 @@ log = logging.getLogger("wordcracker.v2.cache")
 CACHE_ROOT = Path(os.environ.get("WC_V2_CACHE_DIR", "/data/v2_cache"))
 LRU_SIZE = 512
 
+# v3.3.1 — global cache schema version. Bump on any change that affects
+# ToolResult shape (new fields, enum reshuffles, dataclass refactors).
+# Folded into cache_key so old entries under different schema become
+# automatically unreachable without manual cache eviction.
+#
+#   "v1"        — pre-v5 (no view / data_validity in ToolResult)
+#   "v2-views"  — v5 Phase 2+ tools emit view + data_validity
+CACHE_SCHEMA_VERSION = "v2-views"
+
 # Per-tool TTL in seconds. Tools not listed = infinite (corpus_version is the
 # only invalidator). Etymology stays forever (Wiktionary is immutable for
 # practical purposes); enrich_word ~30d.
@@ -73,13 +82,18 @@ def _normalize_args(args: dict) -> str:
 def cache_key(tool: str, args: dict, wrapper_version: str = "v1") -> str:
     norm = _normalize_args(args)
     # Sprint 21+ (Stan B100): wrapper_version becomes part of the hash so
-    # bumping the wrapper invalidates old entries automatically. The
-    # version is folded INTO the hash (not appended after) — keeps the
-    # key shape uniform across tools.
+    # bumping the wrapper invalidates old entries automatically.
+    # v3.3.1 — also fold CACHE_SCHEMA_VERSION at hash front so a schema
+    # bump globally invalidates ALL cached entries across all tools
+    # (e.g. when ToolResult adds .view / .data_validity in Phase 2.5).
     h = hashlib.sha256(
-        (f"{wrapper_version}\0" + norm).encode("utf-8")
+        (f"{CACHE_SCHEMA_VERSION}\0{wrapper_version}\0" + norm).encode("utf-8")
     ).hexdigest()[:16]
-    return f"{tool}:{h}"
+    # v3.3.1 — "__" separator (was ":") — NTFS reserves ":" for ADS, so
+    # the old key shape broke any Windows-side dev/testing of cache.
+    # Schema bump already invalidates old entries, so renaming here is
+    # safe (no migration needed).
+    return f"{tool}__{h}"
 
 
 # ---- disk layer ----
@@ -234,6 +248,32 @@ def _from_payload(raw: dict, *, tool: str, stale: bool) -> ToolResult:
         retryable=err_data.get("retryable", False),
     ) if err_data else None
 
+    # v3.3.1 — restore v5 fields (view + data_validity) across cache
+    # roundtrip. ROOT CAUSE of Stage 3 silent view emission failure
+    # 2026-05-21: cache hits returned ToolResult with view=None because
+    # this function ignored the JSON-serialized "view" / "data_validity"
+    # fields entirely. select_primary_view found no views → ERROR_FRIENDLY
+    # fallback for every query.
+    view = None
+    view_data = raw.get("view")
+    if view_data:
+        try:
+            from scripts.v2.view_types import RenderableView
+            view = RenderableView.from_dict(view_data)
+        except Exception as e:
+            log.warning("cache view restore failed for %s: %s", tool, e)
+            view = None
+
+    data_validity = None
+    validity_str = raw.get("data_validity")
+    if validity_str:
+        try:
+            from scripts.v2.view_types import DataValidity
+            data_validity = DataValidity(validity_str)
+        except (ValueError, ImportError) as e:
+            log.debug("cache data_validity restore failed for %s: %s", tool, e)
+            data_validity = None
+
     return ToolResult(
         ok=raw.get("ok", True),
         tool=raw.get("tool", tool),
@@ -245,4 +285,6 @@ def _from_payload(raw: dict, *, tool: str, stale: bool) -> ToolResult:
         runtime_ms=raw.get("runtime_ms", 0),
         cache_hit=False,  # overridden by caller
         error=error,
+        view=view,
+        data_validity=data_validity,
     )
