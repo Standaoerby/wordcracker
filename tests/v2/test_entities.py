@@ -197,16 +197,17 @@ class EmptyInput(unittest.TestCase):
         self.assertIsNone(e.book_id)
 
 
-class SurnameSpecialization(unittest.TestCase):
-    """B-R17-1 stage3.2 (2026-05-21): when AUTHOR_ALIASES maps a bare
-    surname to `^Surname,` and multiple canonical authors share that
-    surname, `_find_authors` should specialize via the resolver's
-    prominence index to the dominant canonical's tighter regex.
+class SurnameClarifyOnAmbiguous(unittest.TestCase):
+    """B-R17-1 stage3.2 v2 (2026-05-21 — Stan UX correction): when a
+    bare surname like «Wells» maps to multiple canonical authors in
+    the corpus, planner must SURFACE the candidate list so the plan
+    builder can ask the user which Wells they meant — instead of
+    silently auto-resolving to the dominant one (H.G. Wells).
 
-    Without this, queries like «какие книги у Wells» extract
-    `author_regex=^Wells,` and downstream author_metadata returns the
-    aggregate of all Wells authors (1820-?, 10 books) instead of
-    H.G. Wells specifically.
+    The first attempt tried auto-pick-dominant; smoke test showed
+    that still returned the aggregate card in some cases, and Stan
+    explicitly asked for clarify-with-list behavior. This locks in
+    the candidate-collection contract.
     """
 
     def setUp(self):
@@ -217,9 +218,11 @@ class SurnameSpecialization(unittest.TestCase):
             er._prom_state["data"] = None
         e._AUTHOR_KEYS_SORTED = None
 
-    def test_wells_specializes_to_dominant_canonical(self):
-        """Bare-surname alias `wells → ^Wells,` should tighten to
-        `^Wells, H` when H.G. Wells dominates by ≥5× downloads."""
+    def test_wells_surfaces_candidates_for_clarify(self):
+        """Bare `wells` alias matches multiple canonicals → Entities
+        gets a populated `author_clarify_candidates` list sorted by
+        downloads desc. Planner keeps the bare regex; plan builder
+        decides to clarify."""
         import pandas as pd
         import unittest.mock as mock
         fake_df = pd.DataFrame([
@@ -227,56 +230,82 @@ class SurnameSpecialization(unittest.TestCase):
             {"author": "Wells, Basil",   "downloads": 0,     "id": 2},
             {"author": "Wells, Carolyn", "downloads": 0,     "id": 3},
         ])
-        from scripts.v2.planner.entities import _find_authors
+        from scripts.v2.planner.entities import extract
         with mock.patch("scripts.rag_tools._metadata_df",
                          return_value=fake_df):
-            hits = _find_authors("какие книги у Wells")
-        self.assertEqual(len(hits), 1)
-        self.assertEqual(hits[0][1], "^Wells, H",
-                          "Expected specialization to dominant Wells")
+            ent = extract("какие книги у Wells")
+        # Regex stays the bare alias — plan builder routes to clarify
+        # based on author_clarify_candidates, not regex shape.
+        self.assertEqual(ent.author_regex, "^Wells,")
+        self.assertEqual(len(ent.author_clarify_candidates), 3)
+        # Sorted by downloads desc
+        names = [c["name"] for c in ent.author_clarify_candidates]
+        self.assertEqual(names[0], "Wells, H. G.")
+        # Each candidate has the expected shape
+        for c in ent.author_clarify_candidates:
+            self.assertIn("name", c)
+            self.assertIn("downloads", c)
+            self.assertIn("books", c)
 
-    def test_already_specific_alias_unchanged(self):
-        """Hardy alias already specific (`^Hardy, Thomas`) — must not
-        be re-specialized (would break disambiguation we already did)."""
+    def test_already_specific_alias_no_clarify(self):
+        """Hardy alias `^Hardy, Thomas` is specific — `_find_authors`
+        returns it as-is, candidate collection skips (regex doesn't
+        match `^Surname,$` pattern)."""
         import pandas as pd
         import unittest.mock as mock
         fake_df = pd.DataFrame([
             {"author": "Hardy, Thomas",  "downloads": 12000, "id": 1},
             {"author": "Hardy, E. D.",   "downloads": 0,     "id": 2},
         ])
-        from scripts.v2.planner.entities import _find_authors
+        from scripts.v2.planner.entities import extract
         with mock.patch("scripts.rag_tools._metadata_df",
                          return_value=fake_df):
-            hits = _find_authors("стиль Hardy")
-        self.assertEqual(hits[0][1], "^Hardy, Thomas")
+            ent = extract("стиль Hardy")
+        self.assertEqual(ent.author_regex, "^Hardy, Thomas")
+        self.assertEqual(ent.author_clarify_candidates, [])
 
-    def test_specialization_skips_when_metadata_unavailable(self):
-        """No-metadata environment: planner returns the bare-surname
-        regex as fallback. Critical for CI / dev boxes without SPGC."""
+    def test_single_canonical_no_clarify(self):
+        """If only one canonical matches the surname (e.g. Wodehouse),
+        no clarify needed even though the alias is bare-surname."""
+        import pandas as pd
         import unittest.mock as mock
-        from scripts.v2.planner.entities import _find_authors
+        fake_df = pd.DataFrame([
+            {"author": "Wodehouse, P. G.", "downloads": 5000, "id": 1},
+        ])
+        from scripts.v2.planner.entities import extract
+        with mock.patch("scripts.rag_tools._metadata_df",
+                         return_value=fake_df):
+            ent = extract("стиль Wodehouse")
+        self.assertEqual(ent.author_clarify_candidates, [])
+
+    def test_no_metadata_no_clarify(self):
+        """No metadata loaded (CI / dev) — return empty candidates,
+        don't crash. The bare regex still goes through to the tool,
+        same fallback behavior as pre-stage3.2."""
+        import unittest.mock as mock
+        from scripts.v2.planner.entities import extract
         from scripts.v2 import entity_resolver as er
-        # Force the prominence index to be empty
         with er._prom_lock:
             er._prom_state["data"] = {"by_surname": {}, "by_canonical": {}}
-        with mock.patch.object(er, "_specialize_surname_to_dominant",
-                                return_value=(None, None, {})):
-            hits = _find_authors("какие книги у Wells")
-        # No specialization → fallback to bare alias
-        self.assertEqual(hits[0][1], "^Wells,")
+        with mock.patch.object(er, "get_prominence_index",
+                                return_value={"by_surname": {},
+                                              "by_canonical": {}}):
+            ent = extract("какие книги у Wells")
+        self.assertEqual(ent.author_clarify_candidates, [])
 
-    def test_specialization_failure_does_not_crash(self):
-        """If resolver helper raises (defensive coverage), planner must
-        still return the bare alias — entity extraction is never
-        allowed to crash on this path."""
+    def test_clarify_helper_failure_does_not_crash(self):
+        """If candidate collector raises (defensive cover), extraction
+        still returns clean Entities with empty candidates list."""
         import unittest.mock as mock
-        from scripts.v2.planner.entities import _find_authors
-        from scripts.v2 import entity_resolver as er
-        with mock.patch.object(er, "_specialize_surname_to_dominant",
+        from scripts.v2.planner import entities as e_mod
+        with mock.patch.object(e_mod, "_collect_surname_candidates",
                                 side_effect=RuntimeError("boom")):
-            hits = _find_authors("какие книги у Wells")
-        # Defensive — original alias preserved
-        self.assertEqual(hits[0][1], "^Wells,")
+            # Direct call so the exception propagates — verify our wrapper
+            # path catches it. Currently the wrapper is `_collect_*` itself;
+            # we only need to ensure no extract() consumer breaks.
+            ent = e_mod.extract("какие книги у Wells")
+        # Defensive — empty list is the safe fallback
+        self.assertEqual(ent.author_clarify_candidates, [])
 
 
 if __name__ == "__main__":

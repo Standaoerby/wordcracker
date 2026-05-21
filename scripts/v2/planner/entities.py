@@ -552,6 +552,20 @@ class Entities:
     # export_word_list followups. csv / anki / markdown / json. None
     # means «no explicit format requested» (default to csv).
     export_format: str | None = None
+    # B-R17-1 stage3.2 (2026-05-21 evening v2): when the user typed a
+    # bare surname (e.g. «Wells») that maps to multiple canonical
+    # authors in the corpus (Wells, H. G. / Wells, Basil / Wells,
+    # Carolyn / …), planner sets `author_clarify_candidates` to a
+    # short list of (canonical_name, downloads, books) tuples. Plan
+    # builder converts this into a `needs_clarify=True` plan that
+    # asks the user which Wells they meant — instead of silently
+    # returning the aggregate Wells card (which used to span all of
+    # them with min year 1820).
+    #
+    # The auto-pick-dominant path that lived in stage3.2's first
+    # attempt was wrong UX — picked H.G. Wells even when user meant
+    # Carolyn. Asking is the honest answer.
+    author_clarify_candidates: list[dict] = field(default_factory=list)
     raw_misc: dict = field(default_factory=dict)
 
 
@@ -695,29 +709,63 @@ def _find_authors(text: str) -> list[tuple[str, str]]:
 
 
 def _maybe_specialize_surname(regex: str) -> str:
-    """If `regex` is a bare-surname pattern `^Surname,` and a dominant
-    canonical author exists for that surname, return the tightened
-    regex (e.g. `^Wells, H`); otherwise return the original.
+    """Backwards-compat shim. Original stage3.2 auto-picked the
+    dominant canonical (e.g. `^Wells,` → `^Wells, H`); R17 user
+    feedback said that's wrong UX — pick-the-dominant silently
+    answers the wrong question when the user meant another Wells.
+    Path is now: collect candidates → return them so plan builder
+    triggers clarify_needed. See `_collect_surname_candidates`.
 
-    Gracefully no-ops when:
-      * entity_resolver / metadata aren't importable (test environments
-        where SPGC files are missing)
-      * regex is already specific (anything beyond `^Surname,$`)
-      * surname has 0 or 1 canonical match (no ambiguity)
-      * top canonical is not ≥5× the runner-up (genuine ambiguity)
-
-    Defensive — failures here must NOT crash entity extraction. The
-    previous bare-surname behaviour is the safe fallback.
+    Keep this function as identity-pass to preserve any caller that
+    expected the tightened regex (none in current tree, but external
+    consumers may rely on it).
     """
+    return regex
+
+
+def _collect_surname_candidates(regex: str, *, limit: int = 5) -> list[dict]:
+    """If `regex` is `^Surname,` and ≥2 canonical authors share the
+    surname, return [{name, downloads, books}, …] sorted by downloads
+    desc. Empty list otherwise (no ambiguity → no clarify needed).
+
+    Used by `extract()` to populate `Entities.author_clarify_candidates`
+    so the plan builder can emit a `needs_clarify=True` plan with a
+    list of disambiguation options instead of silently aggregating.
+
+    Defensive against missing metadata (CI / dev): returns empty list
+    rather than raising. Entity extraction must never crash on this
+    path.
+    """
+    import re as _re
+    m = _re.fullmatch(r"\^([A-Za-zЀ-ӿ' -]+),", regex)
+    if not m:
+        return []
+    surname = m.group(1)
     try:
-        from scripts.v2.entity_resolver import _specialize_surname_to_dominant
+        from scripts.v2.entity_resolver import get_prominence_index
     except Exception:
-        return regex
+        return []
     try:
-        tight, _display, _prom = _specialize_surname_to_dominant(regex)
+        idx = get_prominence_index()
     except Exception:
-        return regex
-    return tight or regex
+        return []
+    if not isinstance(idx, dict):
+        return []
+    by_canonical = idx.get("by_canonical", {})
+    if not by_canonical:
+        return []
+    surname_prefix = f"{surname},"
+    matches = [(name, ent) for name, ent in by_canonical.items()
+               if name.startswith(surname_prefix)]
+    if len(matches) < 2:
+        return []
+    matches.sort(key=lambda x: x[1].get("downloads", 0), reverse=True)
+    return [
+        {"name": name,
+         "downloads": int(ent.get("downloads", 0)),
+         "books": int(ent.get("books", 0))}
+        for name, ent in matches[:limit]
+    ]
 
 
 # ---------- user-upload resolver (Sprint 19+ HP fix) ----------
@@ -1453,6 +1501,20 @@ def extract(text: str) -> Entities:
     # store as attribution_text so plan can route to lexical search.
     attribution_text = _extract_attribution_passage(text)
 
+    # B-R17-1 stage3.2 (Stan UX correction): when primary author regex
+    # is a bare-surname `^Surname,` that matches multiple canonical
+    # authors in the corpus, collect the candidate list so the plan
+    # builder can ask the user which one they meant. Empty list when
+    # surname is unambiguous (e.g. Wodehouse) or already specific
+    # (Hardy → ^Hardy, Thomas).
+    # Defensive — collector failures must NOT crash entity extraction.
+    author_clarify_candidates: list[dict] = []
+    if primary_author[1]:
+        try:
+            author_clarify_candidates = _collect_surname_candidates(primary_author[1])
+        except Exception:
+            author_clarify_candidates = []
+
     return Entities(
         author_regex=primary_author[1],
         author_label=primary_author[0],
@@ -1476,6 +1538,8 @@ def extract(text: str) -> Entities:
         exclude_archaic=_find_exclude_archaic(text),
         # Sprint 20+ B3: export-format hint for export_word_list followups
         export_format=_find_export_format(text),
+        # B-R17-1 stage3.2 — clarify candidates for ambiguous surname
+        author_clarify_candidates=author_clarify_candidates,
         raw_misc={"raw_text": text,
                   **({"attribution_text": attribution_text}
                      if attribution_text else {})},

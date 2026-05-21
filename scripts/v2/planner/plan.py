@@ -96,6 +96,48 @@ def _need_author(e: Entities, what: str = "автор") -> QueryPlan:
     )
 
 
+def _ambiguous_author_clarify(e: Entities) -> QueryPlan | None:
+    """B-R17-1 stage3.2 (Stan UX correction): if the user typed a
+    bare surname that matches multiple canonical authors in the
+    corpus, ask which one they meant instead of silently aggregating.
+
+    Returns a `needs_clarify=True` QueryPlan with the candidate list
+    when ambiguous, or None when the surname is unambiguous (≤1
+    canonical / already specific alias / metadata unavailable).
+
+    Used by `_plan_author_metadata`, `_plan_author_lookup`,
+    `_plan_author_vocab`, `_plan_author_compare` etc. — anywhere
+    we'd otherwise dispatch with an ambiguous surname regex.
+    """
+    cands = e.author_clarify_candidates or []
+    if len(cands) < 2:
+        return None
+    # Build a human-readable list — surname extracted from first
+    # candidate's canonical name.
+    first_name = cands[0].get("name", "")
+    surname = first_name.split(",", 1)[0].strip() or "автор"
+    bullets = []
+    for c in cands:
+        name = c.get("name", "")
+        dl = c.get("downloads", 0)
+        books = c.get("books", 0)
+        bullets.append(f"• {name} ({books} книг, {dl:,} загрузок)")
+    bullet_block = "\n".join(bullets)
+    clarify_text = (
+        f"Под фамилией «{surname}» в корпусе несколько авторов. "
+        f"Кого ты имеешь в виду?\n\n{bullet_block}\n\n"
+        f"Уточни полное имя — например, «{first_name}» — "
+        f"и я повторю запрос."
+    )
+    return QueryPlan(
+        intent="clarify", entities=e, steps=[],
+        needs_clarify=True,
+        clarify_question=clarify_text,
+        explain=f"ambiguous surname «{surname}» — "
+                f"{len(cands)} canonical candidates",
+    )
+
+
 def _need_book(e: Entities) -> QueryPlan:
     raw = (e.raw_misc or {}).get("raw_text", "") or ""
     hint = ""
@@ -426,6 +468,9 @@ def _plan_corpus_meta(e: Entities) -> QueryPlan:
 def _plan_author_metadata(e: Entities) -> QueryPlan:
     if not e.author_regex:
         return _need_author(e)
+    ambiguous = _ambiguous_author_clarify(e)
+    if ambiguous is not None:
+        return ambiguous
     return QueryPlan(
         intent="author_metadata", entities=e,
         steps=[PlanStep(tool="author_metadata",
@@ -552,6 +597,9 @@ def _plan_author_vocab(e: Entities) -> QueryPlan:
         return _plan_book_vocab(e)
     if not e.author_regex:
         return _need_author(e)
+    ambiguous = _ambiguous_author_clarify(e)
+    if ambiguous is not None:
+        return ambiguous
     # Sprint 20 — propn-strict modifier (from history follow-up «убери
     # имена собственные»). Crank min_corpus_count up so OOV proper
     # nouns and rare character names get dropped at the corpus-frequency
@@ -1769,6 +1817,9 @@ def _plan_author_lookup(e: Entities) -> QueryPlan:
     it bounded to actual data."""
     if not e.author_regex:
         return _need_author(e)
+    ambiguous = _ambiguous_author_clarify(e)
+    if ambiguous is not None:
+        return ambiguous
     return QueryPlan(
         intent="author_lookup", entities=e,
         steps=[PlanStep(tool="author_metadata",
