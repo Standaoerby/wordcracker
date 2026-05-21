@@ -510,9 +510,20 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     # should win (also bumped its conf above 0.95). The lookahead handles
     # «сколько у Толстого книг», «сколько у X книг» staying out of
     # corpus_meta.
+    # R15 Q88 extension: also exclude когда после «сколько книг» идёт
+    # «написал/писал/wrote/published» с capitalized именем автора —
+    # это author_metadata, не corpus_meta. Без этого fix:
+    # «сколько книг написал Marlowe» → corpus_meta → renderer фабрикует
+    # PG id'ы (PG1342 = Pride and Prejudice как «Doctor Faustus»).
     (_re(r"\bсколько\s+(книг|book)\b"
-         r"(?!\w*\s+(у|of)\s+[А-ЯA-ZЁ])"), "corpus_meta", 0.95),
-    (_re(r"\bhow many (книг|book)"), "corpus_meta", 0.95),
+         r"(?!\w*\s+(у|of)\s+[А-ЯA-ZЁ])"
+         r"(?!\s+(написал\w*|писал\w*|создал\w*|опубликовал\w*|"
+         r"wrote|written|published|created|authored)\s+[A-ZА-ЯЁ])"),
+     "corpus_meta", 0.95),
+    (_re(r"\bhow many (книг|books?)\b"
+         r"(?!\w*\s+(?:did|has|have)\s+[A-Z]\w+\s+"
+         r"(?:writ\w+|publish\w+|create\w+|author\w*))"),
+     "corpus_meta", 0.95),
     # Diminutive form — «книжек» is corpus_meta (asking-the-system)
     (_re(r"\bсколько\s+(у\s+тебя\s+)?книж(ек|ка)\b"), "corpus_meta", 0.92),
     (_re(r"прогресс\s+индексаци\w*|index progress|reindex"), "corpus_meta", 0.92),
@@ -544,6 +555,23 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     # corpus_meta. Strengthen author_metadata rule when an author is in
     # genitive form near «книг».
     (_re(r"сколько\s+у\s+[А-ЯA-ZЁ]\w+\w*\s+книг"), "author_metadata", 0.93),
+    # R15 Q88: «сколько книг написал Christopher Marlowe» — иной word order
+    # (без «у», глагол «написал/писал»). Без этого правила routes в
+    # corpus_meta, рендерер фабрикует PG id'ы (PG1342 = Pride and Prejudice
+    # выдан за Doctor Faustus Marlowe). Высокий приоритет — author всегда
+    # explicit в этой формулировке. Покрывает: «написал/писал/создал»,
+    # русский + английский варианты, «произведений» вместо «книг».
+    (_re(r"сколько\s+(?:книг|произведений|работ|стих\w*|драм\w*)\s+"
+         r"(?:написал\w*|писал\w*|создал\w*|опубликовал\w*)\s+"
+         r"[A-ZА-ЯЁ]\w+"),
+     "author_metadata", 0.95),
+    (_re(r"how\s+many\s+(?:books?|works?|plays?|poems?|novels?)\s+"
+         r"(?:did|has|have)\s+[A-Z]\w+\s+"
+         r"(?:writ\w+|publish\w+|produce\w+|author\w*)"),
+     "author_metadata", 0.95),
+    # Defensive — «сколько X у автора Y» / «количество книг автора Y»
+    (_re(r"количество\s+(?:книг|произведений)\s+(?:у\s+)?[A-ZА-ЯЁ]\w+"),
+     "author_metadata", 0.9),
     # Round 3 R3: «дай статистику по Wodehouse» — это chat placeholder! Не
     # corpus_stats_by_author exact, но routes тoда же tool через
     # author_metadata (быстрая мета — books_total, sample titles, geo).
@@ -762,6 +790,19 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     # that name an author / book without a "characteristic" keyword.
     (_re(r"^\s*слова\s+[A-ZА-Я]\w+"), "author_vocab", 0.65),
     (_re(r"\bлексик[аиу]\s+[A-ZА-Я]\w+"), "author_vocab", 0.7),
+    # R15 Q79 — «общие слова Мелвилла, Конрада и Стивенсона» fell through to
+    # generic clarify (0 tool_calls) because line 791 requires «^слова» at
+    # start. _plan_author_vocab already parallels affinity_by_author × N via
+    # multi_author_regex (Sprint 11.3), so we just need intent classification
+    # to pick this up. Same for «common words across X, Y, Z», «пересечение
+    # слов», «что общего у». Renderer computes the intersection downstream.
+    (_re(r"\b(общие|общая|пересечен\w+)\s+(фирменн\w+\s+)?"
+         r"(слов|лексик|вокабуляр)"),
+     "author_vocab", 0.85),
+    (_re(r"\bcommon\s+(signature\s+)?words?\b"), "author_vocab", 0.85),
+    (_re(r"\bчто\s+общего\s+у\s+[A-ZА-Я]"), "author_vocab", 0.8),
+    (_re(r"\b(intersection|shared)\s+of\s+(signature\s+)?(words?|vocabulary)"),
+     "author_vocab", 0.8),
     (_re(r"заметно\s+чаще|непропорционально|disproportionately|"
          r"встречаются\s+заметно\s+(чаще|реже)"), "author_vocab", 0.8),
     (_re(r"чаще\s+всего\s+использует|больше\s+всего\s+использует|"

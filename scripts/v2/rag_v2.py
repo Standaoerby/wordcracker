@@ -659,6 +659,36 @@ def _v5_pipeline_envelope(question: str, *, engine: str = "v2"):
         return None
 
 
+def _v5_budget_from_envelope(envelope, *, intent_label: str | None = None):
+    """v5 Phase 5 — derive a RequestBudget for the router from the v5
+    envelope. Returns None when envelope absent → router runs unbounded
+    (legacy behaviour preserved when flag off).
+
+    When envelope present, budget defaults to per-intent value
+    (`RequestBudget.for_intent(intent)`). Router aborts via
+    `budget_exceeded` event if it goes over.
+
+    Closes Q25/Q114/Q105 latency class structurally: no plan can run
+    past the request envelope. find_book_by_topic spending 5 minutes
+    on a single tool call gets aborted at ~30-60s (per-intent budget)
+    and surfaces ERROR_FRIENDLY view with partial results.
+    """
+    if envelope is None:
+        return None
+    try:
+        from scripts.v2 import budget as _b
+        b = _b.RequestBudget.for_intent(intent_label)
+        # Track envelope's existing usage so router accounts for time
+        # already spent in planner / entity resolution.
+        elapsed = time.perf_counter() - envelope["t0"]
+        b.wall_clock_s = max(1.0, b.wall_clock_s - elapsed)
+        envelope["budget"] = b
+        return b
+    except Exception as e:
+        log.warning("v5 budget derive failed: %s", e)
+        return None
+
+
 def _v5_envelope_extras(envelope, *, intent_label: str | None = None,
                         render_meta: dict | None = None) -> dict:
     """Build extra log fields from a v5 envelope. Empty dict if no
@@ -811,7 +841,11 @@ def ask(
             if pres is not None and pres.ok and pres.plan and pres.plan.steps:
                 v4_followup_used = True
                 v4_followup_report = pres
-                rr_v4 = router_mod.execute_spec(pres.plan)
+                rr_v4 = router_mod.execute_spec(
+                    pres.plan,
+                    budget=_v5_budget_from_envelope(
+                        _v5_env, intent_label=pres.plan.intent_hint),
+                )
                 # Build stand-in intent + entities so downstream
                 # observability + render code paths keep working.
                 intent = int_mod.IntentMatch(
@@ -961,7 +995,11 @@ def ask(
             if pres is not None and pres.ok and pres.plan and pres.plan.steps:
                 v4_planner_used = True
                 v4_planner_report = pres
-                rr_v4 = router_mod.execute_spec(pres.plan)
+                rr_v4 = router_mod.execute_spec(
+                    pres.plan,
+                    budget=_v5_budget_from_envelope(
+                        _v5_env, intent_label=pres.plan.intent_hint),
+                )
                 # Adopt the v4 router result; downstream render/critic
                 # treats it like any other ToolResult set.
                 plan = rr_v4.plan
@@ -1092,7 +1130,10 @@ def ask(
     # Skip router if EITHER v4 path already produced results (followup
     # path runs early; main v4 path runs after rules clarify).
     if not v4_planner_used and not v4_followup_used:
-        rr = router_mod.execute(plan)
+        rr = router_mod.execute(
+            plan,
+            budget=_v5_budget_from_envelope(_v5_env, intent_label=intent.label),
+        )
 
     render_meta: dict = {}
     if intent.label == "introduction":
@@ -1258,7 +1299,11 @@ def ask_stream(
             if pres is not None and pres.ok and pres.plan and pres.plan.steps:
                 v4_followup_used = True
                 v4_followup_report = pres
-                rr_v4 = router_mod.execute_spec(pres.plan)
+                rr_v4 = router_mod.execute_spec(
+                    pres.plan,
+                    budget=_v5_budget_from_envelope(
+                        _v5_env, intent_label=pres.plan.intent_hint),
+                )
                 intent = int_mod.IntentMatch(
                     label=pres.plan.intent_hint or "v4_followup",
                     confidence=0.9,
@@ -1412,7 +1457,11 @@ def ask_stream(
                 # Execute the DAG once: stream events + collect results
                 # for renderer / critic in a single pass (don't double-
                 # dispatch via execute_spec_stream + execute_spec).
-                rr = router_mod.execute_spec(pres.plan)
+                rr = router_mod.execute_spec(
+                    pres.plan,
+                    budget=_v5_budget_from_envelope(
+                        _v5_env, intent_label=pres.plan.intent_hint),
+                )
                 results = rr.results
                 plan = rr.plan  # stub QueryPlan with v4 intent label
                 yield {"event": "v4_plan",
