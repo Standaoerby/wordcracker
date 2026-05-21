@@ -197,5 +197,87 @@ class EmptyInput(unittest.TestCase):
         self.assertIsNone(e.book_id)
 
 
+class SurnameSpecialization(unittest.TestCase):
+    """B-R17-1 stage3.2 (2026-05-21): when AUTHOR_ALIASES maps a bare
+    surname to `^Surname,` and multiple canonical authors share that
+    surname, `_find_authors` should specialize via the resolver's
+    prominence index to the dominant canonical's tighter regex.
+
+    Without this, queries like «какие книги у Wells» extract
+    `author_regex=^Wells,` and downstream author_metadata returns the
+    aggregate of all Wells authors (1820-?, 10 books) instead of
+    H.G. Wells specifically.
+    """
+
+    def setUp(self):
+        # Reset prominence cache + alias key cache so the mock takes effect
+        from scripts.v2 import entity_resolver as er
+        from scripts.v2.planner import entities as e
+        with er._prom_lock:
+            er._prom_state["data"] = None
+        e._AUTHOR_KEYS_SORTED = None
+
+    def test_wells_specializes_to_dominant_canonical(self):
+        """Bare-surname alias `wells → ^Wells,` should tighten to
+        `^Wells, H` when H.G. Wells dominates by ≥5× downloads."""
+        import pandas as pd
+        import unittest.mock as mock
+        fake_df = pd.DataFrame([
+            {"author": "Wells, H. G.",   "downloads": 50000, "id": 1},
+            {"author": "Wells, Basil",   "downloads": 0,     "id": 2},
+            {"author": "Wells, Carolyn", "downloads": 0,     "id": 3},
+        ])
+        from scripts.v2.planner.entities import _find_authors
+        with mock.patch("scripts.rag_tools._metadata_df",
+                         return_value=fake_df):
+            hits = _find_authors("какие книги у Wells")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0][1], "^Wells, H",
+                          "Expected specialization to dominant Wells")
+
+    def test_already_specific_alias_unchanged(self):
+        """Hardy alias already specific (`^Hardy, Thomas`) — must not
+        be re-specialized (would break disambiguation we already did)."""
+        import pandas as pd
+        import unittest.mock as mock
+        fake_df = pd.DataFrame([
+            {"author": "Hardy, Thomas",  "downloads": 12000, "id": 1},
+            {"author": "Hardy, E. D.",   "downloads": 0,     "id": 2},
+        ])
+        from scripts.v2.planner.entities import _find_authors
+        with mock.patch("scripts.rag_tools._metadata_df",
+                         return_value=fake_df):
+            hits = _find_authors("стиль Hardy")
+        self.assertEqual(hits[0][1], "^Hardy, Thomas")
+
+    def test_specialization_skips_when_metadata_unavailable(self):
+        """No-metadata environment: planner returns the bare-surname
+        regex as fallback. Critical for CI / dev boxes without SPGC."""
+        import unittest.mock as mock
+        from scripts.v2.planner.entities import _find_authors
+        from scripts.v2 import entity_resolver as er
+        # Force the prominence index to be empty
+        with er._prom_lock:
+            er._prom_state["data"] = {"by_surname": {}, "by_canonical": {}}
+        with mock.patch.object(er, "_specialize_surname_to_dominant",
+                                return_value=(None, None, {})):
+            hits = _find_authors("какие книги у Wells")
+        # No specialization → fallback to bare alias
+        self.assertEqual(hits[0][1], "^Wells,")
+
+    def test_specialization_failure_does_not_crash(self):
+        """If resolver helper raises (defensive coverage), planner must
+        still return the bare alias — entity extraction is never
+        allowed to crash on this path."""
+        import unittest.mock as mock
+        from scripts.v2.planner.entities import _find_authors
+        from scripts.v2 import entity_resolver as er
+        with mock.patch.object(er, "_specialize_surname_to_dominant",
+                                side_effect=RuntimeError("boom")):
+            hits = _find_authors("какие книги у Wells")
+        # Defensive — original alias preserved
+        self.assertEqual(hits[0][1], "^Wells,")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

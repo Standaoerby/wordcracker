@@ -679,11 +679,45 @@ def _find_authors(text: str) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     for _, _, key in raw_hits:
         rgx = AUTHOR_ALIASES[key]
+        # B-R17-1 stage3.2 (2026-05-21 evening): when alias regex is a
+        # bare-surname like `^Wells,` matching multiple distinct canonical
+        # authors, ask the resolver to specialize it to the dominant
+        # canonical (e.g. `^Wells, H` for H. G. Wells). Without this,
+        # the planner extracts the surname regex and author_metadata
+        # returns an aggregate spanning all Wells authors (1820-?, 10
+        # books) instead of H.G. Wells specifically.
+        rgx = _maybe_specialize_surname(rgx)
         if rgx in seen_regex:
             continue
         seen_regex.add(rgx)
         out.append((key, rgx))
     return out
+
+
+def _maybe_specialize_surname(regex: str) -> str:
+    """If `regex` is a bare-surname pattern `^Surname,` and a dominant
+    canonical author exists for that surname, return the tightened
+    regex (e.g. `^Wells, H`); otherwise return the original.
+
+    Gracefully no-ops when:
+      * entity_resolver / metadata aren't importable (test environments
+        where SPGC files are missing)
+      * regex is already specific (anything beyond `^Surname,$`)
+      * surname has 0 or 1 canonical match (no ambiguity)
+      * top canonical is not ≥5× the runner-up (genuine ambiguity)
+
+    Defensive — failures here must NOT crash entity extraction. The
+    previous bare-surname behaviour is the safe fallback.
+    """
+    try:
+        from scripts.v2.entity_resolver import _specialize_surname_to_dominant
+    except Exception:
+        return regex
+    try:
+        tight, _display, _prom = _specialize_surname_to_dominant(regex)
+    except Exception:
+        return regex
+    return tight or regex
 
 
 # ---------- user-upload resolver (Sprint 19+ HP fix) ----------
