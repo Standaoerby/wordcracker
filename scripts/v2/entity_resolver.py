@@ -324,18 +324,32 @@ def _build_prominence_index() -> dict:
 
     out: dict[str, dict] = {}
     # Iterate fast — group-by would copy; just walk rows.
-    authors = df["author"].astype(str).tolist()
-    downloads = df["downloads"].fillna(0).astype(int).tolist() if has_downloads else [0] * len(authors)
-    for a, dl in zip(authors, downloads):
-        if not a or a == "nan":
+    # Defensive: _metadata_df concatenates multiple sources (SPGC +
+    # user_uploads + orphan_pg). When source dtypes differ (object vs
+    # float64), pandas .astype(str) may not coerce NaN — a value can
+    # arrive here as float('nan'). Prod crash 2026-05-21 06:02:
+    # «AttributeError: 'float' object has no attribute 'split'» on the
+    # first call to resolve_author after Stage 2 deploy. Cast + skip.
+    authors_raw = df["author"].tolist()
+    downloads_raw = df["downloads"].fillna(0).tolist() if has_downloads else [0] * len(authors_raw)
+    for a_raw, dl_raw in zip(authors_raw, downloads_raw):
+        # Skip non-string values (NaN floats, None, numpy missing markers)
+        if not isinstance(a_raw, str):
+            continue
+        a = a_raw.strip()
+        if not a or a.lower() in ("nan", "none", "<na>"):
             continue
         surname = a.split(",", 1)[0].strip()
         if not surname:
             continue
+        try:
+            dl = int(float(dl_raw)) if dl_raw is not None else 0
+        except (TypeError, ValueError):
+            dl = 0
         key = f"^{surname},"
         ent = out.setdefault(key, {"downloads": 0, "books": 0,
                                     "canonical_first": a})
-        ent["downloads"] += int(dl)
+        ent["downloads"] += dl
         ent["books"] += 1
     return out
 

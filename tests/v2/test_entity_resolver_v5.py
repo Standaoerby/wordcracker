@@ -453,6 +453,57 @@ class ProminenceIndexCache(unittest.TestCase):
             idx = er.get_prominence_index()
         self.assertEqual(idx, {})
 
+    def test_handles_nan_and_mixed_types_in_author_column(self):
+        """Prod crash 2026-05-21 06:02 — _metadata_df concatenates SPGC
+        + user_uploads + orphan_pg sources. After concat, author column
+        is object dtype with mixed strings + float('nan') values. The
+        initial code path called `.astype(str)` then `.tolist()` then
+        `.split()` — but float NaN survived through to .split() call
+        on some pandas paths, crashing with «'float' object has no
+        attribute 'split'». Hotfix: isinstance check in loop."""
+        import numpy as np
+        fake_df = pd.DataFrame([
+            {"author": "Doyle, Arthur Conan", "downloads": 5000, "id": 1},
+            # NaN row — pandas may leave this as float
+            {"author": np.nan,                "downloads": None,  "id": 2},
+            {"author": "Hugo, Victor",        "downloads": 12000, "id": 3},
+            # None row
+            {"author": None,                  "downloads": 100,   "id": 4},
+            # Empty string row
+            {"author": "",                    "downloads": 50,    "id": 5},
+            # "<NA>" sentinel that pandas sometimes emits
+            {"author": "<NA>",                "downloads": 200,   "id": 6},
+            {"author": "Tolstoy, Leo",        "downloads": 8000,  "id": 7},
+        ])
+        with mock.patch("scripts.rag_tools._metadata_df", return_value=fake_df):
+            idx = er.get_prominence_index(force_reload=True)
+        # Must NOT raise. Must contain the 3 real authors, skip nulls.
+        self.assertIn("^Doyle,",  idx)
+        self.assertIn("^Hugo,",   idx)
+        self.assertIn("^Tolstoy,", idx)
+        # And NOT contain any junk entries
+        for bad_key in ("^nan,", "^None,", "^,", "^<NA>,"):
+            self.assertNotIn(bad_key, idx, f"junk key leaked: {bad_key!r}")
+        # Downloads aggregated correctly
+        self.assertEqual(idx["^Hugo,"]["downloads"], 12000)
+        self.assertEqual(idx["^Doyle,"]["downloads"], 5000)
+
+    def test_handles_string_downloads_via_coercion(self):
+        """Defensive — downloads column with string values (rare but
+        seen on prod when CSV merge picks up wrong dtype). Should still
+        produce a clean index."""
+        fake_df = pd.DataFrame([
+            {"author": "Doyle, Arthur Conan", "downloads": "5000", "id": 1},
+            {"author": "Hugo, Victor",        "downloads": "12000", "id": 2},
+            {"author": "Bad",                 "downloads": "not-a-number", "id": 3},
+        ])
+        with mock.patch("scripts.rag_tools._metadata_df", return_value=fake_df):
+            idx = er.get_prominence_index(force_reload=True)
+        self.assertEqual(idx["^Doyle,"]["downloads"], 5000)
+        self.assertEqual(idx["^Hugo,"]["downloads"], 12000)
+        # Bad row's downloads coerced to 0 (not a crash)
+        self.assertEqual(idx["^Bad,"]["downloads"], 0)
+
 
 # =====================================================================
 # Integration with RequestTrace (P9 wiring sanity)
