@@ -57,7 +57,7 @@ services:
       # Stage 2 — entity resolver (NFKC + RU lemmatize + prominence rank).
       # Closes B-R14-4 (homoglyph), B-R14-9 (RU genitive), B-R14-13 (Hugo→Ganz).
       # Uncomment after Stage 1 bake + JSONL spot-check (10 min):
-      #- WC_V5_RESOLVER=on
+      - WC_V5_RESOLVER=on
       # Stage 3 — deterministic renderer (template_executor instead of LLM).
       # Closes B-R14-2 / B-R14-3 / B-R14-5 / B-R14-14 / B-R14-18 + renderer
       # non-determinism. Uncomment after Stage 2 bake + canonical sample:
