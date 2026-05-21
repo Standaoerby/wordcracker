@@ -61,7 +61,7 @@ services:
       # Stage 3 — deterministic renderer (template_executor instead of LLM).
       # Closes B-R14-2 / B-R14-3 / B-R14-5 / B-R14-14 / B-R14-18 + renderer
       # non-determinism. Uncomment after Stage 2 bake + canonical sample:
-      - WC_V5_RENDERER=on
+      #- WC_V5_RENDERER=on
       # Stage 4 — narrow ProseBinder LLM step with payload audit.
       # Adds ~1.5-3s/query for intro + next-steps. Audit drops fabrication.
       # Uncomment after Stage 3 bake + visual sample of 10 queries:
