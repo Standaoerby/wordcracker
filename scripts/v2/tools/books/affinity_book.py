@@ -45,6 +45,12 @@ def affinity_by_book(pg_id: str, top: int = 50,
                      pos_filter: list[str] | None = None,
                      min_corpus_count: int = 200,
                      exclude_proper_nouns: bool = True) -> ToolResult:
+    if not pg_id or (isinstance(pg_id, str) and not pg_id.strip()):
+        return ToolResult.fail(
+            tool="affinity_by_book", err_type="invalid_args",
+            message="pg_id is required and must be non-empty (e.g. 'PG1342')",
+            query={"pg_id": pg_id},
+        )
     try:
         from scripts.learning_tools import affinity_by_book as _v1
     except ImportError as e:

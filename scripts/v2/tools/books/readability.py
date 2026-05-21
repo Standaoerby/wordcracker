@@ -29,6 +29,19 @@ from scripts.v2._types import Coverage, ToolResult
     cacheable=True,
 )
 def book_readability(pg_id: str, sample_chars: int = 200_000) -> ToolResult:
+    # Defensive — pre-existing crash from journalctl 2026-05-21:
+    # «AttributeError: 'NoneType' object has no attribute 'upper'» at
+    # rag_tools.book_readability:1120 → `pg = pg_id.upper()`. Triggers
+    # when planner emits a step with pg_id=None (unresolved find_book
+    # chain or v4 LLM-planner schema gap). Hard-fail with invalid_args
+    # so the renderer can surface a friendly «нужен pg_id» message
+    # instead of an internal traceback.
+    if not pg_id or (isinstance(pg_id, str) and not pg_id.strip()):
+        return ToolResult.fail(
+            tool="book_readability", err_type="invalid_args",
+            message="pg_id is required and must be non-empty (e.g. 'PG1342')",
+            query={"pg_id": pg_id},
+        )
     try:
         from scripts.rag_tools import book_readability as _v1
     except ImportError as e:
@@ -138,6 +151,12 @@ def book_readability(pg_id: str, sample_chars: int = 200_000) -> ToolResult:
     cacheable=True,
 )
 def book_archaic_words(pg_id: str, top: int = 30) -> ToolResult:
+    if not pg_id or (isinstance(pg_id, str) and not pg_id.strip()):
+        return ToolResult.fail(
+            tool="book_archaic_words", err_type="invalid_args",
+            message="pg_id is required and must be non-empty (e.g. 'PG345')",
+            query={"pg_id": pg_id},
+        )
     try:
         from scripts.learning_tools import book_archaic_words as _v1
     except ImportError as e:

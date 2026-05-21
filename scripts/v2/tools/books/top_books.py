@@ -124,6 +124,12 @@ def top_books_by_recency(top: int = 20, lang: str = "en",
     cacheable=True,
 )
 def book_emotion_profile(pg_id: str) -> ToolResult:
+    if not pg_id or (isinstance(pg_id, str) and not pg_id.strip()):
+        return ToolResult.fail(
+            tool="book_emotion_profile", err_type="invalid_args",
+            message="pg_id is required and must be non-empty (e.g. 'PG84')",
+            query={"pg_id": pg_id},
+        )
     try:
         from scripts.rag_tools import book_emotion_profile as _v1
     except ImportError as e:
