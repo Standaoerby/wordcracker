@@ -42,6 +42,19 @@ class QueryPlan:
     # limitation to the renderer that no individual tool would emit,
     # e.g. «exclude_archaic flag set but no archaic-density column yet».
     render_notes: list[str] = field(default_factory=list)
+    # B-R17-1 stage3.2 v3 (2026-05-21 evening v3) — when rules-path
+    # explicitly asks for clarification (e.g. ambiguous surname →
+    # «which Wells?»), v4 LLM planner fallback in rag_v2 MUST NOT
+    # override. Without this flag, rag_v2 line 984 sees
+    # needs_clarify=True as «rules-path gave up → let LLM plan»
+    # and constructs a generic top_books_by_downloads plan,
+    # bypassing the deliberate disambiguation request.
+    #
+    # Set this to True in plan builders that emit intentional
+    # clarify (not «give up» clarify):
+    #   * _ambiguous_author_clarify  — multiple Wells/Tolstoy/etc.
+    #   * (future) book ambiguity, etc.
+    authoritative_clarify: bool = False
 
 
 # ===== helpers =====
@@ -135,6 +148,9 @@ def _ambiguous_author_clarify(e: Entities) -> QueryPlan | None:
         clarify_question=clarify_text,
         explain=f"ambiguous surname «{surname}» — "
                 f"{len(cands)} canonical candidates",
+        # Stop v4 LLM-planner fallback in rag_v2 from overriding this
+        # with a generic top_books plan. This IS the correct answer.
+        authoritative_clarify=True,
     )
 
 

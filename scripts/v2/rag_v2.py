@@ -981,7 +981,15 @@ def ask(
     # (cache usually hits but still wastes a lookup).
     v4_planner_used = False
     v4_planner_report = None
-    if plan.needs_clarify and not v4_followup_used and v4_followup_report is None:
+    # B-R17-1 stage3.2 v3 — when rules-path explicitly emits an
+    # authoritative clarify (e.g. ambiguous surname Wells), skip v4
+    # LLM planner fallback. Without this guard, v4 sees
+    # needs_clarify=True and overrides our clarify with a generic
+    # top_books plan.
+    _skip_v4_planner = bool(getattr(plan, "authoritative_clarify", False))
+    if (plan.needs_clarify and not v4_followup_used
+            and v4_followup_report is None
+            and not _skip_v4_planner):
         try:
             from scripts.v2.planner import llm_planner as _llmp
         except ImportError:
@@ -1439,8 +1447,12 @@ def ask_stream(
     # Skip when followup branch already ran (avoid double Ollama call).
     v4_planner_used = False
     v4_planner_report = None
+    # B-R17-1 stage3.2 v3 — mirror the ask() guard: skip v4 LLM planner
+    # when rules-path emits authoritative clarify (ambiguous surname).
+    _skip_v4_planner = bool(getattr(plan, "authoritative_clarify", False))
     if (plan.needs_clarify and not v4_followup_used
-            and v4_followup_report is None):
+            and v4_followup_report is None
+            and not _skip_v4_planner):
         try:
             from scripts.v2.planner import llm_planner as _llmp
         except ImportError:

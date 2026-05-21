@@ -55,6 +55,12 @@ class AmbiguousClarifyHelper(unittest.TestCase):
         self.assertIsNotNone(plan)
         self.assertEqual(plan.intent, "clarify")
         self.assertTrue(plan.needs_clarify)
+        # B-R17-1 stage3.2 v3 — must be authoritative so v4 LLM planner
+        # in rag_v2 doesn't override with a generic top_books plan.
+        self.assertTrue(plan.authoritative_clarify,
+                          "ambiguous-author clarify must set "
+                          "authoritative_clarify=True so v4 LLM "
+                          "planner doesn't take over")
         # List of options surfaced in question text
         self.assertIn("Wells, H. G.", plan.clarify_question)
         self.assertIn("Wells, Basil", plan.clarify_question)
