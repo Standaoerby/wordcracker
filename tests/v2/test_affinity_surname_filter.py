@@ -183,11 +183,12 @@ class AffinityByAuthorIntegration(unittest.TestCase):
 class AffinityByBookIntegration(unittest.TestCase):
 
     def test_surnames_filtered_from_book_top(self):
+        # Phase 2 — V1AffinityByBook canonical: `top` (not `top_words`).
         from scripts.v2.tools.books.affinity_book import affinity_by_book
         v1 = {
             "pg_id": "PG2852",  # Hound of the Baskervilles
             "title": "The Hound of the Baskervilles",
-            "top_words": [
+            "top": [
                 {"word": "barrymore",  "book_count": 35, "corpus_count": 1008,
                  "affinity": 200.0},
                 {"word": "stapleton",  "book_count": 42, "corpus_count": 2554,
@@ -195,13 +196,12 @@ class AffinityByBookIntegration(unittest.TestCase):
                 {"word": "moor",       "book_count": 30, "corpus_count": 15000,
                  "affinity":  18.0},  # real noun
             ],
-            "n_tokens": 70000,
         }
         with mock.patch("scripts.learning_tools.affinity_by_book",
                           return_value=v1):
             r = affinity_by_book("PG2852", top=10)
         self.assertTrue(r.ok)
-        words = [t["word"] for t in r.data["top_words"]]
+        words = [t["word"] for t in r.data["top"]]
         self.assertNotIn("barrymore", words)
         self.assertNotIn("stapleton", words)
         self.assertIn("moor", words)

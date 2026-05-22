@@ -123,12 +123,19 @@ class CompareAuthorsViewEmission(unittest.TestCase):
 class AffinityByAuthorViewEmission(unittest.TestCase):
     def test_count_honesty_caveat_when_filter_drops(self):
         """Tool returned 30 raw, filter dropped to 14 → view has
-        count_returned=14, count_requested=30, and the count caveat."""
+        count_returned=14, count_requested=30, and the count caveat.
+
+        Phase 2 — V1AffinityByAuthor canonical key is `top` (not
+        `top_words`). Payload row count is exposed as `count` in
+        provenance, not `count_returned`.
+        """
         fake_raw = {
-            "top_words": [
-                {"word": f"w{i}", "affinity": 0.5} for i in range(30)
+            "author_regex": "^Doyle,",
+            "top": [
+                {"word": f"w{i}", "author_count": 100,
+                  "corpus_count": 1000, "affinity": 0.5}
+                for i in range(30)
             ],
-            "n_books": 22,
         }
         with mock.patch("scripts.rag_tools.affinity_by_author",
                         return_value=fake_raw):
@@ -137,13 +144,14 @@ class AffinityByAuthorViewEmission(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertIsNotNone(result.view)
         self.assertEqual(result.view.view_type, ViewType.TOP_N_TABLE)
-        # All 30 made it through (no filter drops in this fixture)
-        self.assertEqual(result.view.payload["count_returned"], 30)
+        # All 30 made it through (no filter drops in this fixture).
+        # Builder exposes the actual count via provenance.returned.
+        self.assertEqual(result.view.provenance.returned.get("count"), 30)
 
     def test_empty_after_filter_emits_filtered_out_view(self):
         """Tool returned []  → empty TOP_N_TABLE view with reason
         FILTERED_OUT and the threshold params surfaced in caveats."""
-        fake_raw = {"top_words": [], "n_books": 0}
+        fake_raw = {"author_regex": "^Unknown,", "top": []}
         with mock.patch("scripts.rag_tools.affinity_by_author",
                         return_value=fake_raw):
             from scripts.v2.tools.authors.affinity import affinity_by_author
@@ -169,8 +177,11 @@ class LearningWordsViewEmission(unittest.TestCase):
         This is the regression gate. If the underlying v1 fix lands,
         the test's mock simulates the brokenness, and downstream renderer
         gets DataValidity.BROKEN → surfaces «feature broken» friendly
-        message instead of silent 0."""
-        fake_raw = {"words": [], "n_books": 1}
+        message instead of silent 0.
+
+        Phase 2 — V1LearningWords canonical key is `results` (not `words`).
+        """
+        fake_raw = {"scope": "book:PG1342", "level": "B2", "results": []}
         with mock.patch("scripts.learning_tools.learning_words",
                         return_value=fake_raw):
             from scripts.v2.tools.learning.learning_words import learning_words
@@ -189,7 +200,7 @@ class LearningWordsViewEmission(unittest.TestCase):
     def test_legit_empty_for_rare_level_not_broken(self):
         """level='rare' on a children's book returning 0 — that's
         legitimate, not BROKEN."""
-        fake_raw = {"words": [], "n_books": 1}
+        fake_raw = {"scope": "book:PG11", "level": "rare", "results": []}
         with mock.patch("scripts.learning_tools.learning_words",
                         return_value=fake_raw):
             from scripts.v2.tools.learning.learning_words import learning_words
@@ -201,12 +212,17 @@ class LearningWordsViewEmission(unittest.TestCase):
                          EmptyReason.NO_SIGNAL_EXPECTED)
 
     def test_normal_result_emits_table_with_words(self):
-        fake_raw = {"words": [
-            {"lemma": "felicitous", "translation_ru": "удачный",
-             "example": "It was a felicitous turn", "level": "B2"},
-            {"lemma": "tremulous", "translation_ru": "трепещущий",
-             "example": "tremulous voice", "level": "B2"},
-        ], "n_books": 1}
+        # Phase 2 — V1LearningWords row keys: word, scope_count,
+        # corpus_count, affinity, score, lemma, pos. Renderer-only
+        # fields (translation_ru, example, level) are not part of v1.
+        fake_raw = {"scope": "book:PG174", "level": "B2", "results": [
+            {"word": "felicitous", "lemma": "felicitous", "pos": "ADJ",
+             "scope_count": 5, "corpus_count": 100, "affinity": 1.5,
+             "score": 1.0},
+            {"word": "tremulous", "lemma": "tremulous", "pos": "ADJ",
+             "scope_count": 3, "corpus_count": 80, "affinity": 1.4,
+             "score": 0.9},
+        ]}
         with mock.patch("scripts.learning_tools.learning_words",
                         return_value=fake_raw):
             from scripts.v2.tools.learning.learning_words import learning_words

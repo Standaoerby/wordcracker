@@ -113,19 +113,24 @@ class TopNgramsAppliesLexicon(unittest.TestCase):
     semantic_class is set."""
 
     def test_wrapper_applies_motion_filter(self):
+        # Phase 2 — V1TopNgramsByAuthor canonical key is `top` (rag_tools.py
+        # line ~597), not `top_ngrams`. V1 row fields: ngram, count.
         import unittest.mock as mock
         from scripts.v2.tools.authors.top_ngrams import top_ngrams_by_author
 
         fake_v1 = mock.Mock(return_value={
-            "top_ngrams": [
-                {"ngram": "said", "affinity": 5.0},
-                {"ngram": "walked", "affinity": 4.5},
-                {"ngram": "replied", "affinity": 4.2},
-                {"ngram": "ran", "affinity": 4.0},
-                {"ngram": "cried", "affinity": 3.8},
-                {"ngram": "rode", "affinity": 3.5},
-            ],
+            "author_regex": "^Dickens,",
+            "n": 1,
             "books_used": 50,
+            "total_ngrams": 6,
+            "top": [
+                {"ngram": "said",    "count": 5000},
+                {"ngram": "walked",  "count": 4500},
+                {"ngram": "replied", "count": 4200},
+                {"ngram": "ran",     "count": 4000},
+                {"ngram": "cried",   "count": 3800},
+                {"ngram": "rode",    "count": 3500},
+            ],
         })
         with mock.patch("scripts.rag_tools.top_ngrams_by_author",
                          side_effect=fake_v1):
@@ -140,7 +145,7 @@ class TopNgramsAppliesLexicon(unittest.TestCase):
                             "Should pull wider when semantic_class set")
         # Result has only motion verbs
         self.assertTrue(result.ok)
-        rows = result.data.get("top_ngrams", [])
+        rows = result.data.get("top", [])
         ngrams = [r["ngram"] for r in rows]
         self.assertEqual(ngrams, ["walked", "ran", "rode"])
         # _semantic_filter metadata recorded

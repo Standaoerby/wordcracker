@@ -259,11 +259,6 @@ class RouterClarifyAndOutOfScope(unittest.TestCase):
         _stub_learning = _fake_v1_learning()
         sys.modules["scripts.rag_tools"] = _stub_rag_tools
         sys.modules["scripts.learning_tools"] = _stub_learning
-        # Phase 2 — wrappers do top-level `from rag_tools / learning_tools
-        # import …`. Stub both name variants (with and without `scripts.`
-        # prefix) so the wrapper re-imports pick up the test stubs.
-        sys.modules["rag_tools"] = _stub_rag_tools
-        sys.modules["learning_tools"] = _stub_learning
         # Reset v2 registry to a known set.
         from scripts.v2.tool_registry import REGISTRY
         self._snap = dict(REGISTRY); REGISTRY.clear()
@@ -312,11 +307,6 @@ class RouterExecutesSteps(unittest.TestCase):
         _stub_learning = _fake_v1_learning()
         sys.modules["scripts.rag_tools"] = _stub_rag_tools
         sys.modules["scripts.learning_tools"] = _stub_learning
-        # Phase 2 — wrappers do top-level `from rag_tools / learning_tools
-        # import …`. Stub both name variants (with and without `scripts.`
-        # prefix) so the wrapper re-imports pick up the test stubs.
-        sys.modules["rag_tools"] = _stub_rag_tools
-        sys.modules["learning_tools"] = _stub_learning
         from scripts.v2 import legacy_dispatch
         legacy_dispatch._LEGACY_DISPATCH_CACHE.clear()
         legacy_dispatch._LEGACY_DISPATCH_CACHE.update({"dispatch": None, "loaded": False})
@@ -476,11 +466,6 @@ class RouterStreamEvents(unittest.TestCase):
         _stub_learning = _fake_v1_learning()
         sys.modules["scripts.rag_tools"] = _stub_rag_tools
         sys.modules["scripts.learning_tools"] = _stub_learning
-        # Phase 2 — wrappers do top-level `from rag_tools / learning_tools
-        # import …`. Stub both name variants (with and without `scripts.`
-        # prefix) so the wrapper re-imports pick up the test stubs.
-        sys.modules["rag_tools"] = _stub_rag_tools
-        sys.modules["learning_tools"] = _stub_learning
         from scripts.v2 import legacy_dispatch
         legacy_dispatch._LEGACY_DISPATCH_CACHE.clear()
         legacy_dispatch._LEGACY_DISPATCH_CACHE.update({"dispatch": None, "loaded": False})

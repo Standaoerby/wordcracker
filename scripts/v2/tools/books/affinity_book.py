@@ -50,7 +50,7 @@ from scripts.v2.contracts.schemas import V1AffinityByBook
     # with the retry helper.
     wrapper_version="v4-phase2-contract",
 )
-@v1_contract(v1_fn="learning_tools.affinity_by_book",
+@v1_contract(v1_fn="scripts.learning_tools.affinity_by_book",
              schema=V1AffinityByBook)
 def affinity_by_book(pg_id: str, top: int = 50,
                      pos_filter: list[str] | None = None,
@@ -62,7 +62,7 @@ def affinity_by_book(pg_id: str, top: int = 50,
             message="pg_id is required and must be non-empty (e.g. 'PG1342')",
             query={"pg_id": pg_id},
         )
-    from learning_tools import affinity_by_book as _v1
+    from scripts.learning_tools import affinity_by_book as _v1
 
     # E14 architectural fix — shared retry-on-empty helper.
     # `compare_authors` had step-down chain (500→200→100→50) for Poe/

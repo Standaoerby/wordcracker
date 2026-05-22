@@ -155,7 +155,7 @@ def book_readability(pg_id: str, sample_chars: int = 200_000) -> ToolResult:
     # `frequency` → empty column). Invalidates entries with «—» values.
     wrapper_version="v4-phase2-contract",
 )
-@v1_contract(v1_fn="learning_tools.book_archaic_words",
+@v1_contract(v1_fn="scripts.learning_tools.book_archaic_words",
              schema=V1BookArchaicWords)
 def book_archaic_words(pg_id: str, top: int = 30) -> ToolResult:
     if not pg_id or (isinstance(pg_id, str) and not pg_id.strip()):
@@ -164,7 +164,7 @@ def book_archaic_words(pg_id: str, top: int = 30) -> ToolResult:
             message="pg_id is required and must be non-empty (e.g. 'PG345')",
             query={"pg_id": pg_id},
         )
-    from learning_tools import book_archaic_words as _v1
+    from scripts.learning_tools import book_archaic_words as _v1
     raw = _v1(pg_id=pg_id, top=top)
     query = {"pg_id": pg_id, "top": top}
     if isinstance(raw, dict) and raw.get("error"):

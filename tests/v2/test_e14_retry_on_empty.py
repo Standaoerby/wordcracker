@@ -132,14 +132,15 @@ class AffinityByBookIntegration(unittest.TestCase):
     def test_book_empty_retries_lower(self):
         from scripts.v2.tools.books.affinity_book import affinity_by_book
 
+        # Phase 2 — V1AffinityByBook canonical key is `top`.
         def fake_v1(**kw):
             mcc = kw.get("min_corpus_count")
             if mcc == 200:
-                return {"top_words": [], "book_title": "Dorian"}
+                return {"top": [], "title": "Dorian"}
             if mcc == 100:
-                return {"top_words": [], "book_title": "Dorian"}
-            return {"top_words": [{"word": "uncanny", "affinity": 5.0}],
-                    "book_title": "Dorian"}
+                return {"top": [], "title": "Dorian"}
+            return {"top": [{"word": "uncanny", "affinity": 5.0}],
+                    "title": "Dorian"}
 
         with mock.patch("scripts.learning_tools.affinity_by_book",
                          side_effect=fake_v1):
@@ -154,8 +155,8 @@ class AffinityByBookIntegration(unittest.TestCase):
         from scripts.v2.tools.books.affinity_book import affinity_by_book
 
         def fake_v1(**kw):
-            return {"top_words": [{"word": "uncanny", "affinity": 5.0}],
-                    "book_title": "Dorian"}
+            return {"top": [{"word": "uncanny", "affinity": 5.0}],
+                    "title": "Dorian"}
 
         with mock.patch("scripts.learning_tools.affinity_by_book",
                          side_effect=fake_v1):
@@ -189,19 +190,25 @@ class AffinityByBookIntegration(unittest.TestCase):
         # No retry should have happened — first call succeeded
         self.assertFalse(r.data.get("_threshold_auto_lowered", False))
 
-    def test_legacy_top_words_key_still_accepted(self):
-        """Backwards-compat: test mocks historically use «top_words»;
-        wrapper still accepts it as fallback."""
+    def test_legacy_top_words_key_silently_dropped(self):
+        """Phase 2 (R3/R4) — phantom `top_words` key is NO LONGER read.
+        v1 schema declares canonical `top` (learning_tools.py:275);
+        wrapper must read only that. A mock that returns the phantom
+        key produces an empty result, not a "legacy fallback".
+        """
         from scripts.v2.tools.books.affinity_book import affinity_by_book
 
         def fake_v1_legacy(**kw):
             return {"top_words": [{"word": "uncanny", "affinity": 5.0}],
-                    "book_title": "Dorian Gray"}
+                    "title": "Dorian Gray"}
 
         with mock.patch("scripts.learning_tools.affinity_by_book",
                          side_effect=fake_v1_legacy):
             r = affinity_by_book(pg_id="PG174", min_corpus_count=200)
+        # Wrapper returns ok=True but with empty rows — phantom key
+        # silently dropped; the user-visible signal is `empty_top` warning.
         self.assertTrue(r.ok)
+        self.assertEqual(r.data.get("top_returned", -1), 0)
         rows = r.data.get("top") or r.data.get("top_words") or []
         self.assertEqual(len(rows), 1)
 

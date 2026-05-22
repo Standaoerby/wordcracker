@@ -58,19 +58,27 @@ class E23ReadabilityCefr(unittest.TestCase):
         self.assertEqual(cefr_payload, "B2",
                           "view must surface v1's cefr_heuristic value")
 
-    def test_legacy_cefr_key_still_works(self):
-        """Backwards compat for mocks using the old key name."""
+    def test_legacy_cefr_key_silently_dropped(self):
+        """Phase 2 (R3/R4) — phantom `cefr` key is NO LONGER read; v1
+        canonical is `cefr_heuristic`. The wrapper still produces an OK
+        result (other readability fields propagate), but the CEFR slot
+        in the view stays empty.
+        """
         from scripts.v2.tools.books.readability import book_readability
 
         v1_legacy = {
-            "id": "PG84", "title": "Frankenstein",
+            "id": "PG84", "pg_id": "PG84", "title": "Frankenstein",
             "flesch_reading_ease": 56.8,
-            "cefr": "B2",  # legacy mock key
+            "flesch_kincaid_grade": 10.5,
+            "cefr": "B2",  # phantom — wrapper ignores
         }
         with mock.patch("scripts.rag_tools.book_readability",
                          return_value=v1_legacy):
             r = book_readability(pg_id="PG84")
-        self.assertEqual((r.view.payload or {}).get("cefr"), "B2")
+        self.assertTrue(r.ok)
+        # Phantom `cefr` key is invisible to the wrapper — CEFR slot
+        # is empty even though the legacy mock provided a value.
+        self.assertIsNone((r.view.payload or {}).get("cefr"))
 
 
 class E24EmotionCounts(unittest.TestCase):

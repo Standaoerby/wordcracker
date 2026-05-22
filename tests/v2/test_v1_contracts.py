@@ -127,6 +127,73 @@ class RegistryCoverage(unittest.TestCase):
         )
 
 
+class V1ImportPathCanonical(unittest.TestCase):
+    """R3 / R4 — RECOVERY_BRIEF Cluster A negative test.
+
+    The v1 module path is canonicalized to use the `scripts.` prefix
+    across decorators, wrapper lazy imports, and test mock.patch sites.
+    Drift between these three triggered ~24 silent test failures
+    after Phase 2 (wrappers imported `from learning_tools import …`,
+    tests mocked `scripts.learning_tools.X` — two different Python
+    objects in sys.modules, mock invisible to wrapper).
+
+    This sweep catches a drift back to bare-name in any decorator.
+    """
+
+    def test_every_decorator_uses_scripts_prefix(self):
+        offenders = []
+        for binding in V1_CONTRACTS.values():
+            path = binding.v1_qualname
+            if not (path.startswith("scripts.rag_tools.")
+                     or path.startswith("scripts.learning_tools.")
+                     or path.startswith("scripts.v2.")):  # v6 resolvers
+                offenders.append((binding.wrapper_qualname, path))
+        self.assertEqual(
+            offenders, [],
+            "v1_fn must use `scripts.<module>.<attr>` form so that "
+            "mock.patch('scripts.<module>.<attr>') from tests reaches "
+            "the same Python object the wrapper imports. Bare-name "
+            "(`learning_tools.X`) creates a duplicate module in "
+            "sys.modules and mocks miss. See RECOVERY_BRIEF Cluster A.",
+        )
+
+    def test_no_bare_name_v1_imports_in_wrappers(self):
+        """AST-scan each wrapper module for top-level / function-body
+        imports of the form `from learning_tools import …` or `from
+        rag_tools import …` — both bypass tests' `scripts.<module>`
+        mock.patch. Any bare-name v1 import is a regression.
+        """
+        import ast
+        import inspect
+        violations = []
+        for binding in V1_CONTRACTS.values():
+            module = inspect.getmodule(binding.wrapper_fn)
+            if module is None:
+                continue
+            try:
+                src = inspect.getsource(module)
+            except (OSError, TypeError):
+                continue
+            try:
+                tree = ast.parse(src)
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module in (
+                    "learning_tools", "rag_tools",
+                ):
+                    violations.append(
+                        f"{module.__name__}:{node.lineno} — "
+                        f"`from {node.module} import …`",
+                    )
+        self.assertEqual(
+            violations, [],
+            "Bare-name v1 imports detected. Always use the `scripts.` "
+            "prefix in v2 wrappers so tests' mock.patch reaches the "
+            "actual call site.",
+        )
+
+
 @unittest.skipUnless(os.environ.get("WC_CONTRACT_LIVE_V1") == "1",
                      "live v1 contract sweep is opt-in (slow, touches disk/network)")
 class LiveV1Contracts(unittest.TestCase):

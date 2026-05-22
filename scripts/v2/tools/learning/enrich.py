@@ -38,10 +38,11 @@ from scripts.v2.contracts.schemas import V1EnrichWord, V1ExportWordList
     cacheable=False,  # has its own on-disk word_dictionary cache
     wrapper_version="v2-phase2-contract",
 )
-@v1_contract(v1_fn="learning_tools.enrich_word", schema=V1EnrichWord)
+@v1_contract(v1_fn="scripts.learning_tools.enrich_word",
+             schema=V1EnrichWord)
 def enrich_word(word: str, contexts=None, lemma_hint: str = "",
                 pos_hint: str = "", target_lang: str = "ru") -> ToolResult:
-    from learning_tools import enrich_word as _v1
+    from scripts.learning_tools import enrich_word as _v1
     raw = _v1(word=word, contexts=contexts or [],
               lemma_hint=lemma_hint, pos_hint=pos_hint,
               target_lang=target_lang)
@@ -145,13 +146,13 @@ def enrich_word(word: str, contexts=None, lemma_hint: str = "",
     cacheable=False,  # writes to disk
     wrapper_version="v2-phase2-contract",
 )
-@v1_contract(v1_fn="learning_tools.export_word_list",
+@v1_contract(v1_fn="scripts.learning_tools.export_word_list",
              schema=V1ExportWordList)
 def export_word_list(words, format: str = "anki_csv",
                      out_path: str | None = None,
                      target_lang: str = "ru",
                      deck_name: str = "wordcracker") -> ToolResult:
-    from learning_tools import export_word_list as _v1
+    from scripts.learning_tools import export_word_list as _v1
     raw = _v1(words=words, format=format, out_path=out_path,
               target_lang=target_lang, deck_name=deck_name)
     query = {"format": format, "n_words": len(words), "target_lang": target_lang}

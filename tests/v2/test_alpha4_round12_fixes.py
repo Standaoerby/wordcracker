@@ -386,11 +386,15 @@ class LearningWordsStampsCount(unittest.TestCase):
     contract."""
 
     def test_learning_words_stamps_top_returned(self):
+        # Phase 2 — V1LearningWords canonical key is `results` (not `words`).
         from scripts.v2.tools.learning import learning_words as lw_mod
         fake_v1_result = {
             "scope": "book:PG1342",
             "level": "B2",
-            "words": [{"word": f"w{i}", "cefr": "B2"} for i in range(15)],
+            "results": [{"word": f"w{i}", "scope_count": 5,
+                          "corpus_count": 50, "affinity": 1.0,
+                          "score": 1.0, "lemma": f"w{i}", "pos": "NOUN"}
+                         for i in range(15)],
         }
         with mock.patch("scripts.learning_tools.learning_words",
                          return_value=fake_v1_result):

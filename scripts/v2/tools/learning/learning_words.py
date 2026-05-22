@@ -66,14 +66,14 @@ _LITERARY_LOCATION_BLACKLIST = frozenset({
     # Bumping version busts the stale cache.
     wrapper_version="v3-phase2-contract",
 )
-@v1_contract(v1_fn="learning_tools.learning_words",
+@v1_contract(v1_fn="scripts.learning_tools.learning_words",
              schema=V1LearningWords)
 def learning_words(scope, level: str = "intermediate", top: int = 30,
                    lemmatize: bool = True,
                    pos_filter: list[str] | None = None,
                    _capped_from: int | None = None,
                    _translate_followup_disclose: bool = False) -> ToolResult:
-    from learning_tools import learning_words as _v1
+    from scripts.learning_tools import learning_words as _v1
     raw = _v1(scope=scope, level=level, top=top,
               lemmatize=lemmatize, pos_filter=pos_filter)
     query = {"scope": scope, "level": level, "top": top,

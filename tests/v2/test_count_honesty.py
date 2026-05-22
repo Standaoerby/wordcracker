@@ -33,14 +33,19 @@ from scripts.v2._types import Coverage, ToolResult
 
 
 def _fake_v1_response(top_words: int = 19) -> dict:
-    """Mimic v1 affinity_by_author output with N filtered top_words."""
+    """Mimic v1 affinity_by_author output with N filtered rows.
+
+    Phase 2 — V1AffinityByAuthor declares the canonical key as `top`
+    (rag_tools.py:747). Old `top_words` fallback removed per R3.
+    `top_words` argument name preserved for back-compat with call sites.
+    """
     return {
         "author_regex": "^Doyle,",
         "slug": "doyle",
         "pos_filter": None,
         "effective_min_corpus_count": 500,
         "total_unique_words": 12000,
-        "top_words": [
+        "top": [
             {"word": f"word{i}", "author_count": 100 - i,
               "corpus_count": 5000, "affinity": 50.0 - i}
             for i in range(top_words)
@@ -82,13 +87,14 @@ class ToolWrapperSurfacesDelta(unittest.TestCase):
 
     def test_affinity_by_book_under_filled(self):
         from scripts.v2.tools.books.affinity_book import affinity_by_book
+        # Phase 2 — V1AffinityByBook canonical key is `top`
+        # (learning_tools.py:275). No more `top_words` fallback.
         v1 = {
             "pg_id": "PG1342",
             "title": "Pride and Prejudice",
-            "top_words": [{"word": f"w{i}", "book_count": 30,
-                            "corpus_count": 10000, "affinity": 20.0}
-                           for i in range(12)],
-            "n_tokens": 70000,
+            "top": [{"word": f"w{i}", "book_count": 30,
+                      "corpus_count": 10000, "affinity": 20.0}
+                     for i in range(12)],
         }
         with mock.patch("scripts.learning_tools.affinity_by_book",
                           return_value=v1):

@@ -89,7 +89,8 @@ class AffinityWrapperIntegration(unittest.TestCase):
             "pos_filter": None,
             "effective_min_corpus_count": 500,
             "total_unique_words": 12000,
-            "top_words": [
+            # Phase 2 — V1AffinityByAuthor canonical key is `top`.
+            "top": [
                 {"word": "tuppence", "author_count": 613,
                   "corpus_count": 1230, "affinity": 5230.24},
                 {"word": "couching", "author_count": 50,
@@ -113,7 +114,7 @@ class AffinityWrapperIntegration(unittest.TestCase):
                           return_value=self._v1_with_artifacts()):
             r = affinity_by_author("^Christie,", top=10)
         self.assertTrue(r.ok)
-        words = [t["word"] for t in r.data["top_words"]]
+        words = [t["word"] for t in r.data["top"]]
         self.assertNotIn("xvth", words)
         self.assertNotIn("iii", words)
         # Real words preserved
