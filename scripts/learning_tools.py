@@ -212,8 +212,12 @@ def affinity_by_book(pg_id: str, top: int = 50,
         corpus_total = _corpus_total_tokens()
 
         effective_min_corpus = min_corpus_count
-        if pos_filter:
-            effective_min_corpus = max(effective_min_corpus, 1000)
+        # Historical: when pos_filter set, force min_corpus_count≥1000 as
+        # PROPN-flood protection. BUT this overrides caller's explicit
+        # threshold — breaks E14 retry chain (lower thresholds silently
+        # ignored). Respect caller. PROPN protection now lives in per-book
+        # NER + curated blocklist below (lines 233-244) which is more
+        # accurate than blunt threshold cutoff.
 
         # Re-use the LLM self-learning proper-noun cache: any word flagged as a
         # proper noun by previous enrich_word calls is poison for stylistic

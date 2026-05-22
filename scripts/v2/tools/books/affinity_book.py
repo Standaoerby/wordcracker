@@ -62,6 +62,13 @@ def affinity_by_book(pg_id: str, top: int = 50,
     # Lovecraft style rare-marker queries. Same UX issue for single-book
     # ADJ filter («характерные прилагательные в Dorian Gray» empty at
     # min_corpus_count=200). Lift to shared helper, apply here.
+    # E14b ROOT CAUSE FIX (2026-05-22): v1 affinity_by_book returns
+    # rows under key «top» (line 275 of learning_tools.py), NOT
+    # «top_words». Old wrapper read wrong key → always empty → retry
+    # chain triggered every time but couldn't find non-empty result
+    # because is_empty_fn never returned False. Same class as B-R14-7
+    # (learning_words «results» vs «words»). Read both keys; promote
+    # the non-empty one to canonical «top_words» for downstream.
     from scripts.v2.tools._retry_on_empty import retry_with_lower_threshold
     raw = retry_with_lower_threshold(
         v1_fn=_v1,
@@ -72,7 +79,8 @@ def affinity_by_book(pg_id: str, top: int = 50,
         },
         threshold_arg="min_corpus_count",
         steps=(100, 50, 20, 10),
-        is_empty_fn=lambda r: not (r or {}).get("top_words"),
+        is_empty_fn=lambda r: not ((r or {}).get("top")
+                                    or (r or {}).get("top_words")),
         min_initial=50,
     )
     query = {"pg_id": pg_id, "top": top, "pos_filter": pos_filter,
@@ -88,7 +96,11 @@ def affinity_by_book(pg_id: str, top: int = 50,
                       else "internal"),
             message=err, query=query,
         )
-    rows = (raw.get("top_words") if isinstance(raw, dict) else None) or []
+    # E14b — accept both v1's «top» and legacy «top_words» test-mock key
+    rows = None
+    if isinstance(raw, dict):
+        rows = raw.get("top") or raw.get("top_words")
+    rows = rows or []
     # Sprint 19+ — surname blocklist (see authors._surname_filter docstring).
     # Same defence layer as affinity_by_author: PG-metadata surnames +
     # curated literary characters. Stan 2026-05-19 «фамилии не должны
@@ -97,7 +109,9 @@ def affinity_by_book(pg_id: str, top: int = 50,
         rows, surname_dropped = filter_surnames(rows)
         rows, artifact_dropped = filter_corpus_artifacts(rows)
         if isinstance(raw, dict):
+            # E14b — write both keys for downstream consistency
             raw["top_words"] = rows
+            raw["top"] = rows
             notes = []
             if surname_dropped:
                 notes.append(f"v2 surname filter dropped {surname_dropped} "

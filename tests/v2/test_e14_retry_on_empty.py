@@ -126,7 +126,8 @@ class HelperUnit(unittest.TestCase):
 
 
 class AffinityByBookIntegration(unittest.TestCase):
-    """Verify affinity_by_book wrapper uses the helper."""
+    """Verify affinity_by_book wrapper uses the helper + reads v1's
+    actual «top» key (E14b ROOT CAUSE)."""
 
     def test_book_empty_retries_lower(self):
         from scripts.v2.tools.books.affinity_book import affinity_by_book
@@ -162,6 +163,47 @@ class AffinityByBookIntegration(unittest.TestCase):
         self.assertTrue(r.ok)
         # No annotation when initial succeeds
         self.assertFalse(r.data.get("_threshold_auto_lowered", False))
+
+    def test_v1_top_key_correctly_read(self):
+        """E14b ROOT CAUSE: v1 returns rows under «top» key (NOT «top_words»).
+        Old wrapper read «top_words» → always empty → retry chain looped
+        without ever finding non-empty result."""
+        from scripts.v2.tools.books.affinity_book import affinity_by_book
+
+        # v1 returns key «top» — the ACTUAL prod shape from
+        # scripts/learning_tools.py:275
+        def fake_v1_real_shape(**kw):
+            return {"top": [{"word": "uncanny", "affinity": 5.0},
+                            {"word": "decadent", "affinity": 4.2}],
+                    "book_title": "Dorian Gray", "pg_id": "PG174"}
+
+        with mock.patch("scripts.learning_tools.affinity_by_book",
+                         side_effect=fake_v1_real_shape):
+            r = affinity_by_book(pg_id="PG174", pos_filter=["ADJ"],
+                                  min_corpus_count=200)
+        self.assertTrue(r.ok)
+        # Critical: wrapper extracted rows from «top», NOT «top_words»
+        rows = r.data.get("top") or r.data.get("top_words") or []
+        self.assertEqual(len(rows), 2,
+                          "B-R14-7-class bug: wrapper must read v1's «top» key")
+        # No retry should have happened — first call succeeded
+        self.assertFalse(r.data.get("_threshold_auto_lowered", False))
+
+    def test_legacy_top_words_key_still_accepted(self):
+        """Backwards-compat: test mocks historically use «top_words»;
+        wrapper still accepts it as fallback."""
+        from scripts.v2.tools.books.affinity_book import affinity_by_book
+
+        def fake_v1_legacy(**kw):
+            return {"top_words": [{"word": "uncanny", "affinity": 5.0}],
+                    "book_title": "Dorian Gray"}
+
+        with mock.patch("scripts.learning_tools.affinity_by_book",
+                         side_effect=fake_v1_legacy):
+            r = affinity_by_book(pg_id="PG174", min_corpus_count=200)
+        self.assertTrue(r.ok)
+        rows = r.data.get("top") or r.data.get("top_words") or []
+        self.assertEqual(len(rows), 1)
 
 
 if __name__ == "__main__":
