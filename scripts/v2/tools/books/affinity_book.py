@@ -56,12 +56,30 @@ def affinity_by_book(pg_id: str, top: int = 50,
     except ImportError as e:
         return ToolResult.fail(tool="affinity_by_book", err_type="internal",
                                message=f"v1 unavailable: {e}")
-    raw = _v1(pg_id=pg_id, top=top, pos_filter=pos_filter,
-              min_corpus_count=min_corpus_count,
-              exclude_proper_nouns=exclude_proper_nouns)
+
+    # E14 architectural fix — shared retry-on-empty helper.
+    # `compare_authors` had step-down chain (500→200→100→50) for Poe/
+    # Lovecraft style rare-marker queries. Same UX issue for single-book
+    # ADJ filter («характерные прилагательные в Dorian Gray» empty at
+    # min_corpus_count=200). Lift to shared helper, apply here.
+    from scripts.v2.tools._retry_on_empty import retry_with_lower_threshold
+    raw = retry_with_lower_threshold(
+        v1_fn=_v1,
+        v1_args={
+            "pg_id": pg_id, "top": top, "pos_filter": pos_filter,
+            "min_corpus_count": min_corpus_count,
+            "exclude_proper_nouns": exclude_proper_nouns,
+        },
+        threshold_arg="min_corpus_count",
+        steps=(100, 50, 20, 10),
+        is_empty_fn=lambda r: not (r or {}).get("top_words"),
+        min_initial=50,
+    )
     query = {"pg_id": pg_id, "top": top, "pos_filter": pos_filter,
              "min_corpus_count": min_corpus_count,
              "exclude_proper_nouns": exclude_proper_nouns}
+    if isinstance(raw, dict) and raw.get("min_corpus_count_used") is not None:
+        query["min_corpus_count_used"] = raw["min_corpus_count_used"]
     if isinstance(raw, dict) and raw.get("error"):
         err = str(raw["error"])
         return ToolResult.fail(
