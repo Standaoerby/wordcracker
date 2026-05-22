@@ -21,6 +21,7 @@ from scripts.v2.entity_resolver_v6.types import (
     Mention,
     ResolverDecision,
 )
+from scripts.v2.patterns import NON_FIRST_NAME_TOKENS as _NON_FIRST_NAME_TOKENS
 
 if TYPE_CHECKING:
     from scripts.v2.entity_resolver import ResolveResult
@@ -258,18 +259,10 @@ def _extract_extra_tokens(q_lc: str, alias_key: str) -> tuple[str, ...]:
     return tuple(extras[:3])
 
 
-_NON_FIRST_NAME_TOKENS = frozenset({
-    "и", "а", "но", "у", "в", "на", "от", "из", "к", "с", "о",
-    "что", "как", "почему", "зачем", "когда", "где", "куда",
-    "сравни", "напиши", "покажи", "дай", "найди", "слова",
-    "слов", "книги", "книг", "автор", "авторы", "автора",
-    "написал", "написала", "написали",
-    "by", "of", "and", "or", "the", "a", "an", "from", "to",
-    "books", "author", "authors", "compare", "show", "give",
-    "find", "wrote", "works",
-    # Punctuation/separators commonly between authors
-    "—", "-", ":", ";",
-})
+# _NON_FIRST_NAME_TOKENS is imported from scripts.v2.patterns at the top
+# of the module (Phase 3 registry). Previously this file defined its own
+# copy with two extra entries («—», «-», «:», «;») — the union now lives
+# in the registry so the two consumers cannot drift.
 
 
 def to_resolve_result(d: ResolverDecision, raw_query: str) -> "ResolveResult":

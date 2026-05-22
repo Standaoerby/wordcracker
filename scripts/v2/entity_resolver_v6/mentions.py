@@ -19,10 +19,13 @@ This precedence ensures the richest mention type wins for any text span.
 """
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING
 
 from scripts.v2.entity_resolver_v6.types import Mention, MentionType
+from scripts.v2.patterns import (
+    CANONICAL_FORMAT_RE as _CANONICAL_FORMAT_RE,
+    NON_FIRST_NAME_TOKENS as _NON_FIRST_NAME_TOKENS,
+)
 
 if TYPE_CHECKING:
     pass
@@ -227,14 +230,8 @@ def detect_mentions(q_normalized: str) -> list[Mention]:
 
 # ============================ helpers ============================
 
-_CANONICAL_FORMAT_RE = re.compile(
-    # Surname: 2+ letters NO SPACES (single token), followed by comma
-    # First name(s): letters + dots/spaces (e.g. "H. G." with two initials).
-    # Lookahead doesn't break on dot — allows "h. g." capture; breaks on
-    # other punctuation/end-of-string.
-    r"\b([a-zа-яёA-ZА-ЯЁ']{2,}),\s+([a-zа-яёA-ZА-ЯЁ][a-zа-яёA-ZА-ЯЁ. ]+?)"
-    r"(?=[\s,;:!?]|$|\s*$)"
-)
+# CANONICAL_FORMAT_RE and NON_FIRST_NAME_TOKENS are imported at the top
+# of the module from `scripts.v2.patterns` (Phase 3 registry).
 
 
 # Lower number = higher precedence
@@ -245,20 +242,6 @@ _PRECEDENCE = {
     MentionType.RU_STEM: 3,
     MentionType.SURNAME_ONLY: 4,
 }
-
-
-# Words that often appear before surnames but aren't first names —
-# prepositions, particles, verb forms.
-_NON_FIRST_NAME_TOKENS = frozenset({
-    "и", "а", "но", "у", "в", "на", "от", "из", "к", "с", "о",
-    "что", "как", "почему", "зачем", "когда", "где", "куда",
-    "сравни", "напиши", "покажи", "дай", "найди", "слова",
-    "слов", "книги", "книг", "автор", "авторы", "автора",
-    "написал", "написала", "написали",
-    "by", "of", "and", "or", "the", "a", "an", "from", "to",
-    "books", "author", "authors", "compare", "show", "give",
-    "find", "wrote", "works",
-})
 
 
 def _looks_like_first_name(tok: str) -> bool:

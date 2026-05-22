@@ -440,11 +440,14 @@ class Candidate:
 
 
 def _try_rapidfuzz():
-    try:
-        from rapidfuzz import fuzz, process
-        return process, fuzz
-    except ImportError:
-        return None
+    """Compat shim — see scripts.v2.patterns.helpers.try_rapidfuzz.
+
+    Kept as a thin alias so existing internal callers continue to work
+    without churn. The single source of truth lives in the patterns
+    package (Phase 3).
+    """
+    from scripts.v2.patterns import try_rapidfuzz
+    return try_rapidfuzz()
 
 
 def _simple_token_score(q: str, a: str) -> int:
