@@ -1501,22 +1501,48 @@ def extract(text: str) -> Entities:
     # store as attribution_text so plan can route to lexical search.
     attribution_text = _extract_attribution_passage(text)
 
-    # B-R17-1 stage3.2 (Stan UX correction): when primary author regex
-    # is a bare-surname `^Surname,` that matches multiple canonical
-    # authors in the corpus, collect the candidate list so the plan
-    # builder can ask the user which one they meant. Empty list when
-    # surname is unambiguous (e.g. Wodehouse) or already specific
-    # (Hardy → ^Hardy, Thomas).
-    # Defensive — collector failures must NOT crash entity extraction.
+    # B-R17-1 stage3.2 (Stan UX correction): collect candidate list
+    # for clarify when surname is ambiguous (≥2 canonicals) AND user
+    # didn't provide disambiguating context.
+    #
+    # v6 path (WC_V6_RESOLVER=on): use layered linker — detect_mentions
+    # sees full query, scores by token_overlap + string_sim + prominence,
+    # decides resolve/clarify/not_found. Closes E13 over-eager disambig.
+    #
+    # v5 path (default): legacy `_collect_surname_candidates` based only
+    # on regex — over-eager because doesn't see first-name context.
     author_clarify_candidates: list[dict] = []
+    primary_regex_override: str | None = None
     if primary_author[1]:
-        try:
-            author_clarify_candidates = _collect_surname_candidates(primary_author[1])
-        except Exception:
-            author_clarify_candidates = []
+        import os
+        if os.environ.get("WC_V6_RESOLVER", "").lower() in {"1", "on", "true", "yes"}:
+            try:
+                from scripts.v2.entity_resolver_v6.main import resolve_v6_for_alias
+                from scripts.v2.entity_resolver_v6.types import Decision
+                # v6 refinement: takes the v5-extracted primary alias +
+                # context tokens around it. Does NOT re-analyze the
+                # whole query (preserves multi-author detection).
+                d = resolve_v6_for_alias(text, primary_author[0],
+                                          primary_author[1])
+                if d.decision == Decision.RESOLVED and d.resolved is not None:
+                    primary_regex_override = d.resolved.key
+                elif d.decision == Decision.CLARIFY_NEEDED:
+                    author_clarify_candidates = [
+                        {"name": c.display,
+                         "downloads": c.prominence,
+                         "books": c.books_in_corpus}
+                        for c in d.clarify_candidates
+                    ]
+            except Exception:
+                pass
+        if not primary_regex_override and not author_clarify_candidates:
+            try:
+                author_clarify_candidates = _collect_surname_candidates(primary_author[1])
+            except Exception:
+                author_clarify_candidates = []
 
     return Entities(
-        author_regex=primary_author[1],
+        author_regex=primary_regex_override or primary_author[1],
         author_label=primary_author[0],
         book_id=book_id,
         book_title=book_title,

@@ -926,7 +926,27 @@ def resolve_author(query: str) -> ResolveResult:
 
     Pipeline: normalize → RU lemmatize → curated alias → corpus fuzzy →
     prominence rank → confidence score.
+
+    When `WC_V6_RESOLVER=on`, delegates to v6 layered linker which adds:
+      * Stage 1 Mention Detection (full_name/canonical_format/etc.)
+      * Stage 3 Multi-Factor Scoring (token_overlap + string_sim + prom)
+      * Stage 4 Decision Thresholds (token_bypass for explicit signals)
+    See architecture_refactor_v6_plan.md.
     """
+    import os
+    if os.environ.get("WC_V6_RESOLVER", "").lower() in {"1", "on", "true", "yes"}:
+        try:
+            from scripts.v2.entity_resolver_v6 import resolve_v6
+            from scripts.v2.entity_resolver_v6.main import to_resolve_result
+            decision = resolve_v6(query)
+            adapted = to_resolve_result(decision, query)
+            if adapted is not None:
+                return adapted
+            # Adapter failed (rare) — fall through to v5
+        except Exception as e:
+            log.warning("v6 resolver failed for %r, falling back to v5: %s",
+                        query, e)
+
     raw = query or ""
     norm = normalize_query(raw)
     q_lc = norm.output
