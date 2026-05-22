@@ -41,9 +41,13 @@ def _fake_v1_module() -> types.ModuleType:
         if author_regex == ".*":
             return {"error": "regex too broad; use '^Surname,' format"}
         return {
-            "author": "Doyle, Arthur Conan",
-            "books_total": 123, "downloads_total": 999_999,
-            "authoryearofbirth": 1859, "authoryearofdeath": 1930,
+            "author_regex": author_regex,
+            "books_matched": 123,
+            "authors_matched": ["Doyle, Arthur Conan"],
+            "year_of_birth_min": 1859,
+            "year_of_death_max": 1930,
+            "total_downloads": 999_999,
+            "languages": ["en"],
             "sample_titles": ["A Study in Scarlet", "The Hound of the Baskervilles"],
         }
 
@@ -143,7 +147,7 @@ class V2MigratedTools(unittest.TestCase):
         from scripts.v2.tool_registry import dispatch
         r = dispatch("author_metadata", {"author_regex": "^Doyle,"})
         self.assertTrue(r.ok)
-        self.assertEqual(r.data["author"], "Doyle, Arthur Conan")
+        self.assertEqual(r.data["authors_matched"][0], "Doyle, Arthur Conan")
         self.assertEqual(r.coverage.books_matched, 123)
 
     def test_author_metadata_no_books_marks_not_found(self):
