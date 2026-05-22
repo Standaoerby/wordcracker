@@ -375,6 +375,10 @@ class RenderableView:
         if vt in _TEXT_STYLE_VIEW_TYPES:
             return _payload_is_trivial(self.payload)
 
+        if vt == ViewType.BUNDLE:
+            sub_views = self.payload.get("sub_views") or []
+            return not sub_views
+
         if vt == ViewType.ETYMOLOGY_BUNDLE:
             slots = self.payload.get("slots_available") or {}
             if any(slots.values()):
@@ -414,8 +418,43 @@ class RenderableView:
                 return False
         return True
 
+    def missing_required_fields(self) -> list[str]:
+        """Phase 6 — required fields whose value is missing/None in payload.
+
+        Returns the list of field names declared in REQUIRED_FIELDS for
+        this view_type that have no usable value in payload. Empty views
+        (carrying empty_state) skip this check — the empty_state explains
+        the absence; no per-field caveat is needed.
+
+        The renderer reads this list to surface «<field>: недоступно» in
+        the output rather than silently skipping. validate() also reports
+        these as caveat-level issues (not structural blockers).
+        """
+        if self.is_empty():
+            return []
+        required = REQUIRED_FIELDS.get(self.view_type, frozenset())
+        if not required:
+            return []
+        missing: list[str] = []
+        for fname in required:
+            v = self.payload.get(fname)
+            if v is None:
+                missing.append(fname)
+            elif isinstance(v, str) and not v.strip():
+                missing.append(fname)
+        return missing
+
     def validate(self) -> list[str]:
-        """Return list of contract violations. Empty list = valid."""
+        """Return list of contract violations. Empty list = valid.
+
+        Two classes of issue:
+          1. Structural — empty_state contradictions, identity violations.
+             render_view treats these as fatal and aborts rendering.
+          2. Required-field absence — fields declared in REQUIRED_FIELDS
+             that are missing/None in payload. render_view treats these
+             as caveats (renders «<field>: недоступно»), NOT fatal. The
+             prefix `required_field_missing:` lets render_view distinguish.
+        """
         issues: list[str] = []
         if self.is_empty() and self.empty_state is None:
             issues.append(
@@ -426,6 +465,10 @@ class RenderableView:
             issues.append(
                 f"view_type={self.view_type.value} has empty_state but "
                 f"payload is non-empty — contradiction."
+            )
+        for fname in self.missing_required_fields():
+            issues.append(
+                f"required_field_missing:{self.view_type.value}:{fname}"
             )
         return issues
 
@@ -569,6 +612,125 @@ def not_found_view(
         },
         language="ru",
     )
+
+
+# ---------------------------------------------------------------------
+# REQUIRED_FIELDS — per-view contract enforced by validate() + renderer
+# ---------------------------------------------------------------------
+#
+# Phase 6 — declares which payload fields the view contract guarantees
+# the user will see. Two consumers:
+#
+#   * validate() reports any missing field via prefix
+#     `required_field_missing:<view>:<field>`. render_view downgrades
+#     these from fatal to caveat (renders «<field>: недоступно»).
+#
+#   * Per-view template_executor renderers consult missing_required_fields()
+#     to keep head-line slots visible even when the upstream tool returned
+#     None. The gate of Phase 6 is the ETYMOLOGY_BUNDLE case: missing IPA
+#     must become «IPA: недоступно», never a silently-empty cell.
+#
+# Empty views (those carrying an EmptyState) are exempt — the empty_state
+# already explains absence; per-field caveat would be redundant.
+#
+# Add a field here when the tool contract guarantees the user should see
+# it. Adding identity-only fields (the bare minimum a renderer needs to
+# pick a layout, e.g. `word` for ETYMOLOGY_BUNDLE) helps catch upstream
+# bugs early. Adding display fields (e.g. `ipa`, `pos`) drives the
+# «<field>: недоступно» caveat behaviour.
+
+REQUIRED_FIELDS: dict[ViewType, frozenset[str]] = {
+    # Word card — identity + display facets
+    ViewType.ETYMOLOGY_BUNDLE: frozenset({
+        "word", "translation_ru", "ipa", "pos",
+    }),
+
+    # Tabular result — column declaration + row payload
+    ViewType.TOP_N_TABLE: frozenset({"columns", "rows"}),
+
+    # Pairwise/triple comparison — entities + metric meta
+    ViewType.COMPARISON_PANEL: frozenset({"entities", "metrics"}),
+
+    # Word in time
+    ViewType.TIMELINE_CHART: frozenset({"word", "series", "basis"}),
+
+    # Stylometric attribution
+    ViewType.ATTRIBUTION_RESULT: frozenset({"candidates", "primary_metric"}),
+
+    # Book recommendation
+    ViewType.RECOMMENDATION_LIST: frozenset({"items"}),
+
+    # Word neighbour patterns
+    ViewType.COLLOCATES: frozenset({"word", "collocates", "scope_label"}),
+
+    # Word usage examples
+    ViewType.WORD_CONTEXTS: frozenset({"word", "contexts", "scope_label"}),
+
+    # Per-book NRC sentiment
+    ViewType.EMOTION_PROFILE: frozenset({"book_title", "pg_id", "emotions"}),
+
+    # Learning vocabulary list — needs the list and a scope label;
+    # requested_level is a query echo (may be None when caller asked
+    # without level filter) and is not declared required.
+    ViewType.LEARNING_WORDS: frozenset({"words", "scope_label"}),
+
+    # Author lookup — name + book list
+    ViewType.AUTHOR_LOOKUP: frozenset({"author_canonical", "books"}),
+
+    # Author composite
+    ViewType.AUTHOR_PROFILE: frozenset({"author_canonical"}),
+
+    # Per-book lexical fingerprint
+    ViewType.VOCAB_PASSPORT: frozenset({"scope_label"}),
+
+    # Author metadata card
+    ViewType.AUTHOR_METADATA: frozenset({"author_canonical"}),
+
+    # Book card
+    ViewType.BOOK_LOOKUP: frozenset({"book"}),
+
+    # Single-book readability
+    ViewType.READABILITY_SUMMARY: frozenset({"book_title", "pg_id"}),
+
+    # Corpus overview
+    ViewType.CORPUS_META_SNAPSHOT: frozenset({"n_books", "n_authors"}),
+
+    # File artifact — filename_suggestion has a sensible default at the
+    # renderer; the contract requires format and the actual content.
+    ViewType.EXPORT_ARTIFACT: frozenset({"format", "content"}),
+
+    # Static help
+    ViewType.INTRODUCTION: frozenset({"name"}),
+
+    # Refusal text card
+    ViewType.OUT_OF_SCOPE: frozenset({"reason_kind", "why_ru"}),
+
+    # Clarify card
+    ViewType.CLARIFY: frozenset({"question"}),
+
+    # Not-found card
+    ViewType.NOT_FOUND: frozenset({"entity_type", "query"}),
+
+    # Friendly error
+    ViewType.ERROR_FRIENDLY: frozenset({"kind", "message_ru"}),
+
+    # BUNDLE is composite — its requirement is sub_views (validated via is_empty)
+    ViewType.BUNDLE: frozenset(),
+}
+
+
+def required_field_missing_issue(view_type: ViewType, field: str) -> str:
+    """Format helper — keep prefix in sync with render_view's detection."""
+    return f"required_field_missing:{view_type.value}:{field}"
+
+
+def parse_required_field_missing(issue: str) -> tuple[str, str] | None:
+    """Inverse of required_field_missing_issue() — returns (view, field)
+    or None if `issue` is not a required-field-missing entry."""
+    if not issue.startswith("required_field_missing:"):
+        return None
+    _, view, field = issue.split(":", 2)
+    return view, field
 
 
 # ---------------------------------------------------------------------

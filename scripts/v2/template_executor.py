@@ -60,6 +60,26 @@ log = logging.getLogger("wordcracker.v2.template_executor")
 # Formatting helpers (one source of truth for numbers, years, scores)
 # =====================================================================
 
+# Phase 6 — central caveat string for missing required-field values.
+FIELD_UNAVAIL_RU = "недоступно"
+
+
+def safe_str(value: Any, *, default: str = "—") -> str:
+    """Coerce a possibly-None value to a string without ever producing
+    the literal `"None"`. The Phase 6 gate forbids `None`-as-string in
+    any rendered output; centralising the coercion here means each
+    per-view renderer can use `safe_str(...)` and not re-implement the
+    None-guard inline (see audit §4.5)."""
+    if value is None:
+        return default
+    s = str(value).strip()
+    if not s:
+        return default
+    if s.lower() == "none":
+        return default
+    return s
+
+
 def format_int(n: int | float | None) -> str:
     """Number formatting — ASCII space thousand separator (U+0020)."""
     if n is None:
@@ -172,11 +192,12 @@ def _render_top_n_table(view: RenderableView) -> str:
     count_returned = payload.get("count_returned", len(rows))
     count_requested = payload.get("count_requested")
 
+    # md_table already coerces None → "—"; we keep this path simple.
     table_rows = [[r.get(col, "—") for col in columns] for r in rows]
     body = md_table(columns, table_rows)
 
     headline = view.headline
-    head = f"### {headline}\n\n" if headline else ""
+    head = f"### {safe_str(headline)}\n\n" if headline else ""
 
     counts = ""
     if count_requested is not None and count_requested != count_returned:
@@ -196,16 +217,16 @@ def _render_comparison_panel(view: RenderableView) -> str:
 
     parts = []
     if view.headline:
-        parts.append(f"### {view.headline}\n")
+        parts.append(f"### {safe_str(view.headline)}\n")
 
     # Metric panel — name + direction + scale
     if metrics:
         metric_rows = [
             [
-                m.get("name", "—"),
-                m.get("direction", "—"),
-                m.get("scale", "—"),
-                m.get("interpret", "—"),
+                safe_str(m.get("name")),
+                safe_str(m.get("direction")),
+                safe_str(m.get("scale")),
+                safe_str(m.get("interpret")),
             ]
             for m in metrics
         ]
@@ -225,7 +246,7 @@ def _render_comparison_panel(view: RenderableView) -> str:
         headers = ["Автор"] + entity_metric_names
         rows = []
         for e in entities:
-            row = [e.get("name", "—")]
+            row = [safe_str(e.get("name"))]
             em = e.get("metrics") or {}
             for mn in entity_metric_names:
                 row.append(format_score(em.get(mn)))
@@ -237,21 +258,21 @@ def _render_comparison_panel(view: RenderableView) -> str:
     for e in entities:
         sig = e.get("signature_words") or []
         if sig:
-            name = e.get("name", "—")
+            name = safe_str(e.get("name"))
             parts.append(f"\n**Фирменные слова — {name}:**\n")
-            parts.append(", ".join(f"`{w}`" for w in sig[:30]))
+            parts.append(", ".join(f"`{safe_str(w)}`" for w in sig[:30]))
 
     if shared:
         parts.append(f"\n**Общие фирменные слова:** "
-                     + ", ".join(f"`{w}`" for w in shared[:30]))
+                     + ", ".join(f"`{safe_str(w)}`" for w in shared[:30]))
 
     return "\n".join(parts) + render_caveats(view.caveats)
 
 
 def _render_readability_summary(view: RenderableView) -> str:
     payload = view.payload
-    title = payload.get("book_title", "—")
-    pg_id = payload.get("pg_id", "—")
+    title = safe_str(payload.get("book_title"))
+    pg_id = safe_str(payload.get("pg_id"))
     flesch = payload.get("flesch")
     fk = payload.get("flesch_kincaid")
     cefr = payload.get("cefr")
@@ -263,7 +284,7 @@ def _render_readability_summary(view: RenderableView) -> str:
          "выше = легче читать"],
         ["Flesch–Kincaid Grade", format_float(fk, digits=1),
          "школьный класс"],
-        ["CEFR", cefr or "—", "уровень владения"],
+        ["CEFR", safe_str(cefr), "уровень владения"],
     ]
     if wc is not None:
         rows.append(["Слов", format_int(wc), ""])
@@ -273,18 +294,22 @@ def _render_readability_summary(view: RenderableView) -> str:
 
 def _render_etymology_bundle(view: RenderableView) -> str:
     p = view.payload
-    word = p.get("word", "—")
+    word = safe_str(p.get("word"))
     parts = [f"### {word}\n"]
 
-    head_bits = []
-    if p.get("translation_ru"):
-        head_bits.append(f"**перевод**: {p['translation_ru']}")
-    if p.get("ipa"):
-        head_bits.append(f"**IPA**: /{p['ipa']}/")
-    if p.get("pos"):
-        head_bits.append(f"**POS**: {p['pos']}")
-    if head_bits:
-        parts.append(" · ".join(head_bits))
+    # Phase 6 — head bits ALWAYS surface translation / IPA / POS. When
+    # the upstream tool returned None, render «<field>: недоступно»
+    # rather than silently skipping. Gate of Phase 6: a missing IPA
+    # appears as «IPA: недоступно», not an empty cell.
+    trans = p.get("translation_ru")
+    ipa = p.get("ipa")
+    pos = p.get("pos")
+    head_bits = [
+        f"**перевод**: {trans}" if trans else f"**перевод**: {FIELD_UNAVAIL_RU}",
+        f"**IPA**: /{ipa}/" if ipa else f"**IPA**: {FIELD_UNAVAIL_RU}",
+        f"**POS**: {pos}" if pos else f"**POS**: {FIELD_UNAVAIL_RU}",
+    ]
+    parts.append(" · ".join(head_bits))
 
     if p.get("definition_en"):
         parts.append(f"\n_{p['definition_en']}_")
@@ -293,9 +318,11 @@ def _render_etymology_bundle(view: RenderableView) -> str:
     if snippets:
         parts.append("\n**Примеры из корпуса:**\n")
         for s in snippets[:3]:
-            snip = s.get("snippet", "").strip()
-            title = s.get("title", "")
-            author = s.get("author", "")
+            snip = safe_str(s.get("snippet"), default="")
+            if not snip:
+                continue
+            title = safe_str(s.get("title"), default="")
+            author = safe_str(s.get("author"), default="")
             who = f" — {author}, *{title}*" if title else ""
             parts.append(f"> {snip}{who}")
 
@@ -334,15 +361,17 @@ def _render_recommendation_list(view: RenderableView) -> str:
     items = view.payload.get("items") or []
     parts = []
     if view.headline:
-        parts.append(f"### {view.headline}\n")
+        parts.append(f"### {safe_str(view.headline)}\n")
     rows = []
     for it in items:
-        title = it.get("title", "—")
-        pg_id = it.get("pg_id", "")
-        author = it.get("author", "—")
-        reasons = it.get("reasons", "")
-        if isinstance(reasons, list):
-            reasons = "; ".join(reasons)
+        title = safe_str(it.get("title"))
+        pg_id = safe_str(it.get("pg_id"), default="")
+        author = safe_str(it.get("author"))
+        reasons_raw = it.get("reasons")
+        if isinstance(reasons_raw, list):
+            reasons = "; ".join(safe_str(r, default="") for r in reasons_raw)
+        else:
+            reasons = safe_str(reasons_raw, default="")
         title_cell = f"{title} ({pg_id})" if pg_id else title
         rows.append([title_cell, author, reasons])
     parts.append(md_table(["Книга", "Автор", "Почему"], rows))
@@ -354,19 +383,19 @@ def _render_attribution_result(view: RenderableView) -> str:
         return render_empty_state(view.empty_state, language=view.language)
     p = view.payload
     cands = p.get("candidates") or []
-    metric_name = p.get("primary_metric", "score")
+    metric_name = safe_str(p.get("primary_metric"), default="score")
     me = p.get("primary_metric_explanation") or {}
-    direction = me.get("direction", "")
+    direction = safe_str(me.get("direction"), default="")
     rows = []
     for c in cands[:10]:
         rows.append([
-            c.get("author", "—"),
+            safe_str(c.get("author")),
             format_score(c.get("score")),
             format_int(c.get("books_matched")),
         ])
     parts = []
     if view.headline:
-        parts.append(f"### {view.headline}\n")
+        parts.append(f"### {safe_str(view.headline)}\n")
     if direction:
         parts.append(f"_{metric_name}: {direction}_\n")
     parts.append(md_table([metric_name.capitalize(), "Значение", "Книг"],
@@ -376,10 +405,10 @@ def _render_attribution_result(view: RenderableView) -> str:
 
 def _render_author_metadata(view: RenderableView) -> str:
     p = view.payload
-    name = p.get("author_canonical", "—")
+    name = safe_str(p.get("author_canonical"))
     by = p.get("birth_year")
     dy = p.get("death_year")
-    nat = p.get("nationality") or "—"
+    nat = safe_str(p.get("nationality"))
     books = p.get("books_in_corpus", 0)
     src = p.get("bio_source")
 
@@ -390,7 +419,7 @@ def _render_author_metadata(view: RenderableView) -> str:
         ["Книг в корпусе", format_int(books)],
     ]
     if src:
-        rows.append(["Источник", src])
+        rows.append(["Источник", safe_str(src)])
     parts.append(md_table(["", ""], rows))
     return "\n".join(parts) + render_caveats(view.caveats)
 
@@ -398,16 +427,16 @@ def _render_author_metadata(view: RenderableView) -> str:
 def _render_book_lookup(view: RenderableView) -> str:
     p = view.payload
     book = p.get("book") or {}
-    title = book.get("title", "—")
-    pg_id = book.get("pg_id", "")
-    author = book.get("author", "")
+    title = safe_str(book.get("title"))
+    pg_id = safe_str(book.get("pg_id"), default="")
+    author = safe_str(book.get("author"))
     pub = book.get("pub_year")
     dl = book.get("downloads")
 
     head = f"### {title}" + (f" ({pg_id})" if pg_id else "")
     parts = [head, ""]
     rows = [
-        ["Автор", author or "—"],
+        ["Автор", author],
         ["Год публикации", str(pub) if pub else "не указан"],
         ["Загрузок", format_int(dl) if dl is not None else "—"],
     ]
@@ -417,9 +446,9 @@ def _render_book_lookup(view: RenderableView) -> str:
     if len(cands) > 1:
         parts.append("\n_Также найдено:_")
         for c in cands[1:6]:
-            ct = c.get("title", "")
-            ca = c.get("author", "")
-            cp = c.get("pg_id", "")
+            ct = safe_str(c.get("title"), default="")
+            ca = safe_str(c.get("author"), default="")
+            cp = safe_str(c.get("pg_id"), default="")
             parts.append(f"- {ct} ({cp}), {ca}")
 
     return "\n".join(parts) + render_caveats(view.caveats)
@@ -429,14 +458,14 @@ def _render_author_lookup(view: RenderableView) -> str:
     if view.empty_state:
         return render_empty_state(view.empty_state, language=view.language)
     p = view.payload
-    author = p.get("author_canonical", "—")
+    author = safe_str(p.get("author_canonical"))
     books = p.get("books") or []
     parts = [f"### {author} — книги в корпусе\n"]
     rows = []
     for b in books[:50]:
         rows.append([
-            b.get("title", "—"),
-            b.get("pg_id", ""),
+            safe_str(b.get("title")),
+            safe_str(b.get("pg_id"), default=""),
             str(b.get("pub_year") or ""),
             format_int(b.get("downloads")) if b.get("downloads") is not None else "—",
         ])
@@ -448,18 +477,18 @@ def _render_emotion_profile(view: RenderableView) -> str:
     if view.empty_state:
         return render_empty_state(view.empty_state, language=view.language)
     p = view.payload
-    title = p.get("book_title", "—")
-    pg_id = p.get("pg_id", "")
+    title = safe_str(p.get("book_title"))
+    pg_id = safe_str(p.get("pg_id"), default="")
     emos = p.get("emotions") or []
     dom = p.get("dominant") or []
 
     parts = [f"### Эмоциональный профиль — {title} ({pg_id})\n"]
     if dom:
-        parts.append(f"**Доминирующие:** {', '.join(dom)}\n")
+        parts.append(f"**Доминирующие:** {', '.join(safe_str(d) for d in dom)}\n")
     rows = []
     for e in emos:
         rows.append([
-            e.get("emotion", "—"),
+            safe_str(e.get("emotion")),
             format_share(e.get("share")),
             format_int(e.get("count")),
         ])
@@ -472,18 +501,18 @@ def _render_learning_words(view: RenderableView) -> str:
         return render_empty_state(view.empty_state, language=view.language)
     p = view.payload
     words = p.get("words") or []
-    level = p.get("requested_level", "")
-    scope = p.get("scope_label", "")
+    level = safe_str(p.get("requested_level"), default="")
+    scope = safe_str(p.get("scope_label"), default="")
 
     headline = view.headline or f"Слова уровня {level} — {scope}"
-    parts = [f"### {headline}\n"]
+    parts = [f"### {safe_str(headline)}\n"]
     rows = []
     for w in words:
         rows.append([
-            w.get("lemma", "—"),
-            w.get("translation_ru") or w.get("translation") or "—",
-            (w.get("example") or "")[:80],
-            w.get("level", level),
+            safe_str(w.get("lemma")),
+            safe_str(w.get("translation_ru") or w.get("translation")),
+            safe_str(w.get("example"), default="")[:80],
+            safe_str(w.get("level") or level),
         ])
     parts.append(md_table(["Слово", "Перевод", "Пример", "Уровень"], rows))
     return "\n".join(parts) + render_caveats(view.caveats)
@@ -493,16 +522,17 @@ def _render_collocates(view: RenderableView) -> str:
     if view.empty_state:
         return render_empty_state(view.empty_state, language=view.language)
     p = view.payload
-    word = p.get("word", "—")
+    word = safe_str(p.get("word"))
     cols = p.get("collocates") or []
-    scope = p.get("scope_label", "")
-    window = p.get("window")
+    scope = safe_str(p.get("scope_label"), default="")
+    window_raw = p.get("window")
+    window = safe_str(window_raw, default="?") if window_raw is not None else "?"
 
     parts = [f"### Коллокаты — «{word}» ({scope}, окно ±{window})\n"]
     rows = []
     for c in cols[:30]:
         rows.append([
-            c.get("token", "—"),
+            safe_str(c.get("token")),
             format_float(c.get("npmi"), digits=3),
             format_int(c.get("count")),
         ])
@@ -514,24 +544,22 @@ def _render_word_contexts(view: RenderableView) -> str:
     if view.empty_state:
         return render_empty_state(view.empty_state, language=view.language)
     p = view.payload
-    word = p.get("word", "—")
+    word = safe_str(p.get("word"))
     contexts = p.get("contexts") or []
-    scope = p.get("scope_label", "")
+    scope = safe_str(p.get("scope_label"), default="")
 
     parts = [f"### Контексты — «{word}» ({scope})\n"]
     rendered_count = 0
     for ctx in contexts[:5]:
         # E9 defensive — never render «None» literal. dict.get(k, default)
         # returns None when key exists with None value (NOT the default).
-        # Coerce + strip + skip empty.
-        snip_raw = ctx.get("snippet")
-        snip = (str(snip_raw) if snip_raw is not None else "").strip()
+        # Phase 6 — route through safe_str so the no-None invariant
+        # cannot regress.
+        snip = safe_str(ctx.get("snippet"), default="")
         if not snip:
             continue
-        title_raw = ctx.get("title")
-        title = str(title_raw) if title_raw is not None else ""
-        author_raw = ctx.get("author")
-        author = str(author_raw) if author_raw is not None else ""
+        title = safe_str(ctx.get("title"), default="")
+        author = safe_str(ctx.get("author"), default="")
         who = f" — {author}, *{title}*" if title else ""
         parts.append(f"> {snip}{who}")
         parts.append("")
@@ -545,15 +573,17 @@ def _render_timeline_chart(view: RenderableView) -> str:
     if view.empty_state:
         return render_empty_state(view.empty_state, language=view.language)
     p = view.payload
-    word = p.get("word", "—")
+    word = safe_str(p.get("word"))
     series = p.get("series") or []
-    basis = p.get("basis", "")
+    basis = safe_str(p.get("basis"), default="")
 
     parts = [f"### Частота слова «{word}» по эпохам (basis={basis})\n"]
     rows = []
     for s in series:
+        bs = safe_str(s.get("bucket_start"), default="?")
+        be = safe_str(s.get("bucket_end"), default="?")
         rows.append([
-            f"{s.get('bucket_start', '?')}–{s.get('bucket_end', '?')}",
+            f"{bs}–{be}",
             format_float(s.get("freq_per_million"), digits=2),
             format_int(s.get("count")),
         ])
@@ -567,22 +597,23 @@ def _render_corpus_meta_snapshot(view: RenderableView) -> str:
         ["Книг", format_int(p.get("n_books"))],
         ["Авторов", format_int(p.get("n_authors"))],
         ["Токенов", format_int(p.get("n_tokens"))],
-        ["SPGC baseline", p.get("spgc_baseline") or "—"],
+        ["SPGC baseline", safe_str(p.get("spgc_baseline"))],
     ]
     if p.get("chroma_chunks") is not None:
         rows.append(["ChromaDB chunks", format_int(p["chroma_chunks"])])
     if p.get("user_uploads"):
         rows.append(["User-загрузки", format_int(p["user_uploads"])])
-    headline = view.headline or "Обзор корпуса"
+    headline = safe_str(view.headline, default="Обзор корпуса")
     return f"### {headline}\n\n" + md_table(["", ""], rows) + render_caveats(view.caveats)
 
 
 def _render_export_artifact(view: RenderableView) -> str:
     p = view.payload
-    fmt = p.get("format", "—")
-    fn = p.get("filename_suggestion", "export")
+    fmt = safe_str(p.get("format"))
+    fn = safe_str(p.get("filename_suggestion"), default="export")
     n = p.get("item_count", 0)
-    content = p.get("content", "")
+    content = p.get("content")
+    content = "" if content is None else str(content)
     fence_lang = {
         "anki_csv": "csv", "csv": "csv", "tsv": "tsv",
         "markdown": "markdown", "json": "json",
@@ -599,7 +630,7 @@ def _render_export_artifact(view: RenderableView) -> str:
 
 def _render_introduction(view: RenderableView) -> str:
     p = view.payload
-    name = p.get("name", "Словоёб")
+    name = safe_str(p.get("name"), default="Словоёб")
     caps = p.get("capabilities") or []
     examples = p.get("examples") or []
     n_books = p.get("corpus_size_books", 0)
@@ -612,17 +643,17 @@ def _render_introduction(view: RenderableView) -> str:
     if caps:
         parts.append("\n**Что я умею:**")
         for c in caps:
-            parts.append(f"- {c}")
+            parts.append(f"- {safe_str(c)}")
     if examples:
         parts.append("\n**Примеры запросов:**")
         for e in examples:
-            parts.append(f"- _{e}_")
+            parts.append(f"- _{safe_str(e)}_")
     return "\n".join(parts)
 
 
 def _render_out_of_scope(view: RenderableView) -> str:
     p = view.payload
-    why = p.get("why_ru", "")
+    why = safe_str(p.get("why_ru"), default="")
     what = p.get("what_ru") or []
     which = p.get("which_alternatives") or []
 
@@ -630,13 +661,13 @@ def _render_out_of_scope(view: RenderableView) -> str:
     if what:
         parts.append("\n**Что доступно:**")
         for w in what:
-            parts.append(f"- {w}")
+            parts.append(f"- {safe_str(w)}")
     if which:
         parts.append("\n**Что можно посмотреть вместо:**")
         for it in which:
-            t = it.get("title", "")
-            pg = it.get("pg_id", "")
-            note = it.get("note", "")
+            t = safe_str(it.get("title"), default="")
+            pg = safe_str(it.get("pg_id"), default="")
+            note = safe_str(it.get("note"), default="")
             line = f"- **{t}**"
             if pg:
                 line += f" ({pg})"
@@ -648,44 +679,44 @@ def _render_out_of_scope(view: RenderableView) -> str:
 
 def _render_error_friendly(view: RenderableView) -> str:
     p = view.payload
-    msg = p.get("message_ru", "")
+    msg = safe_str(p.get("message_ru"), default="")
     hint = p.get("retry_hint_ru")
     partials = p.get("partial_results") or []
 
     parts = [f"⚠️ {msg}"]
     if hint:
-        parts.append(f"\n_{hint}_")
+        parts.append(f"\n_{safe_str(hint)}_")
     if partials:
         parts.append("\n**Частичные данные, которые получилось собрать:**")
         for r in partials:
-            t = r.get("tool", "")
-            summary = r.get("summary", "")
+            t = safe_str(r.get("tool"), default="")
+            summary = safe_str(r.get("summary"), default="")
             parts.append(f"- `{t}`: {summary}")
     return "\n".join(parts)
 
 
 def _render_clarify(view: RenderableView) -> str:
     p = view.payload
-    q = p.get("question", "")
+    q = safe_str(p.get("question"), default="")
     alts = p.get("alternatives") or []
     why = p.get("why")
 
     parts = []
     if why:
-        parts.append(f"_{why}_\n")
+        parts.append(f"_{safe_str(why)}_\n")
     parts.append(f"**{q}**")
     if alts:
         parts.append("")
         for a in alts:
-            parts.append(f"- {a}")
+            parts.append(f"- {safe_str(a)}")
     return "\n".join(parts)
 
 
 def _render_not_found(view: RenderableView) -> str:
     p = view.payload
-    etype = p.get("entity_type", "сущность")
-    q = p.get("query", "")
-    msg = p.get("message_ru", "")
+    etype = safe_str(p.get("entity_type"), default="сущность")
+    q = safe_str(p.get("query"), default="")
+    msg = safe_str(p.get("message_ru"), default="")
     cands = p.get("candidates") or []
 
     type_ru = {"author": "автора", "book": "книгу", "word": "слово"}.get(etype, etype)
@@ -693,8 +724,8 @@ def _render_not_found(view: RenderableView) -> str:
     if cands:
         parts.append("\n**Может быть, ты имел в виду:**")
         for c in cands[:5]:
-            disp = c.get("display") or c.get("name") or c.get("title") or "—"
-            parts.append(f"- {disp}")
+            disp = (c.get("display") or c.get("name") or c.get("title"))
+            parts.append(f"- {safe_str(disp)}")
     return "\n".join(parts)
 
 
@@ -709,8 +740,8 @@ def _render_author_profile(view: RenderableView) -> str:
     p = view.payload
     parts = []
     if view.headline:
-        parts.append(f"### {view.headline}\n")
-    name = p.get("author_canonical", "—")
+        parts.append(f"### {safe_str(view.headline)}\n")
+    name = safe_str(p.get("author_canonical"))
     parts.append(f"**Автор:** {name}\n")
     md = p.get("metadata") or {}
     if md.get("birth_year") or md.get("death_year"):
@@ -718,14 +749,16 @@ def _render_author_profile(view: RenderableView) -> str:
                      f"{md.get('death_year') or '?'}")
     sig = p.get("signature_words") or []
     if sig:
-        parts.append("\n**Фирменные слова:** " + ", ".join(f"`{w}`" for w in sig[:30]))
+        parts.append("\n**Фирменные слова:** " + ", ".join(
+            f"`{safe_str(w)}`" for w in sig[:30]
+        ))
     diversity = p.get("lexical_diversity")
     if diversity is not None:
         parts.append(f"\n**Лексическое разнообразие (TTR):** {format_float(diversity, digits=3)}")
     infl = p.get("influences") or []
     if infl:
         parts.append("\n**Возможные стилистические родственники:** "
-                     + ", ".join(str(x) for x in infl[:10]))
+                     + ", ".join(safe_str(x) for x in infl[:10]))
     return "\n".join(parts) + render_caveats(view.caveats)
 
 
@@ -735,8 +768,8 @@ def _render_vocab_passport(view: RenderableView) -> str:
     p = view.payload
     parts = []
     if view.headline:
-        parts.append(f"### {view.headline}\n")
-    scope = p.get("scope_label", "—")
+        parts.append(f"### {safe_str(view.headline)}\n")
+    scope = safe_str(p.get("scope_label"))
     parts.append(f"**Источник:** {scope}\n")
     if p.get("total_words"):
         parts.append(f"_Слов всего:_ {format_int(p['total_words'])}")
@@ -746,7 +779,7 @@ def _render_vocab_passport(view: RenderableView) -> str:
         parts.append(f"_TTR:_ {format_float(p['ttr'], digits=3)}")
     sections = p.get("sections") or []
     for sec in sections:
-        title = sec.get("title", "")
+        title = safe_str(sec.get("title"), default="")
         rows = sec.get("rows") or []
         if rows and title:
             parts.append(f"\n**{title}:**")
@@ -796,17 +829,33 @@ def render_view(view: RenderableView) -> str:
     skeleton + question, generates short intro/next-step prose, then
     audits prose against view.payload before output. If any number or
     name in prose isn't in payload → strip prose, keep skeleton.
+
+    Phase 6 — `view.validate()` returns two issue classes:
+      * structural (empty_state contradictions etc.) — fatal; return
+        the explicit «Internal: invalid view» line so a malformed view
+        never silently produces blank output.
+      * required-field-missing (prefix `required_field_missing:`) —
+        non-fatal; the per-view renderer surfaces them as «<field>:
+        недоступно» downstream. We log them as warnings so they appear
+        in observability without blocking the user-visible answer.
     """
-    issues = view.validate()
-    if issues:
-        log.error("render_view: invalid view %s: %s", view.view_type, issues)
-        return f"⚠️ Internal: invalid view ({'; '.join(issues)})"
+    structural: list[str] = []
+    missing_fields: list[str] = []
+    for issue in view.validate():
+        if issue.startswith("required_field_missing:"):
+            missing_fields.append(issue)
+        else:
+            structural.append(issue)
+    if structural:
+        log.error("render_view: structural issue in %s: %s",
+                  view.view_type, structural)
+        return f"⚠️ Internal: invalid view ({'; '.join(structural)})"
+    if missing_fields:
+        log.warning("render_view: missing required fields in %s: %s",
+                    view.view_type, missing_fields)
 
     if view.view_type == ViewType.BUNDLE:
-        # Composite — payload has {"sub_views": [...]} of RenderableView dicts.
-        # We don't reconstruct dataclasses here in Phase 0; bundle rendering
-        # is added in Phase 3.5 once we know which composites need it.
-        return _render_bundle_stub(view)
+        return _render_bundle(view)
 
     fn = VIEW_RENDERERS.get(view.view_type)
     if fn is None:
@@ -815,20 +864,40 @@ def render_view(view: RenderableView) -> str:
     return fn(view)
 
 
-def _render_bundle_stub(view: RenderableView) -> str:
-    """Bundle composite — Phase 3 partial. For now, render
-    headline + caveats; sub-views need to be RenderableView instances
-    (Phase 3.5 will support nested rendering)."""
-    parts = []
+def _render_bundle(view: RenderableView) -> str:
+    """BUNDLE composite — Phase 6 completes the dict-form path.
+
+    `payload["sub_views"]` is a list of either:
+      * `RenderableView` dataclass instances (when built in-process)
+      * plain `dict` shapes (when reconstructed from cache / serialised
+        from another generation step) — rehydrated via
+        `RenderableView.from_dict()` and rendered recursively.
+
+    The old «sub-view: dict-form, render in Phase 3.5» placeholder is
+    gone — every supported sub-view shape gets a real markdown render.
+    """
+    parts: list[str] = []
     if view.headline:
-        parts.append(f"### {view.headline}\n")
+        parts.append(f"### {safe_str(view.headline)}\n")
     sub_views = view.payload.get("sub_views") or []
     for sv in sub_views:
         if isinstance(sv, RenderableView):
-            parts.append(render_view(sv))
-            parts.append("")
+            child = sv
+        elif isinstance(sv, dict):
+            try:
+                child = RenderableView.from_dict(sv)
+            except Exception as e:                            # noqa: BLE001
+                log.warning("_render_bundle: from_dict failed: %s", e)
+                parts.append("_(sub-view: invalid dict form)_")
+                parts.append("")
+                continue
         else:
-            parts.append("_(bundle sub-view: dict-form, render in Phase 3.5)_")
+            log.warning("_render_bundle: unsupported sub-view %r", type(sv))
+            parts.append("_(sub-view: unsupported type)_")
+            parts.append("")
+            continue
+        parts.append(render_view(child))
+        parts.append("")
     return "\n".join(parts) + render_caveats(view.caveats)
 
 
@@ -844,4 +913,5 @@ __all__ = [
     "format_score", "format_share",
     "md_table",
     "render_empty_state", "render_caveats",
+    "safe_str", "FIELD_UNAVAIL_RU",
 ]

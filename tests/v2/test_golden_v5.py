@@ -124,7 +124,8 @@ class ViewTypeContracts(unittest.TestCase):
         # readability_summary has flesch=58.8, no arrays — NOT empty
         v = vt.RenderableView(
             view_type=vt.ViewType.READABILITY_SUMMARY,
-            payload={"flesch": 58.8, "flesch_kincaid": 10.9, "cefr": "B2"},
+            payload={"book_title": "X", "pg_id": "PG1",
+                     "flesch": 58.8, "flesch_kincaid": 10.9, "cefr": "B2"},
         )
         self.assertFalse(v.is_empty())
         self.assertEqual(v.validate(), [])

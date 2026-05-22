@@ -854,12 +854,17 @@ def attach_view(
     The validation step is the structural anti-fabrication guard: a tool
     that tries to emit an empty view without empty_state will raise
     here, not silently pass through to a renderer that fabricates.
+
+    Phase 6 — required-field-missing entries are NOT raised here. The
+    renderer surfaces them as «<field>: недоступно» caveats in the final
+    output. attach_view stays strict on structural violations only.
     """
-    issues = view.validate()
-    if issues:
+    structural = [i for i in view.validate()
+                  if not i.startswith("required_field_missing:")]
+    if structural:
         raise ValueError(
             f"attach_view: invalid view from tool {result.tool}: "
-            f"{'; '.join(issues)}"
+            f"{'; '.join(structural)}"
         )
     result.view = view
     result.data_validity = data_validity
