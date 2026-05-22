@@ -862,12 +862,11 @@ q.addEventListener('keydown', e => {
 
 
 def _build_version_strings() -> tuple[str, str]:
-    """v5 Phase 5 P8 — render version + active v5 flags for the UI header.
+    """Render version string + tooltip for the UI header.
 
-    Returns (display, tooltip) where:
-      display — short string for the header pill ("v2.3.1 · planner→…")
-      tooltip — longer string with active feature flags, exposed via
-                `title=` attribute (mouse-hover).
+    Returns (display, tooltip):
+      display — short string for the header pill
+      tooltip — longer string with version + caps, shown via `title=`.
 
     Closes the R14 TL;DR concern «версия не подтверждена — alphaX нигде
     не выводится в UI». Now the deployed version is always visible.
@@ -876,23 +875,10 @@ def _build_version_strings() -> tuple[str, str]:
         from scripts.v2.__version__ import ANALYTICS_VERSION as _v
     except Exception:
         _v = "unknown"
-    # Surface active v5 toggles so the test operator can see what's on
-    flags_on = []
-    for env_key, label in (
-        ("WC_V5_FOUNDATION",  "foundation"),
-        ("WC_V5_RESOLVER",    "resolver"),
-        ("WC_V5_RENDERER",    "renderer"),
-        ("WC_V5_PROSE",       "prose"),
-        ("WC_V5_PIPELINE",    "pipeline"),
-    ):
-        if os.environ.get(env_key) == "on":
-            flags_on.append(label)
-    flags_str = ("v5:" + "+".join(flags_on)) if flags_on else "legacy"
-    display = f"v{_v} · {flags_str} · planner→router→renderer→critic"
+    display = f"v{_v} · planner→router→renderer→critic"
     tooltip = (
         f"wordcracker analytics v{_v}\n"
         f"engine: v2 (planner → router → renderer → critic)\n"
-        f"v5 flags ON: {', '.join(flags_on) if flags_on else 'none'}\n"
         f"composer cap: {COMPOSER_MAX_BYTES} bytes\n"
         f"history clip: {MAX_HISTORY_TURNS} turns / {MAX_HISTORY_BYTES} bytes server-side"
     )

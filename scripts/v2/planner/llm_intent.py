@@ -54,10 +54,10 @@ from scripts.v2.planner.intent import INTENTS, IntentMatch
 
 log = logging.getLogger("wordcracker.v2.planner.llm_intent")
 
-# Toggle. Default ON in prod. Stan can disable via env if the local LLM
-# becomes a bottleneck or if he wants to force pure-rule behavior to
-# audit regex coverage.
-LLM_INTENT_ENABLED = os.environ.get("WC_LLM_INTENT_ENABLED", "1") == "1"
+# Phase 1 (2026-05-22) — env gate removed; LLM intent fallback is the
+# permanent path (matches prod default). Constant kept so
+# `mock.patch.object` in tests still works.
+LLM_INTENT_ENABLED = True
 
 LLM_INTENT_MODEL = os.environ.get("WC_LLM_INTENT_MODEL",
                                   os.environ.get("WC_LLM_MODEL", "wordcracker:v2"))

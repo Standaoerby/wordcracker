@@ -39,27 +39,12 @@ services:
       # Lower budgeted utilization = lower confabulation risk.
       # Set to 32768 if VRAM allows and longer queries are common.
       - WC_OLLAMA_NUM_CTX=16384
-      # Sprint 20+ alpha1 — v4 LLM planner (qwen3:14b with format=json,
-      # PlanSpec DAG) takes over for followup turns (Stan's Path 3) +
-      # compound queries. Closes R12 Q11/Q12 (translate / export
-      # followup) and R13 Q17 (Hemingway copyright). On since R12-R13
-      # transition; committed here so future `git pull` doesn't wipe it.
-      - WC_LLM_PLANNER=on
-      # ─────────────────────────────────────────────────────────────
-      # v5 architecture rollout — see vault/v5_deploy_guide.md
-      # ─────────────────────────────────────────────────────────────
-      # Stage 1 — pure observability (ACTIVE).
-      # Adds v5_* fields to JSONL queries-*.jsonl. No behaviour change.
-      # Safe to revert: `git checkout HEAD docker-compose.override.yml`
-      # then `docker compose up -d` puts you back to v3.2.0-alpha4.
-      - WC_V5_FOUNDATION=on
-      - WC_V5_PIPELINE=on
-      # Stage 2 — entity resolver (NFKC + RU lemmatize + prominence rank).
-      # Closes B-R14-4 (homoglyph), B-R14-9 (RU genitive), B-R14-13 (Hugo→Ganz).
-      - WC_V5_RESOLVER=on
-      # Stage 3 (WC_V5_RENDERER) + Stage 4 (WC_V5_PROSE) were carried as
-      # commented dark flags. Phase 0 (2026-05-22) decision per
-      # REFACTOR_BRIEF: both branches are NOT enabled in prod and the
-      # commented entries are dropped from compose (no dark flags rule).
-      # Final fate — enable or delete — is decided in Phase 1 ("схлопнуть
-      # поколения"). See docs/v2/decisions.md.
+      # Phase 1 (2026-05-22) — feature flags consolidated per
+      # REFACTOR_BRIEF R1 (no dark code). The following are now the
+      # SINGLE permanent path and have no env-gate counterparts:
+      #   - v4 LLM planner (compound / follow-up queries)
+      #   - LLM intent fallback (when rules miss)
+      #   - v6 layered entity linker (closes E13)
+      #   - v5 pipeline envelope (RequestTrace + RequestBudget)
+      #   - legacy `_llm_render` renderer (typed Stage 3 / 4 branches deleted)
+      # See docs/v2/decisions.md → D-P1-1 ... D-P1-3.

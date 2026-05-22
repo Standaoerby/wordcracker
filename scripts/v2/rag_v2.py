@@ -671,18 +671,18 @@ def _llm_render(question: str, plan: plan_mod.QueryPlan,
     return text, meta
 
 
-# ---------- v5 Phase 5 — pipeline envelope (trace + budget) ----------
+# ---------- Pipeline envelope (trace + budget) ----------
 
 
 def _v5_pipeline_envelope(question: str, *, engine: str = "v2"):
-    """Create RequestTrace + RequestBudget when WC_V5_PIPELINE=on.
+    """Create RequestTrace + RequestBudget for the request.
 
-    Returns None when flag is off — callers handle None as no-op.
     Lightweight: trace is append-only; budget only carries the contract,
-    not enforced here (Phase 6 turns on hard enforcement after
-    acceptance turnir)."""
-    if os.environ.get("WC_V5_PIPELINE") != "on":
-        return None
+    not enforced here (Phase 5 chokepoint will tighten enforcement).
+    Returns None on init failure so callers degrade gracefully.
+
+    Name kept for historical compat; envelope is always created in
+    Phase 1+ (previously gated by WC_V5_PIPELINE — flag removed)."""
     try:
         from scripts.v2 import observability as _obs
         from scripts.v2 import budget as _b
@@ -692,7 +692,7 @@ def _v5_pipeline_envelope(question: str, *, engine: str = "v2"):
             "t0": time.perf_counter(),
         }
     except Exception as e:
-        log.warning("v5 envelope init failed: %s", e)
+        log.warning("pipeline envelope init failed: %s", e)
         return None
 
 
@@ -762,7 +762,7 @@ def _v5_envelope_extras(envelope, *, intent_label: str | None = None,
     return extras
 
 
-# ---------- v5 Phase 4 — render dispatcher ----------
+# ---------- Render dispatcher ----------
 
 
 def _dispatch_render(
@@ -774,28 +774,11 @@ def _dispatch_render(
     ollama_host: str,
     history: list[dict] | None = None,
 ) -> tuple[str, dict]:
-    """Choose renderer path based on feature flags.
+    """Single render path: `_llm_render` (RENDER_PROMPT + free-form LLM).
 
-    WC_V5_RENDERER=on → v5 path: select_primary_view → template_executor
-    → optional ProseBinder (gated separately by WC_V5_PROSE). Skeleton
-    is deterministic — fabrication structurally impossible.
-
-    Flag off → legacy `_llm_render` path (RENDER_PROMPT + free-form LLM).
-
-    On unexpected v5 exception, fall back to legacy and log loudly —
-    silent fallback would hide regressions. Phase 6 removes the
-    fallback once v5 is the default."""
-    if os.environ.get("WC_V5_RENDERER") == "on":
-        try:
-            from scripts.v2 import render_v5 as r5
-            return r5.render_v5(
-                question, plan, results,
-                model=model, ollama_host=ollama_host,
-                history=history,
-            )
-        except Exception as e:
-            log.exception("v5 renderer raised, falling back to legacy: %s", e)
-            # fall through to legacy
+    Phase 1 (2026-05-22) — the v5 typed renderer / prose-binder branches
+    (gated WC_V5_RENDERER / WC_V5_PROSE, never on in prod) were deleted.
+    No alternative renderer to dispatch to."""
     return _llm_render(
         question, plan, results,
         model=model, ollama_host=ollama_host,

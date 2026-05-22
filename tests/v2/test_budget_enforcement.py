@@ -165,41 +165,10 @@ class ExecuteSpecBudget(unittest.TestCase):
         self.assertIn("wall_clock", budget_evts[0].reason)
 
 
-# =====================================================================
-# Integration: render_v5 + budget-exceeded results — fallback to error_friendly
-# =====================================================================
-
-
-class BudgetExceededRendersErrorFriendly(unittest.TestCase):
-    """If router aborts mid-plan, downstream render_v5 should surface
-    an ERROR_FRIENDLY view rather than pretending the partial result
-    is the answer."""
-
-    def test_partial_results_surface_via_error_friendly(self):
-        # This test exercises the full integration: budget exceeded →
-        # RouterResult.budget_exceeded=True → caller hands results to
-        # render_v5. Verify render_v5 produces a usable answer.
-        from scripts.v2 import render_v5 as r5
-        from scripts.v2 import view_builders as vb
-        from scripts.v2.view_types import DataValidity
-        # Simulate: one tool succeeded, plan aborted on budget
-        view = vb.build_top_n_table(
-            rows=[{"rank": 1, "x": "y"}], columns=["rank", "x"],
-            requested_n=10,
-        )
-        r = ToolResult.success(tool="t", data={"x": 1})
-        r.view = view
-        r.data_validity = DataValidity.OK
-        # render_v5 doesn't directly know about budget_exceeded — that's
-        # for the caller (rag_v2) to decide. It just picks the best view.
-        # Sanity check that with partial results, we still get a coherent
-        # markdown output (not a fabricated "complete" answer).
-        answer, meta = r5.render_v5(
-            "x", plan=None, results=[r],
-            model="x", ollama_host="x", enable_prose=False,
-        )
-        self.assertIn("rank", answer)
-        self.assertEqual(meta["view_type"], "top_n_table")
+# Phase 1 (2026-05-22) — `render_v5` + prose-binder were deleted (R1: no
+# dark code behind off flags). The budget-exceeded surface lives now in
+# the router (RouterResult.budget_exceeded + StepEvent budget_exceeded)
+# and in rag_v2's legacy renderer — both already exercised above.
 
 
 if __name__ == "__main__":

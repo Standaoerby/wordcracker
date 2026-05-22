@@ -172,36 +172,33 @@ class Q79IntentRouting(unittest.TestCase):
 
 
 class BudgetEnvelopeWiring(unittest.TestCase):
-    """When WC_V5_PIPELINE=on, ask/ask_stream create an envelope; budget
-    must flow through to router.execute* — closes Q25/Q114/Q105 latency
-    class structurally."""
+    """ask/ask_stream create an envelope per request; budget must flow
+    through to router.execute* — closes Q25/Q114/Q105 latency class
+    structurally. Phase 1 (2026-05-22) — WC_V5_PIPELINE gate removed,
+    envelope is always created."""
 
-    def test_v5_budget_from_envelope_returns_none_when_no_env(self):
+    def test_v5_budget_from_envelope_returns_none_when_envelope_is_none(self):
         from scripts.v2 import rag_v2 as r2
         b = r2._v5_budget_from_envelope(None, intent_label="author_metadata")
         self.assertIsNone(b)
 
     def test_v5_budget_from_envelope_returns_budget_with_intent(self):
         from scripts.v2 import rag_v2 as r2
-        with mock.patch.dict(os.environ, {"WC_V5_PIPELINE": "on"},
-                              clear=False):
-            env = r2._v5_pipeline_envelope("test query")
+        env = r2._v5_pipeline_envelope("test query")
+        self.assertIsNotNone(env)
         b = r2._v5_budget_from_envelope(env, intent_label="author_compare")
         self.assertIsNotNone(b)
         # author_compare is heavy intent — should have generous budget
         self.assertGreater(b.wall_clock_s, 20)
         # But envelope tracks elapsed already
-        self.assertLessEqual(b.wall_clock_s,
-                              r2._v5_pipeline_envelope.__module__ and 90.0)
+        self.assertLessEqual(b.wall_clock_s, 90.0)
 
     def test_v5_budget_subtracts_elapsed_time(self):
         """If envelope was created N seconds ago, budget for downstream
         router should be (intent_budget - N)."""
         import time as _t
         from scripts.v2 import rag_v2 as r2
-        with mock.patch.dict(os.environ, {"WC_V5_PIPELINE": "on"},
-                              clear=False):
-            env = r2._v5_pipeline_envelope("q")
+        env = r2._v5_pipeline_envelope("q")
         # Sleep briefly to simulate planner work
         _t.sleep(0.05)
         b = r2._v5_budget_from_envelope(env, intent_label="author_metadata")
@@ -215,9 +212,7 @@ class BudgetEnvelopeWiring(unittest.TestCase):
         """If envelope already burned all budget, downstream gets at
         least 1s — router will abort fast but not raise."""
         from scripts.v2 import rag_v2 as r2
-        with mock.patch.dict(os.environ, {"WC_V5_PIPELINE": "on"},
-                              clear=False):
-            env = r2._v5_pipeline_envelope("q")
+        env = r2._v5_pipeline_envelope("q")
         # Manually fast-forward time by mutating t0
         env["t0"] = 0.0       # makes elapsed = enormous
         b = r2._v5_budget_from_envelope(env, intent_label="introduction")
@@ -233,12 +228,11 @@ class AskBudgetIntegration(unittest.TestCase):
     """Verify the wiring actually propagates by mocking router.execute*
     and checking budget kwarg is set."""
 
-    def test_ask_with_v5_pipeline_passes_budget_to_router(self):
-        """ask() with WC_V5_PIPELINE=on should create envelope and
-        pass budget to router.execute. We verify the kwarg arrives."""
+    def test_ask_passes_budget_to_router(self):
+        """ask() always creates an envelope and passes budget to
+        router.execute. Phase 1 (2026-05-22) — gate removed."""
         from scripts.v2 import rag_v2 as r2
         from scripts.v2.planner.router import RouterResult
-        from scripts.v2.planner.plan import QueryPlan
 
         captured_budget = []
 
@@ -246,12 +240,9 @@ class AskBudgetIntegration(unittest.TestCase):
             captured_budget.append(budget)
             return RouterResult(kind="no_steps", plan=plan, message="x")
 
-        with mock.patch.dict(os.environ, {"WC_V5_PIPELINE": "on"},
-                              clear=False):
-            with mock.patch("scripts.v2.planner.router.execute",
-                              side_effect=fake_execute):
-                # Use a simple introduction question to avoid v4 paths
-                _ = r2.ask("какие книги у Doyle", history=None)
+        with mock.patch("scripts.v2.planner.router.execute",
+                        side_effect=fake_execute):
+            _ = r2.ask("какие книги у Doyle", history=None)
 
         # If execute fired (introduction wouldn't, but author_lookup will),
         # budget should be a RequestBudget (not None)
@@ -260,31 +251,6 @@ class AskBudgetIntegration(unittest.TestCase):
             self.assertIsInstance(
                 captured_budget[0], RequestBudget,
                 f"Expected RequestBudget kwarg, got {captured_budget[0]}"
-            )
-
-    def test_ask_without_v5_pipeline_passes_no_budget(self):
-        """Backward compat — flag off → router gets budget=None."""
-        from scripts.v2 import rag_v2 as r2
-        from scripts.v2.planner.router import RouterResult
-
-        captured_budget = []
-
-        def fake_execute(plan, *, budget=None):
-            captured_budget.append(budget)
-            return RouterResult(kind="no_steps", plan=plan, message="x")
-
-        # Ensure flag is off
-        env_dict = {k: v for k, v in os.environ.items()
-                     if not k.startswith("WC_V5_")}
-        with mock.patch.dict(os.environ, env_dict, clear=True):
-            with mock.patch("scripts.v2.planner.router.execute",
-                              side_effect=fake_execute):
-                _ = r2.ask("какие книги у Doyle", history=None)
-
-        if captured_budget:
-            self.assertIsNone(
-                captured_budget[0],
-                "Backward compat broken — budget passed with flag off",
             )
 
 

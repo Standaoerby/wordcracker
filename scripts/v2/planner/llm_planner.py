@@ -68,9 +68,11 @@ log = logging.getLogger("wordcracker.v2.planner.llm_planner")
 # ---------- configuration ----------
 
 
-LLM_PLANNER_ENABLED = os.environ.get("WC_LLM_PLANNER", "").lower() in {
-    "1", "on", "true", "yes",
-}
+# Phase 1 (2026-05-22) — gate removed; v4 LLM planner is the permanent
+# path for compound / follow-up queries (matches prod compose state).
+# Constant kept (`mock.patch.object` in tests still works) so callers
+# can still early-return when monkey-patched to False.
+LLM_PLANNER_ENABLED = True
 LLM_PLANNER_MODEL = os.environ.get(
     "WC_LLM_PLANNER_MODEL",
     os.environ.get("WC_LLM_MODEL", "qwen3:14b"),

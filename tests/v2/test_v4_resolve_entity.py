@@ -5,9 +5,18 @@ phrasings into the canonical `author_regex` / `pg_id` shape downstream
 tools expect. They're the v4 LLM planner's first-step go-to for any
 query that mentions an entity by name.
 
-Layered: curated alias dict (matches v3 rules) → fuzzy match against
-SPGC metadata. The fuzzy layer requires the production metadata.csv;
-locally we test the curated path + the not_found fallthrough.
+Phase 1 (2026-05-22) — both tools now delegate to entity_resolver:
+authors go through the v6 layered linker (mention detection +
+multi-factor scoring + decision thresholds); books go through the v5
+KNOWN_BOOKS → RU title aliases → v1 find_book pipeline. The legacy
+off-flag fuzzy-only branch in this module was deleted.
+
+The author path's `source` is `v6/...` and confidence depends on
+v6 scoring (prominence index lookup). When the SPGC metadata file is
+absent (CI), v6 falls back to a synthetic candidate with a moderate
+confidence — these tests verify the canonical author_regex is still
+correct, but do NOT assert specific confidence numbers because v6
+scoring varies by environment.
 """
 from __future__ import annotations
 
@@ -27,8 +36,11 @@ class ResolveAuthorNameCurated(unittest.TestCase):
         r = resolve_author_name("Doyle")
         self.assertTrue(r.ok)
         self.assertEqual(r.data["author_regex"], "^Doyle,")
-        self.assertEqual(r.data["confidence"], 1.0)
-        self.assertEqual(r.data["source"], "alias_curated")
+        # Source is now from v6 layered linker (Phase 1) — exact label
+        # depends on KB hit vs. alias fallback; just verify it's v6.
+        self.assertTrue(r.data["source"].startswith("v6"),
+                        f"expected v6/* source, got {r.data['source']}")
+        self.assertGreater(r.data["confidence"], 0)
 
     def test_full_name_matches(self):
         from scripts.v2.tools.meta.resolve_entity import resolve_author_name
@@ -37,15 +49,12 @@ class ResolveAuthorNameCurated(unittest.TestCase):
         self.assertEqual(r.data["author_regex"], "^Doyle,")
 
     def test_partial_name_via_last_word_fallback(self):
-        """`Conan Doyle` isn't a direct alias key; surname fallback
-        hits `doyle`."""
+        """`Conan Doyle` — v6 detects «Doyle» as the alias with «Conan»
+        as first-name context. Resolves to canonical Doyle."""
         from scripts.v2.tools.meta.resolve_entity import resolve_author_name
         r = resolve_author_name("Conan Doyle")
         self.assertTrue(r.ok)
         self.assertEqual(r.data["author_regex"], "^Doyle,")
-        # Confidence is reduced (0.92) because we didn't hit the full
-        # query, only the surname fallback.
-        self.assertLess(r.data["confidence"], 1.0)
 
     def test_russian_alias(self):
         from scripts.v2.tools.meta.resolve_entity import resolve_author_name
@@ -83,7 +92,9 @@ class ResolveBookTitleCurated(unittest.TestCase):
         self.assertTrue(r.ok)
         self.assertEqual(r.data["pg_id"], "PG1342")
         self.assertEqual(r.data["title"], "Pride and Prejudice")
-        self.assertEqual(r.data["source"], "known_books")
+        # Phase 1 — tool now wraps source with the v5/v6 namespace.
+        self.assertTrue(r.data["source"].endswith("known_books"),
+                        f"expected */known_books, got {r.data['source']}")
         self.assertEqual(r.data["confidence"], 1.0)
 
     def test_beowulf_v311(self):

@@ -21,32 +21,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.v2 import tools as _tools  # noqa: F401 — register tools
 
 
-class FlagOff(unittest.TestCase):
-    """When WC_LLM_PLANNER is unset, plan_query is a no-op (None)."""
-
-    def setUp(self):
-        os.environ.pop("WC_LLM_PLANNER", None)
-        # Re-import to pick up env state
-        if "scripts.v2.planner.llm_planner" in sys.modules:
-            del sys.modules["scripts.v2.planner.llm_planner"]
+class DisabledByMonkeyPatch(unittest.TestCase):
+    """Phase 1 (2026-05-22) — WC_LLM_PLANNER env gate was removed; the
+    flag is now a constant True. The early-return path stays in place
+    for safety and can still be exercised by monkey-patching
+    `LLM_PLANNER_ENABLED` to False (admin emergency disable)."""
 
     def test_returns_none_when_disabled(self):
         from scripts.v2.planner import llm_planner
-        self.assertFalse(llm_planner.LLM_PLANNER_ENABLED)
-        res = llm_planner.plan_query("anything")
+        with mock.patch.object(llm_planner, "LLM_PLANNER_ENABLED", False):
+            res = llm_planner.plan_query("anything")
         self.assertIsNone(res)
 
 
 def _enable_flag():
-    os.environ["WC_LLM_PLANNER"] = "on"
-    if "scripts.v2.planner.llm_planner" in sys.modules:
-        del sys.modules["scripts.v2.planner.llm_planner"]
+    # Phase 1 — flag is a constant True; helper kept as a no-op so test
+    # body diffs stay small.
+    pass
 
 
 def _disable_flag():
-    os.environ.pop("WC_LLM_PLANNER", None)
-    if "scripts.v2.planner.llm_planner" in sys.modules:
-        del sys.modules["scripts.v2.planner.llm_planner"]
+    pass
 
 
 class JsonParsing(unittest.TestCase):

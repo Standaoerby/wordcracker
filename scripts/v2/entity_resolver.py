@@ -1,55 +1,28 @@
-"""EntityResolver v5 — single path for resolving author/book/word names.
+"""EntityResolver — author/book resolution primitives.
 
-Part of the v5 architectural refactor ([[architecture_refactor_v5_plan]] §P3).
+Phase 1 (2026-05-22) — the WC_V5_RESOLVER feature flag was removed.
+`resolve_author()` delegates to the v6 layered linker
+(`entity_resolver_v6.resolve_v6` + `to_resolve_result` adapter) as the
+single path; `resolve_book()` keeps the v5 KNOWN_BOOKS + find_book
+pipeline (no v6 book linker yet).
+
+This module still hosts shared primitives that v6 imports:
+  - `normalize_query` (NFKC + homoglyph fold + dash/quote unification)
+  - `ru_lemmatize_author_query` (RU genitive → nominative)
+  - `Candidate`, `ResolveResult` dataclasses
+  - `get_prominence_index` (canonical "Surname, FirstName" → downloads/books)
+  - `rank_author_candidates`, `confidence_from_gap` (book pipeline + tests)
+
 Closes the entity-resolution class of R14 regressions:
-
   - B-R14-4  Latin/Cyrillic homoglyph («Доcтоевский» with Latin c)
-             → NFKC + homoglyph fold BEFORE alias lookup
   - B-R14-9  RU genitive «Толстого» / «Братьев Карамазовых»
-             → suffix-table lemmatize + extended RU→EN title aliases
   - B-R14-13 «Hugo» → obscure «Ganz, Hugo» wins fuzzy over Victor Hugo
-             → prominence ranking (downloads) overrides fuzzy ties
   - B-R14-14 «Лавкрафт» rendered as «Харпер Лавкрафт»
-             → ResolveResult.resolved.canonical_display is authoritative
-
-Design — pipeline of pure steps (NO state, NO LLM):
-
-    raw query
-        ↓
-    [Normalize]      NFKC, homoglyph fold, dash unification, whitespace
-        ↓
-    [Lemmatize]      RU genitive → nominative (suffix table, no pymorphy dep)
-        ↓
-    [Generate candidates]
-                     curated alias (1.0)
-                       ↓ if miss
-                     corpus exact match (0.95)
-                       ↓ if miss
-                     fuzzy match (rapidfuzz WRatio, threshold 70)
-        ↓
-    [Rank by prominence]
-                     authors: tuple(fuzz_score_band, downloads, corpus_volume)
-                     books:   tuple(fuzz_score_band, downloads, recency)
-        ↓
-    [Score confidence]
-                     top-1 vs top-2 gap → 1.0 / 0.88 / 0.55
-                     gap < threshold → decision=clarify_needed
-        ↓
-    ResolveResult(decision, resolved, candidates, confidence,
-                  normalization_trace)
-
-Phase 1: this module ships as a parallel path. The v4 tools
-`resolve_author_name` / `resolve_book_title` in tools/meta/resolve_entity.py
-are unchanged. Phase 1.5 migrates those tools to delegate here when
-WC_V5_RESOLVER=on.
-
-The resolver returns RenderableView-compatible NOT_FOUND or CLARIFY
-shapes on negative paths, so Phase 2 tools can emit them directly.
+  - E13      over-eager surname disambiguation (closed by v6)
 """
 from __future__ import annotations
 
 import logging
-import os
 import re
 import threading
 import time
@@ -58,9 +31,6 @@ from dataclasses import dataclass, field
 from typing import Literal, Optional
 
 log = logging.getLogger("wordcracker.v2.entity_resolver")
-
-# Feature flag — Phase 1 ships off-by-default; tests force it on.
-V5_RESOLVER_ENABLED = os.environ.get("WC_V5_RESOLVER", "off") == "on"
 
 
 # =====================================================================
@@ -924,16 +894,15 @@ _NOTFOUND_SCORE_FLOOR = 60
 def resolve_author(query: str) -> ResolveResult:
     """Single path for author resolution.
 
-    Phase 0 (2026-05-22): v6 layered linker is now the default — it
-    adds Mention Detection / Multi-Factor Scoring / Decision Thresholds
-    on top of the v5 normalize→lemmatize→alias→fuzzy→prominence path
-    and closes E13 (over-eager surname disambiguation). The legacy v5
-    pipeline below stays in-tree as a safety net: we fall through only
-    if the v6 adapter returns None (rare) or raises.
+    Phase 1 (2026-05-22) — the v6 layered linker is the only path. The
+    legacy v5 alias/fuzzy/prominence fallback (which sat after the v6
+    call as a safety net during Phase 0) has been deleted per R1: no
+    dark code, no parallel generations.
 
-    Removal of the v6 branch entirely + dead-code drop of the v5 path
-    is Phase 1 ("схлопнуть поколения") per REFACTOR_BRIEF.
+    On v6 failure the result is a `not_found` ResolveResult — callers
+    must handle this surface.
     """
+    raw = query or ""
     try:
         from scripts.v2.entity_resolver_v6 import resolve_v6
         from scripts.v2.entity_resolver_v6.main import to_resolve_result
@@ -941,99 +910,16 @@ def resolve_author(query: str) -> ResolveResult:
         adapted = to_resolve_result(decision, query)
         if adapted is not None:
             return adapted
-        # Adapter failed (rare) — fall through to v5
+        reason = "v6 adapter returned None"
     except Exception as e:
-        log.warning("v6 resolver failed for %r, falling back to v5: %s",
-                    query, e)
+        log.warning("v6 resolver failed for %r: %s", query, e)
+        reason = f"v6 resolver raised: {e}"
 
-    raw = query or ""
     norm = normalize_query(raw)
-    q_lc = norm.output
-    trace = list(norm.steps)
-
-    if not q_lc:
-        return ResolveResult(
-            decision="not_found", resolved=None, confidence=0.0,
-            candidates=[], normalization_trace=trace,
-            query_raw=raw, query_normalized="",
-            confidence_reason="empty query",
-        )
-
-    # RU lemmatize
-    q_lem, ru_trace = ru_lemmatize_author_query(q_lc)
-    trace.extend(ru_trace)
-    if q_lem != q_lc:
-        q_lc = q_lem
-
-    # Step A: curated alias on normalized + lemmatized form
-    cands_alias = _candidates_from_alias(q_lc)
-    if cands_alias:
-        top = cands_alias[0]
-        conf, reason = confidence_from_gap(top, None)
-        return ResolveResult(
-            decision="resolved",
-            resolved={
-                "author_regex": top.key,
-                "display": top.display,
-                "prominence": top.prominence,
-                "books_in_corpus": top.books_in_corpus,
-                "source": top.source,
-            },
-            confidence=conf,
-            candidates=cands_alias,
-            normalization_trace=trace,
-            query_raw=raw, query_normalized=q_lc,
-            confidence_reason=reason,
-        )
-
-    # Step B: corpus fuzzy
-    cands_fuzzy = _candidates_from_corpus_fuzzy(q_lc, limit=8)
-    if not cands_fuzzy:
-        return ResolveResult(
-            decision="not_found", resolved=None, confidence=0.0,
-            candidates=[], normalization_trace=trace,
-            query_raw=raw, query_normalized=q_lc,
-            confidence_reason="no fuzzy match above floor",
-        )
-
-    # Step C: prominence rank
-    ranked = rank_author_candidates(cands_fuzzy)
-    top = ranked[0]
-    runner_up = ranked[1] if len(ranked) > 1 else None
-
-    if top.score < _NOTFOUND_SCORE_FLOOR:
-        return ResolveResult(
-            decision="not_found", resolved=None, confidence=0.0,
-            candidates=ranked[:5], normalization_trace=trace,
-            query_raw=raw, query_normalized=q_lc,
-            confidence_reason=f"best score {top.score} below floor {_NOTFOUND_SCORE_FLOOR}",
-        )
-
-    conf, reason = confidence_from_gap(top, runner_up)
-    if conf < _CLARIFY_CONFIDENCE_FLOOR:
-        return ResolveResult(
-            decision="clarify_needed",
-            resolved=None,
-            confidence=conf,
-            candidates=ranked[:5],
-            normalization_trace=trace,
-            query_raw=raw, query_normalized=q_lc,
-            confidence_reason=reason,
-        )
-
     return ResolveResult(
-        decision="resolved",
-        resolved={
-            "author_regex": top.key,
-            "display": top.display,
-            "prominence": top.prominence,
-            "books_in_corpus": top.books_in_corpus,
-            "source": top.source,
-        },
-        confidence=conf,
-        candidates=ranked[:5],
-        normalization_trace=trace,
-        query_raw=raw, query_normalized=q_lc,
+        decision="not_found", resolved=None, confidence=0.0,
+        candidates=[], normalization_trace=list(norm.steps),
+        query_raw=raw, query_normalized=norm.output,
         confidence_reason=reason,
     )
 

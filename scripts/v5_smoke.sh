@@ -91,7 +91,7 @@ if [[ "$STAGE" == "all" || "$STAGE" == "1" ]]; then
                 if echo "$LAST_LINE" | grep -q '"v5_trace_id"'; then
                     ok "JSONL has v5_trace_id"
                 else
-                    bad "v5_trace_id missing from JSONL — WC_V5_PIPELINE not active inside container?"
+                    bad "v5_trace_id missing from JSONL — pipeline envelope failed?"
                 fi
                 if echo "$LAST_LINE" | grep -q '"v5_pipeline_version"'; then
                     ok "JSONL has v5_pipeline_version"
@@ -137,32 +137,11 @@ fi
 
 
 # -----------------------------------------------------------
-# Stage 3 checks — deterministic renderer
+# Stage 3 — renderer check (Phase 1, 2026-05-22 — deleted).
+# The v5 typed renderer / prose-binder branches were removed
+# along with WC_V5_RENDERER / WC_V5_PROSE flags. Only the
+# legacy `_llm_render` path is shipped now.
 # -----------------------------------------------------------
-
-if [[ "$STAGE" == "all" || "$STAGE" == "3" ]]; then
-    say
-    say "[3] v5 renderer (deterministic skeleton)"
-
-    # Canonical Burrows Delta 0.4385 should appear byte-exact
-    RESP="$(curl -sf -X POST "${CHAT_URL}/api/chat" \
-                 -H "Content-Type: application/json" \
-                 -d '{"question":"на кого по стилю похож Doyle","history":[]}' \
-                 -o - 2>/dev/null || true)"
-    if echo "$RESP" | grep -q "0.4385"; then
-        ok "canonical Burrows Delta 0.4385 present"
-    else
-        warn "0.4385 missing — renderer path or tool returned different value"
-    fi
-
-    sleep 1
-    LAST_LINE="$(tail -1 "$LOG_FILE" 2>/dev/null || true)"
-    if echo "$LAST_LINE" | grep -q '"v5_render_view_type":'; then
-        ok "JSONL has v5_render_view_type — renderer routed via v5"
-    else
-        warn "v5_render_view_type missing — WC_V5_RENDERER may not be active"
-    fi
-fi
 
 
 # -----------------------------------------------------------
@@ -175,8 +154,5 @@ if [[ $FAILS -eq 0 ]]; then
     exit 0
 else
     say "${RED}${FAILS} check(s) failed${RST} — DO NOT advance; inspect output"
-    say
-    say "Rollback: edit docker-compose.override.yml, remove last v5 flag,"
-    say "         then: docker compose up -d gutenberg-lab"
     exit 1
 fi
