@@ -87,8 +87,35 @@ def _title_lookup() -> dict[str, dict[str, str]]:
             if lang_col:
                 lv = row.get(lang_col)
                 if lv and not (isinstance(lv, float) and lv != lv):
-                    # Normalize «en», «English», «en-US» → "en"
-                    entry["language"] = str(lv).lower().strip().split("-")[0][:3]
+                    # E21 (2026-05-22) — PG catalog stores `language` as a
+                    # Python-repr'd list: "['en']" / "['en', 'fr']" / "['fr']".
+                    # The old normalization
+                    #     str(lv).lower().strip().split("-")[0][:3]
+                    # gave "['e" — 3 chars after [:3] truncation —
+                    # for EVERY book in the corpus, regardless of actual
+                    # language. Downstream filters compared user input
+                    # ("en") to "['e" and dropped 100% of matches.
+                    # Stan prod 2026-05-22: «примеры использования слова
+                    # "ajar" в английской литературе» → 30 RRF matches
+                    # silently dropped → empty answer.
+                    # Robust extraction via regex: pull all ISO-639 codes
+                    # (2-3 lowercase letters) from the raw value. Works
+                    # for raw ("en"), bracketed ("['en']"), multi-lang
+                    # ("['en', 'fr']"), and dashed ("en-US") shapes.
+                    import re as _re_lang
+                    raw = str(lv).lower().strip()
+                    codes = _re_lang.findall(r"\b([a-z]{2,3})\b", raw)
+                    if codes:
+                        # Space-separated codes so the substring check
+                        # downstream («want in book_lang») matches both
+                        # primary and secondary languages.
+                        # Example: ['en','fr'] → "en fr".
+                        entry["language"] = " ".join(codes)
+                    else:
+                        # Fallback for genuinely odd shapes — keep raw
+                        # lowercased so substring containment still has
+                        # a chance to match.
+                        entry["language"] = raw
             if entry:
                 out[pid] = entry
         _TITLE_CACHE = out
