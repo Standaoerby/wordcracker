@@ -138,6 +138,68 @@ class RefParsing(unittest.TestCase):
             "static": 42,
         })
 
+    # ---- bracket indexing (Phase 0 bind for $s2.words[N] P0) ----
+
+    def test_parse_ref_bracket_index_positive(self):
+        # POSITIVES: bracket index inside the path resolves.
+        self.assertEqual(ps.parse_ref("$s2.words[0]"), ("s2", "words[0]"))
+        self.assertEqual(ps.parse_ref("$s1.top[3].word"),
+                         ("s1", "top[3].word"))
+        self.assertEqual(ps.parse_ref("$s10.results[12]"),
+                         ("s10", "results[12]"))
+
+    def test_parse_ref_bracket_index_negative(self):
+        # NEGATIVES: malformed bracket / non-numeric indices stay unparsed
+        # OR walk to None — but they MUST NOT crash and MUST NOT silently
+        # be treated as a key like "[0]" lookup.
+        # Malformed: starts with bracket → first char not a letter.
+        self.assertIsNone(ps.parse_ref("$s2.[0]"))
+        # No `$` anchor — not a ref.
+        self.assertIsNone(ps.parse_ref("s2.words[0]"))
+        # Wrong step shape.
+        self.assertIsNone(ps.parse_ref("$x.words[0]"))
+
+    def test_walk_path_bracket_index(self):
+        # POSITIVES — affinity_by_author-shaped data (Phase 0 $s2.words[N]).
+        obj = {"words": [{"word": "blighter"}, {"word": "dashed"}]}
+        self.assertEqual(ps.walk_path(obj, "words[0].word"), "blighter")
+        self.assertEqual(ps.walk_path(obj, "words[1].word"), "dashed")
+        self.assertEqual(ps.walk_path(obj, "words[0]"),
+                         {"word": "blighter"})
+        # Mixed bracket + dot forms equivalent.
+        self.assertEqual(ps.walk_path(obj, "words.0.word"), "blighter")
+
+    def test_walk_path_bracket_index_returns_none(self):
+        # NEGATIVES — out-of-range, missing key, non-list traversal.
+        obj = {"words": [{"word": "a"}]}
+        self.assertIsNone(ps.walk_path(obj, "words[99]"))
+        self.assertIsNone(ps.walk_path(obj, "absent[0]"))
+        # walking [0] on a dict (not a list) is a miss, not a crash
+        self.assertIsNone(ps.walk_path({"words": {"a": 1}}, "words[0]"))
+
+    def test_s2_words_n_p0_resolves_against_affinity_shape(self):
+        """Phase 0 P0: $s2.words[N] must resolve, not leak as literal.
+
+        Before fix: `$s2.words[0]` failed _REF_RE → kept as literal →
+        reached enrich_word + renderer (audit doc, scenario 1).
+        After fix: walk_path normalizes bracket syntax; the affinity
+        wrapper exposes a `words` alias for rows. Both pieces required.
+        """
+        # Simulate router results_by_id: step s2 stored affinity raw data.
+        # The `words` key is the Phase 0 alias added in affinity.py.
+        affinity_data = {
+            "top": [{"word": "ernest", "affinity": 1.2},
+                     {"word": "wilde", "affinity": 1.0}],
+            "words": [{"word": "ernest", "affinity": 1.2},
+                       {"word": "wilde", "affinity": 1.0}],
+        }
+        results = {"s2": affinity_data}
+        args = {"word": "$s2.words[0].word", "target_lang": "ru"}
+        resolved = ps.resolve_refs(args, results)
+        self.assertEqual(resolved, {"word": "ernest", "target_lang": "ru"})
+        # NEGATIVE: literal must NOT be left in place.
+        self.assertNotEqual(resolved["word"], "$s2.words[0].word")
+
 
 class ValidatorBasic(unittest.TestCase):
 

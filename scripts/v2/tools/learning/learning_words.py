@@ -58,6 +58,11 @@ _LITERARY_LOCATION_BLACKLIST = frozenset({
     requires=["scope"],
     cost="medium",
     cacheable=True,
+    # R-23 Tier 0 — wrapper had silently read raw["words"] until
+    # 2026-05-21 (B-R14-7 root cause). The fix landed but cached results
+    # from the broken period still poisoned downstream renders.
+    # Bumping version busts the stale cache.
+    wrapper_version="v2-b-r14-7-results-key",
 )
 def learning_words(scope, level: str = "intermediate", top: int = 30,
                    lemmatize: bool = True,

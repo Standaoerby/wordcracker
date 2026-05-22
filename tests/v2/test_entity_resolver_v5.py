@@ -34,10 +34,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.v2 import entity_resolver as er
 
 
-# Skip these tests when v6 is on — they test v5-specific behavior
-# (alias_curated returns surname regex vs v6's tightened canonical).
-_V6_ON = os.environ.get("WC_V6_RESOLVER", "").lower() in {"1", "on", "true", "yes"}
-_SKIP_UNDER_V6 = unittest.skipIf(_V6_ON, "v5-specific test; v6 delegates")
+# Phase 0 (2026-05-22) — v6 layered linker is now the default; the
+# WC_V6_RESOLVER gate flag has been removed. These v5-internal cases
+# (alias_curated returns surname regex vs v6's tightened canonical)
+# always skip now. Kept in-tree until the v5 dead-code drop in Phase 1.
+_V6_ON = True
+_SKIP_UNDER_V6 = unittest.skipIf(_V6_ON, "v5-specific test; v6 is default")
 
 
 # =====================================================================

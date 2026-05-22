@@ -28,7 +28,14 @@ from typing import Any, Literal, Optional
 
 
 _STEP_ID_RE = re.compile(r"^s\d+$")
-_REF_RE = re.compile(r"^\$(s\d+)(?:\.([A-Za-z_][\w.]*))?$")
+# Path supports dot-walk (`foo.bar`) AND bracket indexing (`foo[0]`,
+# `foo[0].bar`). Bracket form is normalized to dot form inside
+# `walk_path` — the regex just has to accept the characters. Phase 0
+# bind for the `$s2.words[N]` P0: LLM planner emits bracket-style
+# refs; structural fix (R9 — loud error on unresolved ref) lands in
+# Phase 2 with the v1↔v2 contracts.
+_REF_RE = re.compile(r"^\$(s\d+)(?:\.([A-Za-z_][\w.\[\]]*))?$")
+_INDEX_RE = re.compile(r"\[(\d+)\]")
 
 
 # ---------- data types ----------
@@ -178,13 +185,20 @@ def parse_ref(val: Any) -> Optional[tuple[str, Optional[str]]]:
 def walk_path(obj: Any, path: Optional[str]) -> Any:
     """Resolve `path` against `obj`. Path == None returns obj itself.
 
-    Supports dot-walking dict keys and integer-indexed list access:
-        path="top.0.word" + obj={"top":[{"word":"..."}]}  →  word
+    Supports dot-walking dict keys and integer-indexed list access in
+    BOTH forms:
+        "top.0.word"   + {"top":[{"word":"a"}]}  → "a"
+        "top[0].word"  + {"top":[{"word":"a"}]}  → "a"
+        "words[0]"     + {"words":["x","y"]}     → "x"
+    Bracket form is normalized into the dot form before walking.
     """
     if not path:
         return obj
+    normalized = _INDEX_RE.sub(r".\1", path)
     cur = obj
-    for tok in path.split("."):
+    for tok in normalized.split("."):
+        if not tok:
+            continue
         if cur is None:
             return None
         if isinstance(cur, dict):

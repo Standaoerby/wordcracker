@@ -1505,36 +1505,33 @@ def extract(text: str) -> Entities:
     # for clarify when surname is ambiguous (≥2 canonicals) AND user
     # didn't provide disambiguating context.
     #
-    # v6 path (WC_V6_RESOLVER=on): use layered linker — detect_mentions
-    # sees full query, scores by token_overlap + string_sim + prominence,
-    # decides resolve/clarify/not_found. Closes E13 over-eager disambig.
-    #
-    # v5 path (default): legacy `_collect_surname_candidates` based only
-    # on regex — over-eager because doesn't see first-name context.
+    # Phase 0 (2026-05-22): v6 layered linker is now the default. It
+    # sees the full query and scores by token_overlap + string_sim +
+    # prominence; closes E13 over-eager disambig. The legacy
+    # `_collect_surname_candidates` (regex-only, no first-name context)
+    # stays as a backstop when v6 doesn't decide.
     author_clarify_candidates: list[dict] = []
     primary_regex_override: str | None = None
     if primary_author[1]:
-        import os
-        if os.environ.get("WC_V6_RESOLVER", "").lower() in {"1", "on", "true", "yes"}:
-            try:
-                from scripts.v2.entity_resolver_v6.main import resolve_v6_for_alias
-                from scripts.v2.entity_resolver_v6.types import Decision
-                # v6 refinement: takes the v5-extracted primary alias +
-                # context tokens around it. Does NOT re-analyze the
-                # whole query (preserves multi-author detection).
-                d = resolve_v6_for_alias(text, primary_author[0],
-                                          primary_author[1])
-                if d.decision == Decision.RESOLVED and d.resolved is not None:
-                    primary_regex_override = d.resolved.key
-                elif d.decision == Decision.CLARIFY_NEEDED:
-                    author_clarify_candidates = [
-                        {"name": c.display,
-                         "downloads": c.prominence,
-                         "books": c.books_in_corpus}
-                        for c in d.clarify_candidates
-                    ]
-            except Exception:
-                pass
+        try:
+            from scripts.v2.entity_resolver_v6.main import resolve_v6_for_alias
+            from scripts.v2.entity_resolver_v6.types import Decision
+            # v6 refinement: takes the v5-extracted primary alias +
+            # context tokens around it. Does NOT re-analyze the
+            # whole query (preserves multi-author detection).
+            d = resolve_v6_for_alias(text, primary_author[0],
+                                      primary_author[1])
+            if d.decision == Decision.RESOLVED and d.resolved is not None:
+                primary_regex_override = d.resolved.key
+            elif d.decision == Decision.CLARIFY_NEEDED:
+                author_clarify_candidates = [
+                    {"name": c.display,
+                     "downloads": c.prominence,
+                     "books": c.books_in_corpus}
+                    for c in d.clarify_candidates
+                ]
+        except Exception:
+            pass
         if not primary_regex_override and not author_clarify_candidates:
             try:
                 author_clarify_candidates = _collect_surname_candidates(primary_author[1])

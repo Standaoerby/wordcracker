@@ -30,6 +30,13 @@ _SKIP_AUTO_REGRESSION = {
     "льюис",     # M.G. Lewis vs C.S. Lewis vs Lewis Carroll — manual
     "lewis",
     "wilde",     # short — verified by curated probe
+    # Phase 0 (2026-05-22) — v6 layered linker is the default and
+    # disambiguates these aliases to the prominent canonical (H. G. Wells)
+    # rather than the bare `^Wells,` surname. v6 behavior is the intent
+    # (E13 closes over-eager surname disambig); covered by
+    # test_entity_resolver_v6.py.
+    "уэллс",
+    "h. g. wells",
 }
 
 

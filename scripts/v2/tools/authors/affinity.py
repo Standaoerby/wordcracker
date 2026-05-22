@@ -131,6 +131,13 @@ def _drop_author_self_name(author_regex: str, words: list[dict]) -> list[dict]:
     requires=["author"],
     cost="medium",
     cacheable=True,
+    # Phase 0 ($s2.words[N] P0): we now expose a `words` alias on the
+    # output dict so plan-spec refs like `$s2.words[0].word` resolve
+    # against the affinity result (LLM planner emits this shape; v1 key
+    # is `top` / `top_words`). Bumping wrapper_version busts any cached
+    # results from before the alias landed. Structural fix in Phase 2
+    # via v1↔v2 contracts.
+    wrapper_version="v2-phase0-words-alias",
 )
 def affinity_by_author(author_regex: str, top: int = 50,
                        min_author_count: int = 5, min_corpus_count: int = 0,
@@ -201,6 +208,15 @@ def affinity_by_author(author_regex: str, top: int = 50,
                 raw["top_words"] = rows
             elif "top" in raw:
                 raw["top"] = rows
+
+    # Phase 0 — `$s2.words[N]` P0 bind. The LLM planner sometimes emits
+    # plans that reference this step's rows as `$s2.words[N]` (instead
+    # of `$s2.top[N]`). Without an alias the ref resolves to None and
+    # the literal placeholder reaches enrich_word + the renderer. We
+    # expose `words` as a synonym for the filtered rows. Structural fix
+    # is Phase 2 (v1↔v2 contracts + loud R9 error on unresolved ref).
+    if isinstance(raw, dict):
+        raw["words"] = rows if rows else []
 
     # Sprint 20 — count-honesty signal. Stan 2026-05-19: renderer wrote
     # «вот список из 50 слов» when affinity returned 19 after filtering.

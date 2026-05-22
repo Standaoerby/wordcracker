@@ -29,6 +29,10 @@ from scripts.v2._types import Coverage, ToolResult, ToolWarning
     requires=["author", "word"],
     cost="cheap",
     cacheable=True,
+    # R-23 Tier 0 — E9 fix (snippet vs context vs text key) + B17 dedup
+    # landed without a version bump, so stale cached results from
+    # before the fixes were still being served.
+    wrapper_version="v2-e9-context-key",
 )
 def word_contexts(author_regex: str, word: str, window: int = 10,
                   max_samples: int = 5) -> ToolResult:
@@ -93,6 +97,8 @@ def word_contexts(author_regex: str, word: str, window: int = 10,
     requires=["word"],
     cost="medium",
     cacheable=True,
+    # R-23 Tier 0 — see word_contexts: same context-key fix.
+    wrapper_version="v2-e9-context-key",
 )
 def word_contexts_global(word: str, k: int = 12,
                          snippet_chars: int = 280) -> ToolResult:

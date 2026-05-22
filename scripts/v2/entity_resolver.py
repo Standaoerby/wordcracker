@@ -922,30 +922,29 @@ _NOTFOUND_SCORE_FLOOR = 60
 
 
 def resolve_author(query: str) -> ResolveResult:
-    """Single path for author resolution. v5 entry point.
+    """Single path for author resolution.
 
-    Pipeline: normalize → RU lemmatize → curated alias → corpus fuzzy →
-    prominence rank → confidence score.
+    Phase 0 (2026-05-22): v6 layered linker is now the default — it
+    adds Mention Detection / Multi-Factor Scoring / Decision Thresholds
+    on top of the v5 normalize→lemmatize→alias→fuzzy→prominence path
+    and closes E13 (over-eager surname disambiguation). The legacy v5
+    pipeline below stays in-tree as a safety net: we fall through only
+    if the v6 adapter returns None (rare) or raises.
 
-    When `WC_V6_RESOLVER=on`, delegates to v6 layered linker which adds:
-      * Stage 1 Mention Detection (full_name/canonical_format/etc.)
-      * Stage 3 Multi-Factor Scoring (token_overlap + string_sim + prom)
-      * Stage 4 Decision Thresholds (token_bypass for explicit signals)
-    See architecture_refactor_v6_plan.md.
+    Removal of the v6 branch entirely + dead-code drop of the v5 path
+    is Phase 1 ("схлопнуть поколения") per REFACTOR_BRIEF.
     """
-    import os
-    if os.environ.get("WC_V6_RESOLVER", "").lower() in {"1", "on", "true", "yes"}:
-        try:
-            from scripts.v2.entity_resolver_v6 import resolve_v6
-            from scripts.v2.entity_resolver_v6.main import to_resolve_result
-            decision = resolve_v6(query)
-            adapted = to_resolve_result(decision, query)
-            if adapted is not None:
-                return adapted
-            # Adapter failed (rare) — fall through to v5
-        except Exception as e:
-            log.warning("v6 resolver failed for %r, falling back to v5: %s",
-                        query, e)
+    try:
+        from scripts.v2.entity_resolver_v6 import resolve_v6
+        from scripts.v2.entity_resolver_v6.main import to_resolve_result
+        decision = resolve_v6(query)
+        adapted = to_resolve_result(decision, query)
+        if adapted is not None:
+            return adapted
+        # Adapter failed (rare) — fall through to v5
+    except Exception as e:
+        log.warning("v6 resolver failed for %r, falling back to v5: %s",
+                    query, e)
 
     raw = query or ""
     norm = normalize_query(raw)

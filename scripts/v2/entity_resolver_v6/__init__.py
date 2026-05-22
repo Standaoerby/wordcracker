@@ -12,10 +12,12 @@ in Obsidian vault.
 
 Main entry: `resolve_v6(query: str, ...) -> ResolverDecision`.
 
-Backwards-compat: v5 `resolve_author(query)` delegates to v6 when
-WC_V6_RESOLVER=on. v6 returns the same `ResolveResult` shape via
-`to_resolve_result()` adapter so downstream code (rag_v2, plan, view)
-doesn't see the new typed objects.
+Backwards-compat: v5 `resolve_author(query)` delegates to v6 as the
+default path (Phase 0, 2026-05-22 — gate flag `WC_V6_RESOLVER` removed).
+v6 returns the same `ResolveResult` shape via `to_resolve_result()`
+adapter so downstream code (rag_v2, plan, view) doesn't see the new
+typed objects. v5 stays as a fall-through if the v6 adapter returns
+None or raises.
 
 Triggered by R-22 probe suite — E13 (over-eager disambiguation) +
 E1 baseline preservation. See SESSION_2026-05-22_systematic_analysis.

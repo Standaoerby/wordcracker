@@ -360,5 +360,53 @@ class TestCompareAuthorsContract(unittest.TestCase):
         self.assertEqual(len(r.data["top_unique_b"]), 1)
 
 
+class TestAffinityByAuthorWordsAlias(unittest.TestCase):
+    """Phase 0 — affinity_by_author exposes `words` alias for plan-spec
+    `$s2.words[N]` interpolation.
+
+    Negative test (R2): before Phase 0 the LLM-planner emitted
+    `$s2.words[0]` and the wrapper had no `words` key in its output,
+    so the ref returned None and the literal placeholder leaked into
+    the renderer (audit scenario 1). After the alias landed, ref
+    resolves to the filtered row.
+    """
+
+    def test_words_key_exposed_alongside_top(self):
+        from scripts.v2.tools.authors.affinity import affinity_by_author
+
+        v1_top_shape = {
+            "top": [
+                {"word": "ernest", "affinity": 1.4, "author_count": 12},
+                {"word": "dorian", "affinity": 1.2, "author_count": 9},
+            ],
+            "n_books": 7,
+        }
+        with mock.patch("scripts.rag_tools.affinity_by_author",
+                         return_value=v1_top_shape):
+            r = affinity_by_author(author_regex="^Wilde, Oscar")
+        self.assertTrue(r.ok)
+        # The original v1 key stays.
+        self.assertIn("top", r.data)
+        # NEW Phase 0 alias.
+        self.assertIn("words", r.data)
+        # words mirrors the (possibly filtered) top list.
+        self.assertEqual(r.data["words"], r.data["top"])
+
+    def test_words_is_empty_list_when_v1_returns_no_rows(self):
+        """Edge case: even with no rows, `words` must be an empty list,
+        never absent or None. Otherwise plan-spec refs trip on a missing
+        key instead of degrading to an empty fan-out.
+        """
+        from scripts.v2.tools.authors.affinity import affinity_by_author
+
+        with mock.patch("scripts.rag_tools.affinity_by_author",
+                         return_value={"top": [], "n_books": 0}):
+            r = affinity_by_author(author_regex="^Unknown,")
+        # ok=True with empty rows is a valid degraded-result state in
+        # this wrapper (it returns a TOP_N_TABLE empty-state view).
+        self.assertIn("words", r.data)
+        self.assertEqual(r.data["words"], [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
