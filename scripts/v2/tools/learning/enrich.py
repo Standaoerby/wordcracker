@@ -113,10 +113,10 @@ def enrich_word(word: str, contexts=None, lemma_hint: str = "",
             language="ru",
         )
         vb.attach_view(result, view, data_validity=DataValidity.OK)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         import logging
-        logging.getLogger("wordcracker.v2.tools.learning.enrich").warning(
-            "enrich_word view emission failed: %s", e,
+        logging.getLogger("wordcracker.v2.tools.learning.enrich").exception(
+            "enrich_word view emission failed"
         )
     return result
 
@@ -181,9 +181,9 @@ def export_word_list(words, format: str = "anki_csv",
             language="ru",
         )
         vb.attach_view(result, view, data_validity=DataValidity.OK)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         import logging
-        logging.getLogger("wordcracker.v2.tools.learning.enrich").warning(
-            "export_word_list view emission failed: %s", e,
+        logging.getLogger("wordcracker.v2.tools.learning.enrich").exception(
+            "export_word_list view emission failed"
         )
     return result

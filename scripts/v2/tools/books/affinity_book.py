@@ -211,9 +211,9 @@ def affinity_by_book(pg_id: str, top: int = 50,
             language="ru",
         )
         vb.attach_view(result, view, data_validity=DataValidity.OK)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         import logging
-        logging.getLogger("wordcracker.v2.tools.books.affinity_book").warning(
-            "affinity_by_book view emission failed: %s", e,
+        logging.getLogger("wordcracker.v2.tools.books.affinity_book").exception(
+            "affinity_by_book view emission failed"
         )
     return result

@@ -206,10 +206,10 @@ def _attach_top_books_view(result, rows, *, metric: str, top: int,
             language="ru",
         )
         vb.attach_view(result, view, data_validity=DataValidity.OK)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         import logging
-        logging.getLogger("wordcracker.v2.tools.books.top_books").warning(
-            "top_books view emission failed: %s", e,
+        logging.getLogger("wordcracker.v2.tools.books.top_books").exception(
+            "top_books view emission failed"
         )
 
 
@@ -288,8 +288,8 @@ def _attach_emotion_profile_view(result, raw, pg_id: str) -> None:
             language="ru",
         )
         vb.attach_view(result, view, data_validity=DataValidity.OK)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         import logging
-        logging.getLogger("wordcracker.v2.tools.books.top_books").warning(
-            "book_emotion_profile view emission failed: %s", e,
+        logging.getLogger("wordcracker.v2.tools.books.top_books").exception(
+            "book_emotion_profile view emission failed"
         )

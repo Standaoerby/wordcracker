@@ -204,10 +204,10 @@ def word_collocates(scope, word: str, window: int = 4, top: int = 20,
         )
         validity = DataValidity.OK if collocates else DataValidity.EMPTY_EXPECTED
         vb.attach_view(result, view, data_validity=validity)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         import logging
-        logging.getLogger("wordcracker.v2.tools.words.collocates").warning(
-            "word_collocates view emission failed: %s", e,
+        logging.getLogger("wordcracker.v2.tools.words.collocates").exception(
+            "word_collocates view emission failed"
         )
     return result
 

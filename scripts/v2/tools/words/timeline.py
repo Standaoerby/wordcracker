@@ -221,10 +221,10 @@ def _attach_timeline_view(result, buckets, *, word: str, basis: str) -> None:
         )
         validity = DataValidity.OK if series else DataValidity.EMPTY_EXPECTED
         vb.attach_view(result, view, data_validity=validity)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         import logging
-        logging.getLogger("wordcracker.v2.tools.words.timeline").warning(
-            "word_freq_timeline view emission failed: %s", e,
+        logging.getLogger("wordcracker.v2.tools.words.timeline").exception(
+            "word_freq_timeline view emission failed"
         )
 
 
@@ -266,8 +266,8 @@ def _attach_disappearing_view(result, rows, *, year: int, top: int) -> None:
             language="ru",
         )
         vb.attach_view(result, view, data_validity=DataValidity.OK)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         import logging
-        logging.getLogger("wordcracker.v2.tools.words.timeline").warning(
-            "words_disappearing_after view emission failed: %s", e,
+        logging.getLogger("wordcracker.v2.tools.words.timeline").exception(
+            "words_disappearing_after view emission failed"
         )

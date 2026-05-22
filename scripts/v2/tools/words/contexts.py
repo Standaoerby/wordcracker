@@ -178,8 +178,8 @@ def _attach_word_contexts_view(result, samples, *, word: str,
         )
         validity = DataValidity.OK if contexts else DataValidity.EMPTY_EXPECTED
         vb.attach_view(result, view, data_validity=validity)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         import logging
-        logging.getLogger("wordcracker.v2.tools.words.contexts").warning(
-            "word_contexts view emission failed: %s", e,
+        logging.getLogger("wordcracker.v2.tools.words.contexts").exception(
+            "word_contexts view emission failed"
         )

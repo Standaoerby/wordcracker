@@ -67,10 +67,10 @@ def word_etymology(word: str) -> ToolResult:
         )
         validity = DataValidity.OK if chain else DataValidity.EMPTY_EXPECTED
         vb.attach_view(result, view, data_validity=validity)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         import logging
-        logging.getLogger("wordcracker.v2.tools.words.etymology").warning(
-            "word_etymology view emission failed: %s", e,
+        logging.getLogger("wordcracker.v2.tools.words.etymology").exception(
+            "word_etymology view emission failed"
         )
     return result
 
@@ -202,9 +202,9 @@ def find_words_by_etymology(scope, family: str, top: int = 30,
             language="ru",
         )
         vb.attach_view(result, view, data_validity=DataValidity.OK)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         import logging
-        logging.getLogger("wordcracker.v2.tools.words.etymology").warning(
-            "find_words_by_etymology view emission failed: %s", e,
+        logging.getLogger("wordcracker.v2.tools.words.etymology").exception(
+            "find_words_by_etymology view emission failed"
         )
     return result

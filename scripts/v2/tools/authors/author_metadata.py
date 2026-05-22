@@ -188,10 +188,10 @@ def author_metadata(author_regex: str) -> ToolResult:
             language="ru",
         )
         vb.attach_view(result, view, data_validity=DataValidity.OK)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         import logging
-        logging.getLogger("wordcracker.v2.tools.authors.author_metadata").warning(
-            "author_metadata view emission failed: %s", e,
+        logging.getLogger("wordcracker.v2.tools.authors.author_metadata").exception(
+            "author_metadata view emission failed"
         )
 
     return result

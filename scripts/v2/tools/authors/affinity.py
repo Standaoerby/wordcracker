@@ -338,8 +338,8 @@ def affinity_by_author(author_regex: str, top: int = 50,
             language="ru",
         )
         vb.attach_view(result, view, data_validity=DataValidity.OK)
-    except Exception as e:
-        log.warning("affinity_by_author view emission failed: %s", e)
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
+        log.exception("affinity_by_author view emission failed")
 
     return result
 
@@ -682,7 +682,7 @@ def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
         )
         validity = (DataValidity.PARTIAL if empty_sides else DataValidity.OK)
         vb.attach_view(result, view, data_validity=validity)
-    except Exception as e:
-        log.warning("compare_authors view emission failed: %s", e)
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
+        log.exception("compare_authors view emission failed")
 
     return result

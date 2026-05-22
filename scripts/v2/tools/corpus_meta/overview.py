@@ -195,10 +195,10 @@ def corpus_overview() -> ToolResult:
             language="ru",
         )
         vb.attach_view(result, view, data_validity=DataValidity.OK)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         import logging
-        logging.getLogger("wordcracker.v2.tools.corpus_meta.overview").warning(
-            "corpus_overview view emission failed: %s", e,
+        logging.getLogger("wordcracker.v2.tools.corpus_meta.overview").exception(
+            "corpus_overview view emission failed"
         )
     return result
 

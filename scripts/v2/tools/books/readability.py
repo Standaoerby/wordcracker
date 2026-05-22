@@ -128,10 +128,10 @@ def book_readability(pg_id: str, sample_chars: int = 200_000) -> ToolResult:
                 language="ru",
             )
             vb.attach_view(result, view, data_validity=DataValidity.OK)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         import logging
-        logging.getLogger("wordcracker.v2.tools.books.readability").warning(
-            "book_readability view emission failed: %s", e,
+        logging.getLogger("wordcracker.v2.tools.books.readability").exception(
+            "book_readability view emission failed"
         )
     return result
 
@@ -216,9 +216,9 @@ def book_archaic_words(pg_id: str, top: int = 30) -> ToolResult:
             language="ru",
         )
         vb.attach_view(result, view, data_validity=DataValidity.OK)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         import logging
-        logging.getLogger("wordcracker.v2.tools.books.readability").warning(
-            "book_archaic_words view emission failed: %s", e,
+        logging.getLogger("wordcracker.v2.tools.books.readability").exception(
+            "book_archaic_words view emission failed"
         )
     return result

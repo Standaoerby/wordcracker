@@ -145,6 +145,6 @@ def find_book(title: str, author: str = "", top: int = 5,
             language="ru",
         )
         vb.attach_view(result, view, data_validity=DataValidity.OK)
-    except Exception as e:
-        log.warning("find_book view emission failed: %s", e)
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
+        log.exception("find_book view emission failed")
     return result

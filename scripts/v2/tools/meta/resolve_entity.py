@@ -137,8 +137,8 @@ def _resolve_author(query: str) -> ToolResult:
                            "канонический англ. вариант (Doyle / Hugo / Tolstoy).",
                 candidates=[c.to_dict() for c in res.candidates[:5]],
             ), data_validity=DataValidity.EMPTY_UNEXPECTED)
-        except Exception as e:
-            log.debug("attach_view (not_found) failed: %s", e)
+        except (ValueError, TypeError, KeyError, AttributeError, IndexError):
+            log.debug("attach_view (not_found) failed", exc_info=True)
         return out
 
     if res.decision == "clarify_needed":
@@ -177,8 +177,8 @@ def _resolve_author(query: str) -> ToolResult:
                 alternatives=alts,
                 why=res.confidence_reason,
             ), data_validity=DataValidity.PARTIAL)
-        except Exception as e:
-            log.debug("attach_view (clarify) failed: %s", e)
+        except (ValueError, TypeError, KeyError, AttributeError, IndexError):
+            log.debug("attach_view (clarify) failed", exc_info=True)
         return out
 
     # decision == "resolved"
@@ -219,8 +219,8 @@ def _resolve_author(query: str) -> ToolResult:
             caveats=res.normalization_trace,
             language="ru",
         ), data_validity=DataValidity.OK)
-    except Exception as e:
-        log.debug("attach_view (resolved) failed: %s", e)
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
+        log.debug("attach_view (resolved) failed", exc_info=True)
     return out
 
 
@@ -256,8 +256,8 @@ def _resolve_book(query: str, *, author_hint: str = "") -> ToolResult:
                            "загрузи свою копию через /admin/.",
                 candidates=[c.to_dict() for c in res.candidates[:5]],
             ), data_validity=DataValidity.EMPTY_UNEXPECTED)
-        except Exception as e:
-            log.debug("attach_view (book not_found) failed: %s", e)
+        except (ValueError, TypeError, KeyError, AttributeError, IndexError):
+            log.debug("attach_view (book not_found) failed", exc_info=True)
         return out
 
     if res.decision == "clarify_needed":
@@ -297,8 +297,8 @@ def _resolve_book(query: str, *, author_hint: str = "") -> ToolResult:
                 alternatives=alts,
                 why=res.confidence_reason,
             ), data_validity=DataValidity.PARTIAL)
-        except Exception as e:
-            log.debug("attach_view (book clarify) failed: %s", e)
+        except (ValueError, TypeError, KeyError, AttributeError, IndexError):
+            log.debug("attach_view (book clarify) failed", exc_info=True)
         return out
 
     # decision == "resolved"
@@ -334,8 +334,8 @@ def _resolve_book(query: str, *, author_hint: str = "") -> ToolResult:
             caveats=res.normalization_trace,
             language="ru",
         ), data_validity=DataValidity.OK)
-    except Exception as e:
-        log.debug("attach_view (book resolved) failed: %s", e)
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
+        log.debug("attach_view (book resolved) failed", exc_info=True)
     return out
 
 

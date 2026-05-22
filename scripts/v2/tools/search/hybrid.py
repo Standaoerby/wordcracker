@@ -337,9 +337,9 @@ def hybrid_search(query: str, k: int = 12, per_retriever: int = 50,
         )
         validity = DataValidity.OK if contexts else DataValidity.EMPTY_EXPECTED
         vb.attach_view(result, view, data_validity=validity)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         import logging
-        logging.getLogger("wordcracker.v2.tools.search.hybrid").warning(
-            "hybrid_search view emission failed: %s", e,
+        logging.getLogger("wordcracker.v2.tools.search.hybrid").exception(
+            "hybrid_search view emission failed"
         )
     return result

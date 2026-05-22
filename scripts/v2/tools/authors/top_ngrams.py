@@ -207,10 +207,10 @@ def _attach_top_ngrams_view(result, rows, author_regex: str,
             language="ru",
         )
         vb.attach_view(result, view, data_validity=DataValidity.OK)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         import logging
-        logging.getLogger("wordcracker.v2.tools.authors.top_ngrams").warning(
-            "top_ngrams_by_author view emission failed: %s", e,
+        logging.getLogger("wordcracker.v2.tools.authors.top_ngrams").exception(
+            "top_ngrams_by_author view emission failed"
         )
 
 
@@ -266,8 +266,8 @@ def _attach_lexical_diversity_view(result, raw, scope) -> None:
             language="ru",
         )
         vb.attach_view(result, view, data_validity=DataValidity.OK)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         import logging
-        logging.getLogger("wordcracker.v2.tools.authors.top_ngrams").warning(
-            "lexical_diversity view emission failed: %s", e,
+        logging.getLogger("wordcracker.v2.tools.authors.top_ngrams").exception(
+            "lexical_diversity view emission failed"
         )

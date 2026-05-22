@@ -78,9 +78,9 @@ def lemma_profile(lemma: str) -> ToolResult:
             language="ru",
         )
         vb.attach_view(result, view, data_validity=DataValidity.OK)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         import logging
-        logging.getLogger("wordcracker.v2.tools.words.lemma_profile").warning(
-            "lemma_profile view emission failed: %s", e,
+        logging.getLogger("wordcracker.v2.tools.words.lemma_profile").exception(
+            "lemma_profile view emission failed"
         )
     return result

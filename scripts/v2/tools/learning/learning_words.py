@@ -266,10 +266,10 @@ def learning_words(scope, level: str = "intermediate", top: int = 30,
                     else DataValidity.OK if rows
                     else DataValidity.EMPTY_EXPECTED)
         vb.attach_view(result, view, data_validity=validity)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         import logging
-        logging.getLogger("wordcracker.v2.tools.learning").warning(
-            "learning_words view emission failed: %s", e,
+        logging.getLogger("wordcracker.v2.tools.learning").exception(
+            "learning_words view emission failed"
         )
 
     return result

@@ -87,9 +87,9 @@ def corpus_stats_by_author(author_regex: str) -> ToolResult:
             language="ru",
         )
         vb.attach_view(result, view, data_validity=DataValidity.OK)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         import logging
-        logging.getLogger("wordcracker.v2.tools.corpus_meta.stats_by_author").warning(
-            "corpus_stats_by_author view emission failed: %s", e,
+        logging.getLogger("wordcracker.v2.tools.corpus_meta.stats_by_author").exception(
+            "corpus_stats_by_author view emission failed"
         )
     return result

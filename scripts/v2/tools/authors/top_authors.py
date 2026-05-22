@@ -294,8 +294,8 @@ def _attach_top_authors_view(result: ToolResult, rows: list,
             language="ru",
         )
         vb.attach_view(result, view, data_validity=DataValidity.OK)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         import logging
-        logging.getLogger("wordcracker.v2.tools.authors.top_authors").warning(
-            "top_authors view emission failed: %s", e,
+        logging.getLogger("wordcracker.v2.tools.authors.top_authors").exception(
+            "top_authors view emission failed"
         )

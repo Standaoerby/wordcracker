@@ -305,10 +305,10 @@ def _attach_author_profile_view(result, raw, author_regex: str) -> None:
             language="ru",
         )
         vb.attach_view(result, view, data_validity=DataValidity.OK)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         import logging
-        logging.getLogger("wordcracker.v2.tools.authors.author_profile").warning(
-            "author_profile view emission failed: %s", e,
+        logging.getLogger("wordcracker.v2.tools.authors.author_profile").exception(
+            "author_profile view emission failed"
         )
 
 
@@ -369,10 +369,10 @@ def _attach_author_influences_view(result, raw, author_regex: str,
             language="ru",
         )
         vb.attach_view(result, view, data_validity=DataValidity.OK)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         import logging
-        logging.getLogger("wordcracker.v2.tools.authors.author_profile").warning(
-            "author_influences view emission failed: %s", e,
+        logging.getLogger("wordcracker.v2.tools.authors.author_profile").exception(
+            "author_influences view emission failed"
         )
 
 
@@ -405,8 +405,8 @@ def _attach_author_attribution_view(result, raw) -> None:
             language="ru",
         )
         vb.attach_view(result, view, data_validity=DataValidity.OK)
-    except Exception as e:
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         import logging
-        logging.getLogger("wordcracker.v2.tools.authors.author_profile").warning(
-            "author_attribution view emission failed: %s", e,
+        logging.getLogger("wordcracker.v2.tools.authors.author_profile").exception(
+            "author_attribution view emission failed"
         )
