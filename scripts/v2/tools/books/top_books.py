@@ -122,9 +122,10 @@ def top_books_by_recency(top: int = 20, lang: str = "en",
     requires=["book"],
     cost="cheap",
     cacheable=True,
-    # E18 (2026-05-22) — E15 view now reads v1's share_among_primary_emotions
-    # / per_million instead of phantom «emotions/profile/distribution».
-    wrapper_version="v2-e15-emotion-keys",
+    # E24 (2026-05-22) — view now fills `count` from per_million when
+    # share is source (was None → «Вхождений» column empty in persona
+    # Q4/Q12 — exactly the column the user looks at for frequency).
+    wrapper_version="v3-e24-emotion-counts",
 )
 def book_emotion_profile(pg_id: str) -> ToolResult:
     if not pg_id or (isinstance(pg_id, str) and not pg_id.strip()):
@@ -237,12 +238,25 @@ def _attach_emotion_profile_view(result, raw, pg_id: str) -> None:
                       if isinstance(v, (int, float))]
             total = sum(values) if values else 0
             already_shares = (0.95 <= total <= 1.05) and bool(share_raw)
+            # E24 (2026-05-22) — persona test Q4/Q12 «эмоциональный профиль
+            # Frankenstein/Dracula» showed «Вхождений» (count) column
+            # empty. v1 returns BOTH share_among_primary_emotions AND
+            # per_million. When share is source, count was None; now
+            # populate from per_million as a meaningful per-million
+            # frequency so the column is filled.
+            per_million_for: dict = (per_million_raw
+                                      if isinstance(per_million_raw, dict)
+                                      else {})
             for emo, val in emotions_raw.items():
                 if not isinstance(val, (int, float)):
                     continue
                 if already_shares:
                     share = float(val)
-                    count = None
+                    pm_val = per_million_for.get(emo)
+                    # Show per-million frequency as count (more meaningful
+                    # than the share fraction)
+                    count = (round(float(pm_val)) if isinstance(pm_val, (int, float))
+                              else None)
                 else:
                     share = (float(val) / total) if total else 0.0
                     count = val

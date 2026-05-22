@@ -27,9 +27,11 @@ from scripts.v2._types import Coverage, ToolResult
     requires=["book"],
     cost="cheap",
     cacheable=True,
-    # E18 (2026-05-22) — Sprint 19+ added total_words_estimate +
-    # _render_note. Bump invalidates entries without those fields.
-    wrapper_version="v2-total-words",
+    # E23 (2026-05-22) — view now reads v1's `cefr_heuristic` key
+    # (was reading non-existent `cefr`/`cefr_estimate` → always None
+    # in the view). Persona Q5/Q8 «насколько Дракула сложна для
+    # изучающих английский» showed CEFR empty.
+    wrapper_version="v3-e23-cefr-heuristic",
 )
 def book_readability(pg_id: str, sample_chars: int = 200_000) -> ToolResult:
     # Defensive — pre-existing crash from journalctl 2026-05-21:
@@ -116,7 +118,12 @@ def book_readability(pg_id: str, sample_chars: int = 200_000) -> ToolResult:
         title = raw.get("book_title") or raw.get("title") or pg_id
         flesch = raw.get("flesch") or raw.get("flesch_reading_ease")
         fk = raw.get("flesch_kincaid") or raw.get("fk_grade") or raw.get("flesch_kincaid_grade")
-        cefr = raw.get("cefr") or raw.get("cefr_estimate")
+        # E23 (2026-05-22) — v1 returns key `cefr_heuristic`
+        # (rag_tools.py:1169), not `cefr` / `cefr_estimate`. Persona test
+        # Q5/Q8: «насколько Дракула сложна для изучающих английский»
+        # showed CEFR пуст — exactly the metric the user asked for.
+        cefr = (raw.get("cefr_heuristic") or raw.get("cefr")
+                or raw.get("cefr_estimate"))
         wc = raw.get("total_words_estimate") or raw.get("words")
         if flesch is not None or fk is not None:
             view = vb.build_readability_summary(

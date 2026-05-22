@@ -35,6 +35,52 @@ def _has_cyrillic(text: str) -> bool:
     return any("Ѐ" <= ch <= "ӿ" for ch in text)
 
 
+# E26 (2026-05-22) — Persona-beginner Q9 «что почитать после Дракулы»
+# returned «Project Gutenberg (1971-2009)» as TOP result + a 1866
+# bookseller's catalogue + Greek-myths textbook + «History of English
+# Romanticism». Semantic search finds these because they contain lots
+# of mentions of other books. They are valid corpus items but useless
+# as REC results — meta-documents, bibliographies, catalogues, indexes.
+# Apply a lightweight title-substring blocklist post-dedup so they
+# drop OUT of recommendation lists. Filter is case-insensitive and
+# matches partial titles. Keep the list short and high-precision —
+# adding too many phrases risks false-positive drops of legitimate
+# titles (e.g. «The Catalogue of Sins» is fiction).
+_META_TITLE_BLOCKLIST: tuple[str, ...] = (
+    "project gutenberg",          # «Project Gutenberg (1971-2009)»
+    "gutenberg ebook",
+    "gutenberg literary archive",
+    "catalogue of",               # «Catalogue of London Books, 1866»
+    "catalog of",
+    "bibliograph",                # «Bibliography of …»
+    "index of the project",
+    "the index of",
+    "table of contents",
+    "list of titles",
+    "list of works",
+    "list of authors",
+    "annual report",
+    "encyclopædia",
+    "encyclopedia of",
+    "dictionary of",              # mostly reference works
+    "manual of",                  # «Manual of English Literature»
+    "history of english literat", # bibliography-class entries
+    "history of english romant",
+    "outline of",
+    "primer of english",
+    "the cambridge history",
+)
+
+
+def _is_meta_title(title: str | None) -> bool:
+    """Returns True if title smells like a bibliography/catalogue/index —
+    bad as a recommendation, even if it ranked high semantically."""
+    if not title:
+        return False
+    low = str(title).lower().strip()
+    return any(phrase in low for phrase in _META_TITLE_BLOCKLIST)
+
+
 def _translate_topic(topic: str) -> tuple[str, str | None]:
     """Force-translate Cyrillic topics to English via v1 helper.
 
@@ -88,6 +134,10 @@ def _translate_topic(topic: str) -> tuple[str, str | None]:
     # endlessly. Heavy ChromaDB + BGE rerank cold path is the slow tip.
     timeout_s=45,
     cacheable=True,
+    # E26 (2026-05-22) — META blocklist drops bibliography/catalogue
+    # books from recommendation results. Invalidates entries written
+    # before the filter was applied.
+    wrapper_version="v2-e26-meta-blocklist",
 )
 def find_book_by_topic(
     topic: str,
@@ -202,6 +252,16 @@ def find_book_by_topic(
             lambda r: dedup_by_key(r, key="snippet"),
             dedup_book_editions,
         ], books)
+    # E26 (2026-05-22) — META blocklist. Drop bibliography/catalogue/
+    # encyclopedia entries that are valid corpus items but useless as
+    # recommendations.
+    meta_dropped = 0
+    if books:
+        before = len(books)
+        books = [b for b in books if not _is_meta_title(b.get("title"))]
+        meta_dropped = before - len(books)
+        if meta_dropped:
+            filter_drops["meta_blocklist"] = meta_dropped
     warnings = list(sub.warnings) if sub.warnings else []
     if len(books) < top:
         warnings.append(ToolWarning(

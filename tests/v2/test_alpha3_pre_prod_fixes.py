@@ -530,17 +530,21 @@ class CacheKey_WrapperVersionInvalidation(unittest.TestCase):
                           "v2-e15-top-collocates")
         self.assertEqual(REGISTRY["book_archaic_words"].wrapper_version,
                           "v2-e15-top-key")
+        # E24 — book_emotion_profile counts now from per_million
         self.assertEqual(REGISTRY["book_emotion_profile"].wrapper_version,
-                          "v2-e15-emotion-keys")
+                          "v3-e24-emotion-counts")
         self.assertEqual(REGISTRY["word_pos_distribution"].wrapper_version,
                           "v2-e15-list-shape")
         self.assertEqual(REGISTRY["words_disappearing_after"].wrapper_version,
                           "v2-e15-nested-buckets")
         self.assertEqual(REGISTRY["top_ngrams_by_author"].wrapper_version,
                           "v3-e15-top-key")
-        # Sprint 19+ — book_readability total_words_estimate addition
+        # E23 — book_readability reads v1's cefr_heuristic key
         self.assertEqual(REGISTRY["book_readability"].wrapper_version,
-                          "v2-total-words")
+                          "v3-e23-cefr-heuristic")
+        # E26 — find_book_by_topic META-title blocklist
+        self.assertEqual(REGISTRY["find_book_by_topic"].wrapper_version,
+                          "v2-e26-meta-blocklist")
 
 
 if __name__ == "__main__":

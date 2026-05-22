@@ -504,6 +504,17 @@ RULES: list[tuple[Pattern[str], str, float]] = [
      "book_readability_compare", 0.94),
     (_re(r"\bчто\s+(сложнее|труднее|легче|проще)\s+читать\b"),
      "book_readability_compare", 0.92),
+    # E25 (2026-05-22) — persona-beginner Q6: «что сложнее для чтения —
+    # "Дракула" или "Франкенштейн"» matched book_readability (single)
+    # instead of compare because patterns above require literal «читать».
+    # Pattern «для чтения … или …» mirrors the «читать … или …» rule
+    # but for the «для чтения»/«для понимания» phrasing.
+    (_re(r"\b(сложнее|сложней|труднее|трудней|легче|проще)\s+"
+         r"для\s+(чтения|понимани\w*)\b.{0,80}\b(или|vs|против)\b"),
+     "book_readability_compare", 0.94),
+    (_re(r"\bчто\s+(сложнее|труднее|легче|проще)\s+"
+         r"для\s+(чтения|понимани\w*)\b"),
+     "book_readability_compare", 0.92),
     (_re(r"\b(harder|easier|simpler|more\s+difficult|more\s+complex)\s+to\s+read\b"
          r".{0,60}\bor\b"),
      "book_readability_compare", 0.92),
