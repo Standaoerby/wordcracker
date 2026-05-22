@@ -27,6 +27,10 @@ from scripts.v2._types import Coverage, ToolResult
     requires=["word", "scope"],
     cost="cheap",
     cacheable=True,
+    # E18 (2026-05-22) — E15 view now handles v1's LIST shape for
+    # pos_distribution. Old cached entries built the view as dict-only
+    # and silently fell into the empty path.
+    wrapper_version="v2-e15-list-shape",
 )
 def word_pos_distribution(scope, word: str) -> ToolResult:
     try:

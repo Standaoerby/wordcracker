@@ -351,7 +351,11 @@ def affinity_by_author(author_regex: str, top: int = 50,
     # Sprint 22+ Stan Q15 follow-on: multi-step retry (500→200→100→50)
     # for small-corpus authors. Output schema same as v2 but the values
     # are now reliably non-empty. Bump to invalidate single-retry cache.
-    wrapper_version="v3-stepdown",
+    # E18 (2026-05-22) — E15 added _normalize_compare_shape (nested
+    # author1/author2 → flat top_unique_a/b). Phantom burrows_delta
+    # field also dropped. Bump invalidates old cached results that had
+    # flat shape mismatches.
+    wrapper_version="v4-e15-normalize",
 )
 def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
                     min_corpus_count: int = 500) -> ToolResult:

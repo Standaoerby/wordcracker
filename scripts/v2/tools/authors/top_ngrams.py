@@ -42,8 +42,9 @@ from scripts.v2._types import Coverage, ToolResult, ToolWarning
     cost="heavy",
     cacheable=True,
     timeout_s=120,
-    # wrapper_version bumped because semantic_class param changes cache key
-    wrapper_version="v2-sem-class",
+    # E18 (2026-05-22) — E15 now reads v1's «top» key first (was reading
+    # phantom «top_ngrams» only → empty view). Bump to invalidate stale.
+    wrapper_version="v3-e15-top-key",
 )
 def top_ngrams_by_author(author_regex: str, n: int = 2, top: int = 20,
                          pos_filter=None, year_from=None, year_to=None,

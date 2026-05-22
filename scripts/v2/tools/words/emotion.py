@@ -32,6 +32,10 @@ from scripts.v2._types import Coverage, ToolResult, ToolWarning
     requires=["scope"],
     cost="medium",
     cacheable=True,
+    # E15/E17 — wrapper now reads v1's `top_collocates` key (was reading
+    # `top` and silently returning empty). Bump invalidates entries from
+    # all pre-E15 runs that cached the empty result.
+    wrapper_version="v2-e15-top-collocates",
 )
 def emotion_collocates(scope, emotion: str, window: int = 4,
                        top: int = 25) -> ToolResult:

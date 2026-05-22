@@ -122,6 +122,9 @@ def top_books_by_recency(top: int = 20, lang: str = "en",
     requires=["book"],
     cost="cheap",
     cacheable=True,
+    # E18 (2026-05-22) — E15 view now reads v1's share_among_primary_emotions
+    # / per_million instead of phantom «emotions/profile/distribution».
+    wrapper_version="v2-e15-emotion-keys",
 )
 def book_emotion_profile(pg_id: str) -> ToolResult:
     if not pg_id or (isinstance(pg_id, str) and not pg_id.strip()):

@@ -507,13 +507,40 @@ class CacheKey_WrapperVersionInvalidation(unittest.TestCase):
 
     def test_bumped_tools_carry_new_version(self):
         """Tools I changed across alphas announce versions so prod rebuilds
-        cache on deploy instead of serving stale data."""
+        cache on deploy instead of serving stale data.
+
+        E18 (2026-05-22) — Stan «Dorian Gray ADJ» bug proved cache
+        invalidation is REQUIRED, not optional. affinity_by_book without
+        wrapper_version returned stale empty cache entries from pre-E14b
+        runs, bypassing the new retry-helper. Bumped every wrapper whose
+        output semantics changed in E14b/E15/E16."""
         from scripts.v2.tool_registry import REGISTRY
-        # alpha4 bumps
-        self.assertEqual(REGISTRY["hybrid_search"].wrapper_version, "v3-lang")
+        # alpha4 + E16 bumps
+        self.assertEqual(REGISTRY["hybrid_search"].wrapper_version,
+                          "v4-e16-emit-view")
         self.assertEqual(REGISTRY["lexical_search"].wrapper_version, "v2-titles")
-        # alpha4 second pass: step-down retry
-        self.assertEqual(REGISTRY["compare_authors"].wrapper_version, "v3-stepdown")
+        # alpha4 step-down + E15 normalize
+        self.assertEqual(REGISTRY["compare_authors"].wrapper_version,
+                          "v4-e15-normalize")
+        # E14b retry helper
+        self.assertEqual(REGISTRY["affinity_by_book"].wrapper_version,
+                          "v3-e14b-retry")
+        # E15 v1-key fixes
+        self.assertEqual(REGISTRY["emotion_collocates"].wrapper_version,
+                          "v2-e15-top-collocates")
+        self.assertEqual(REGISTRY["book_archaic_words"].wrapper_version,
+                          "v2-e15-top-key")
+        self.assertEqual(REGISTRY["book_emotion_profile"].wrapper_version,
+                          "v2-e15-emotion-keys")
+        self.assertEqual(REGISTRY["word_pos_distribution"].wrapper_version,
+                          "v2-e15-list-shape")
+        self.assertEqual(REGISTRY["words_disappearing_after"].wrapper_version,
+                          "v2-e15-nested-buckets")
+        self.assertEqual(REGISTRY["top_ngrams_by_author"].wrapper_version,
+                          "v3-e15-top-key")
+        # Sprint 19+ — book_readability total_words_estimate addition
+        self.assertEqual(REGISTRY["book_readability"].wrapper_version,
+                          "v2-total-words")
 
 
 if __name__ == "__main__":

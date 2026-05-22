@@ -131,6 +131,9 @@ def word_freq_timeline(word: str, bucket_years: int = 25,
     requires=[],
     cost="heavy",
     cacheable=True,
+    # E18 (2026-05-22) — E15 now reads v1's «top» key (not «words») and
+    # nested pre_bucket/post_bucket counts (not flat books_before/after).
+    wrapper_version="v2-e15-nested-buckets",
 )
 def words_disappearing_after(year: int = 1920, top: int = 25) -> ToolResult:
     try:

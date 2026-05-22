@@ -40,6 +40,13 @@ from scripts.v2.tools.authors._corpus_artifacts import filter_corpus_artifacts
     requires=["book"],
     cost="medium",
     cacheable=True,
+    # E17 CACHE INVALIDATION (2026-05-22) — Stan prod proved retry-helper
+    # was never running: empty cached entry from PRE-E14b deploys hit
+    # cache_key (wrapper_version="v1") and returned without invoking the
+    # new retry-step-down logic. Bumping wrapper_version invalidates all
+    # stale empty entries; first request after deploy fully re-runs v1
+    # with the retry helper.
+    wrapper_version="v3-e14b-retry",
 )
 def affinity_by_book(pg_id: str, top: int = 50,
                      pos_filter: list[str] | None = None,

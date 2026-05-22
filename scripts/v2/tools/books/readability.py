@@ -27,6 +27,9 @@ from scripts.v2._types import Coverage, ToolResult
     requires=["book"],
     cost="cheap",
     cacheable=True,
+    # E18 (2026-05-22) — Sprint 19+ added total_words_estimate +
+    # _render_note. Bump invalidates entries without those fields.
+    wrapper_version="v2-total-words",
 )
 def book_readability(pg_id: str, sample_chars: int = 200_000) -> ToolResult:
     # Defensive — pre-existing crash from journalctl 2026-05-21:
@@ -149,6 +152,9 @@ def book_readability(pg_id: str, sample_chars: int = 200_000) -> ToolResult:
     requires=["book"],
     cost="medium",
     cacheable=True,
+    # E18 (2026-05-22) — E15 view now reads v1's «top» key. Bump
+    # invalidates entries cached with the always-empty view.
+    wrapper_version="v2-e15-top-key",
 )
 def book_archaic_words(pg_id: str, top: int = 30) -> ToolResult:
     if not pg_id or (isinstance(pg_id, str) and not pg_id.strip()):

@@ -62,7 +62,9 @@ def _rank_map(items: list[dict[str, Any]], key: str = "pg_id") -> dict[str, int]
     cost="medium",
     cacheable=True,
     # Sprint 22+ Stan B4: `lang` filter changes the output set. Bump.
-    wrapper_version="v3-lang",
+    # E18 (2026-05-22) — E16 added WORD_CONTEXTS view emission. Old
+    # cached entries don't have the view → renderer can't show examples.
+    wrapper_version="v4-e16-emit-view",
 )
 def hybrid_search(query: str, k: int = 12, per_retriever: int = 50,
                   author_filter: str | None = None,
