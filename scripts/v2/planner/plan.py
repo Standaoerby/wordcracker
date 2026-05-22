@@ -433,6 +433,64 @@ def _scope_dict_or_clarify(e: Entities, *, intent: str, hint: str) -> "QueryPlan
     return scope
 
 
+def _fan_out_authors_steps(
+    e: Entities,
+    *,
+    tool: str,
+    base_args: dict,
+    scope_field: str = "scope",
+    author_field: str | None = None,
+    cap: int = 3,
+    primary_optional: bool = False,
+) -> list[PlanStep]:
+    """E5 fix (R-22 P5) — build N+1 PlanSteps for primary + multi-authors.
+
+    Used by author-scope plan builders that should fan-out when user
+    references multiple authors («По и Лавкрафт одновременно» — both
+    must be analyzed, not just primary).
+
+    Args:
+      e             — Entities with primary author_regex + multi_author_regex
+      tool          — tool name (same for primary + each multi step)
+      base_args     — base args dict; author/scope filled per step
+      scope_field   — field name to set in args («scope» for dict-scope tools
+                      like emotion_collocates, learning_words)
+      author_field  — alt: set «author_regex» directly (for tools like
+                      affinity_by_author). If set, scope_field ignored.
+      cap           — max number of multi-author steps (default 3 → up to
+                      4 total steps including primary)
+      primary_optional — if True, primary step is optional too (rare;
+                      default False — primary is required)
+
+    Returns up to (cap + 1) PlanSteps. Empty list if no primary author.
+    """
+    if not e.author_regex:
+        return []
+
+    def _make_step(regex: str, is_primary: bool) -> PlanStep:
+        args = dict(base_args)
+        if author_field is not None:
+            args[author_field] = regex
+        else:
+            args[scope_field] = {"author": regex}
+            # Carry filters from primary scope (country/year)
+            if e.country:
+                args[scope_field]["country"] = e.country
+            if e.year_from:
+                args[scope_field]["year_from"] = e.year_from
+            if e.year_to:
+                args[scope_field]["year_to"] = e.year_to
+        return PlanStep(
+            tool=tool, args=args,
+            optional=(not is_primary or primary_optional),
+        )
+
+    steps = [_make_step(e.author_regex, is_primary=True)]
+    for extra in e.multi_author_regex[:cap]:
+        steps.append(_make_step(extra, is_primary=False))
+    return steps
+
+
 # Authors whose English translations leak transliterated character /
 # place names that look like real lexemes to spaCy POS (Gavril, Lisaveta,
 # Korsakoff, kibitka, mossoo, beaupre — all appeared in the affinity for
@@ -1076,6 +1134,24 @@ def _plan_word_collocates(e: Entities) -> QueryPlan:
     )
     if isinstance(scope_or_plan, QueryPlan):
         return scope_or_plan
+
+    # E5 (R-22 P5): fan-out for multi-author queries like «что соседствует
+    # с fog у Лавкрафта и По одновременно». Per-author collocates, renderer
+    # aggregates.
+    if e.author_regex and e.multi_author_regex:
+        steps = _fan_out_authors_steps(
+            e, tool="word_collocates",
+            base_args={"word": e.word, "window": 4, "top": e.top_n or 20},
+            scope_field="scope", cap=3,
+        )
+        explain = (f"word_collocates fan-out: {e.author_regex} + "
+                   f"{len(e.multi_author_regex[:3])} more ({e.word})")
+        return QueryPlan(
+            intent="word_collocates", entities=e, steps=steps,
+            expected_cost="medium",
+            explain=explain,
+        )
+
     return QueryPlan(
         intent="word_collocates", entities=e,
         steps=[PlanStep(tool="word_collocates",
@@ -1257,6 +1333,26 @@ def _plan_word_emotion(e: Entities) -> QueryPlan:
     if isinstance(scope_or_plan, QueryPlan):
         return scope_or_plan
     emotion = e.emotion or "fear"
+
+    # E5 (R-22 P5): fan-out for multi-author queries. «слова страха у
+    # По и Лавкрафта одновременно» must analyze BOTH authors. Helper
+    # builds primary + multi_authors[:3] steps; renderer aggregates.
+    if e.author_regex and e.multi_author_regex:
+        steps = _fan_out_authors_steps(
+            e, tool="emotion_collocates",
+            base_args={"emotion": emotion, "window": 4,
+                       "top": e.top_n or 25},
+            scope_field="scope", cap=3,
+        )
+        explain = (f"emotion_collocates fan-out: {e.author_regex} + "
+                   f"{len(e.multi_author_regex[:3])} more ({emotion})")
+        return QueryPlan(
+            intent="word_emotion", entities=e,
+            steps=steps,
+            expected_cost="medium",
+            explain=explain,
+        )
+
     return QueryPlan(
         intent="word_emotion", entities=e,
         steps=[PlanStep(tool="emotion_collocates",
@@ -1520,10 +1616,17 @@ def _plan_word_movement(e: Entities) -> QueryPlan:
                         args={"author_regex": e.author_regex or ".*",
                               "n": 1, "top": min(e.top_n or 25, 30),
                               "pos_filter": ["VERB"],
+                              # E2 (R-22 P2): semantic-class filter applies
+                              # motion-verb lexicon (closed list ~200 verbs)
+                              # over the top-affinity VERB results. Without
+                              # this, «глаголы движения у Диккенса» returned
+                              # said/replied/cried — top affinity but NOT
+                              # motion.
+                              "semantic_class": "motion",
                               "year_from": yf, "year_to": yt,
                               "country": e.country})],
         expected_cost="heavy",
-        explain=f"top_ngrams_by_author over {yf}-{yt}, POS=VERB, top≤30",
+        explain=f"top_ngrams_by_author over {yf}-{yt}, POS=VERB+motion-lexicon, top≤30",
     )
 
 

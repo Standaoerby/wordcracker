@@ -514,13 +514,25 @@ def _render_word_contexts(view: RenderableView) -> str:
     scope = p.get("scope_label", "")
 
     parts = [f"### Контексты — «{word}» ({scope})\n"]
+    rendered_count = 0
     for ctx in contexts[:5]:
-        snip = ctx.get("snippet", "").strip()
-        title = ctx.get("title", "")
-        author = ctx.get("author", "")
+        # E9 defensive — never render «None» literal. dict.get(k, default)
+        # returns None when key exists with None value (NOT the default).
+        # Coerce + strip + skip empty.
+        snip_raw = ctx.get("snippet")
+        snip = (str(snip_raw) if snip_raw is not None else "").strip()
+        if not snip:
+            continue
+        title_raw = ctx.get("title")
+        title = str(title_raw) if title_raw is not None else ""
+        author_raw = ctx.get("author")
+        author = str(author_raw) if author_raw is not None else ""
         who = f" — {author}, *{title}*" if title else ""
         parts.append(f"> {snip}{who}")
         parts.append("")
+        rendered_count += 1
+    if rendered_count == 0:
+        parts.append("_Контексты найдены, но текст не извлёкся — проверь корпус._")
     return "\n".join(parts) + render_caveats(view.caveats)
 
 

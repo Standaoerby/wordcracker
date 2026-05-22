@@ -18,18 +18,23 @@ from scripts.v2._types import Coverage, ToolResult, ToolWarning
     description=(
         "Топ N-грамм у автора. n=1 unigrams, n=2 bigrams, n=3 trigrams. "
         "Используй для «фирменные обороты», «частые связки слов», «биграммы X». "
-        "Передай author_regex='.*' если фильтруешь только по period/country."
+        "Передай author_regex='.*' если фильтруешь только по period/country. "
+        "Параметр semantic_class фильтрует результат по closed-list лексикону "
+        "(сейчас поддерживается 'motion' для глаголов движения)."
     ),
     input_schema={
         "type": "object",
         "properties": {
-            "author_regex": {"type": "string"},
-            "n":            {"type": "integer", "description": "1, 2 или 3"},
-            "top":          {"type": "integer", "description": "default 20"},
-            "pos_filter":   {"type": "array", "items": {"type": "string"}},
-            "year_from":    {"type": "integer"},
-            "year_to":      {"type": "integer"},
-            "country":      {"type": "string"},
+            "author_regex":   {"type": "string"},
+            "n":              {"type": "integer", "description": "1, 2 или 3"},
+            "top":             {"type": "integer", "description": "default 20"},
+            "pos_filter":      {"type": "array", "items": {"type": "string"}},
+            "year_from":       {"type": "integer"},
+            "year_to":         {"type": "integer"},
+            "country":         {"type": "string"},
+            "semantic_class":  {"type": "string",
+                                 "description": "filter result by lexicon: "
+                                 "'motion' (motion verbs). Optional."},
         },
         "required": ["author_regex"],
     },
@@ -37,31 +42,69 @@ from scripts.v2._types import Coverage, ToolResult, ToolWarning
     cost="heavy",
     cacheable=True,
     timeout_s=120,
+    # wrapper_version bumped because semantic_class param changes cache key
+    wrapper_version="v2-sem-class",
 )
 def top_ngrams_by_author(author_regex: str, n: int = 2, top: int = 20,
                          pos_filter=None, year_from=None, year_to=None,
-                         country=None) -> ToolResult:
+                         country=None, semantic_class: str | None = None) -> ToolResult:
     try:
         from scripts.rag_tools import top_ngrams_by_author as _v1
     except ImportError as e:
         return ToolResult.fail(tool="top_ngrams_by_author", err_type="internal",
                                message=f"v1 unavailable: {e}")
-    raw = _v1(author_regex=author_regex, n=n, top=top, pos_filter=pos_filter,
+
+    # E2 (R-22 P2): when semantic_class is set, pull a wider top from v1
+    # (lexicon filter will narrow). Without this, top=25 might contain
+    # 0 motion verbs (Dickens' top verbs are «said», «replied», «cried»).
+    raw_top = top
+    if semantic_class:
+        raw_top = max(top * 8, 200)  # pull enough to find motion verbs
+
+    raw = _v1(author_regex=author_regex, n=n, top=raw_top, pos_filter=pos_filter,
               year_from=year_from, year_to=year_to, country=country)
     query = {"author_regex": author_regex, "n": n, "top": top,
              "pos_filter": pos_filter, "year_from": year_from,
-             "year_to": year_to, "country": country}
+             "year_to": year_to, "country": country,
+             "semantic_class": semantic_class}
     if isinstance(raw, dict) and raw.get("error"):
         return ToolResult.fail(tool="top_ngrams_by_author", err_type="not_found",
                                message=str(raw["error"]), query=query)
     rows = (raw.get("top_ngrams") if isinstance(raw, dict) else None) or []
+
+    # E2: apply semantic-class lexicon filter
+    if semantic_class and rows:
+        if semantic_class.lower() == "motion":
+            from scripts.v2.tools.authors._motion_verbs import filter_motion_verbs
+            before = len(rows)
+            rows = filter_motion_verbs(rows, word_key="ngram")[:top]
+            if isinstance(raw, dict):
+                raw["top_ngrams"] = rows
+                raw["_semantic_filter"] = {
+                    "class": "motion",
+                    "before": before,
+                    "after": len(rows),
+                }
+        # Other classes can be added later (emotion / cognition / speech)
+
+    warnings = []
+    if not rows:
+        if semantic_class:
+            warnings.append(ToolWarning(
+                "no_lexicon_matches",
+                f"no {semantic_class}-class words found in top "
+                f"{raw_top} ngrams for this author",
+            ))
+        else:
+            warnings.append(ToolWarning("empty_top",
+                                         "no ngrams matched filters"))
+
     result = ToolResult.success(
         tool="top_ngrams_by_author", data=raw,
         coverage=Coverage(books_matched=raw.get("books_used", -1)
                                        if isinstance(raw, dict) else -1,
                           books_total=-1),
-        warnings=[ToolWarning("empty_top", "no ngrams matched filters")]
-                 if not rows else [],
+        warnings=warnings,
         query=query,
     )
     _attach_top_ngrams_view(result, rows, author_regex, n, top)

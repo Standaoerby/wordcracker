@@ -81,7 +81,12 @@ def _translate_topic(topic: str) -> tuple[str, str | None]:
         "required": ["topic"],
     },
     requires=[],
-    cost="medium",
+    cost="heavy",
+    # E11 (R-22 P11) — book_similar (uses this tool) hit 317s in probe.
+    # Lower default timeout 60s → 45s. SIGALRM forces abort, returns
+    # «timeout» error to user with retry hint, instead of hanging
+    # endlessly. Heavy ChromaDB + BGE rerank cold path is the slow tip.
+    timeout_s=45,
     cacheable=True,
 )
 def find_book_by_topic(

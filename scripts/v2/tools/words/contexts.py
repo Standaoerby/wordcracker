@@ -127,6 +127,19 @@ def word_contexts_global(word: str, k: int = 12,
 
 def _attach_word_contexts_view(result, samples, *, word: str,
                                  scope_label: str) -> None:
+    """Defensive view emission for E9 (snippet=None) closure.
+
+    R-22 P9 — prod rendered «None» as literal string for each snippet.
+    ROOT CAUSE: v1 `word_contexts` returns samples with field `context`
+    (NOT `snippet` or `text`). Old wrapper code looked for `snippet`/
+    `text` only — value defaulted to None, propagated through view
+    payload, renderer stringified to «None».
+
+    Fix here is two-layer:
+      1. Read ANY plausible field — `snippet` OR `text` OR `context`
+      2. Filter out samples with empty/whitespace text BEFORE building
+         view. If all samples empty → emit empty_state explicit caveat.
+    """
     try:
         from scripts.v2 import view_builders as vb
         from scripts.v2.view_types import DataValidity
@@ -134,11 +147,22 @@ def _attach_word_contexts_view(result, samples, *, word: str,
         for s in (samples or [])[:10]:
             if not isinstance(s, dict):
                 continue
+            # E9 root cause fix: v1 uses `context` field, not `snippet`
+            snippet_text = (
+                s.get("snippet")
+                or s.get("text")
+                or s.get("context")
+                or ""
+            )
+            # Defensive: skip rows with no actual text (don't pollute
+            # view with empty/None snippets)
+            if not snippet_text or not str(snippet_text).strip():
+                continue
             contexts.append({
-                "snippet": s.get("snippet") or s.get("text") or "",
+                "snippet": str(snippet_text).strip(),
                 "pg_id": s.get("pg_id") or s.get("id"),
-                "title": s.get("title"),
-                "author": s.get("author"),
+                "title": s.get("title") or "",
+                "author": s.get("author") or "",
             })
         view = vb.build_word_contexts(
             word=word,
