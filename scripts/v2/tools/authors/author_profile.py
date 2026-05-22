@@ -31,7 +31,8 @@ from scripts.v2.contracts.schemas import (
     requires=["author"],
     cost="heavy",
     cacheable=True,
-    timeout_s=60,
+    # Phase 5: per-tool timeout removed (was 60s = default anyway).
+    # Effective cap via chokepoint = min(DEFAULT_TOOL_TIMEOUT_S, budget.remaining).
     wrapper_version="v2-phase2-contract",
 )
 @v1_contract(v1_fn="scripts.rag_tools.author_profile",

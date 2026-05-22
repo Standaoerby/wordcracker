@@ -35,10 +35,11 @@ from scripts.v2._types import ToolError, ToolResult, now_ms_since
 log = logging.getLogger("wordcracker.v2.registry")
 
 
-# v3.3.1 prod observation 2026-05-21 — book_similar (find_book_by_topic)
-# burned 5 minutes per call. dispatch had timeout_s field but never
-# enforced it. Closes Q25/Q114-class for SINGLE-step plans (where router
-# inter-step budget can't trip — only one step to begin with).
+# Phase 5 chokepoint — единый механизм тайм-аута для v1 и v2 тулзов.
+# Изначально dispatch() игнорировал spec.timeout_s; v3.3.1 повесил
+# SIGALRM-обёртку, но только на v2-путь, и без связи с request budget.
+# Теперь обе ветки (v2 REGISTRY и legacy TOOL_DISPATCH) проходят через
+# `_signal_timeout(effective_timeout_s(spec, budget))`.
 @contextlib.contextmanager
 def _signal_timeout(seconds: int) -> Iterator[None]:
     """Raise TimeoutError if block doesn't finish within `seconds`.
@@ -65,6 +66,31 @@ def _signal_timeout(seconds: int) -> Iterator[None]:
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old_handler)
+
+
+# Дефолтный потолок per-tool — после Phase 5 это просто верхняя планка
+# на случай, когда нет request-budget. Per-tool оверрайды убраны (R6/Фаза 5):
+# реальный cap = min(DEFAULT_TOOL_TIMEOUT_S, budget.remaining_s).
+DEFAULT_TOOL_TIMEOUT_S = 60
+
+
+def effective_timeout_s(spec_timeout_s: int, budget) -> int:
+    """Compute effective tool timeout = min(spec ceiling, budget.remaining).
+
+    Returns 0 (= disabled) only when both inputs say «no limit». A budget
+    with remaining <= 0 returns 1 — каждый тул получает хотя бы один
+    тик, чтобы корректно ответить timeout, а не зависнуть.
+    """
+    if budget is None:
+        return spec_timeout_s
+    try:
+        remaining = max(0.0, budget.remaining_s())
+    except Exception:
+        return spec_timeout_s
+    if spec_timeout_s <= 0:
+        # spec=unlimited → respect budget remaining
+        return max(1, int(remaining))
+    return max(1, min(spec_timeout_s, int(remaining)))
 
 Category = Literal[
     "search", "statistics", "authors", "books",
@@ -160,8 +186,13 @@ def build_tools_spec(category_filter: list[str] | None = None) -> list[dict]:
     return out
 
 
-def dispatch(name: str, args: dict | None = None) -> ToolResult:
+def dispatch(name: str, args: dict | None = None, *, budget=None) -> ToolResult:
     """Invoke a registered tool by name with `args`. Always returns a ToolResult.
+
+    `budget` — optional `RequestBudget`. When provided, the effective tool
+    timeout is `min(spec.timeout_s, budget.remaining_s)`. Phase 5: this is
+    THE chokepoint — `legacy_dispatch.dispatch_any` routes both v1 and v2
+    through here so neither path can exceed the per-request envelope.
 
     Cache: when spec.cacheable is True, we look up (name, args) in the disk +
     in-process LRU before running the tool. Stale (older corpus_version) hits
@@ -190,19 +221,22 @@ def dispatch(name: str, args: dict | None = None) -> ToolResult:
         except Exception as e:
             log.warning("cache_get failed for %s: %s", name, e)
 
+    eff_timeout = effective_timeout_s(spec.timeout_s, budget)
     t0 = time.perf_counter()
     try:
-        # v3.3.1 — enforce timeout_s. Closes Q25/Q114/book_similar 5min
-        # runaways on single-step plans (where router inter-step budget
-        # can't trip).
-        with _signal_timeout(spec.timeout_s):
+        # Phase 5 chokepoint: effective timeout = min(spec, budget.remaining).
+        with _signal_timeout(eff_timeout):
             result = spec.fn(**args)
     except TimeoutError as e:
-        log.warning("tool %s timed out after %ds", name, spec.timeout_s)
+        log.warning("tool %s timed out after %ds (spec=%ds, budget=%s)",
+                    name, eff_timeout, spec.timeout_s,
+                    f"{budget.remaining_s():.1f}s" if budget is not None else "none")
         result = ToolResult.fail(
             tool=name, err_type="timeout",
             message=str(e),
-            details={"timeout_s": spec.timeout_s,
+            details={"timeout_s": eff_timeout,
+                     "spec_timeout_s": spec.timeout_s,
+                     "budget_bound": budget is not None,
                      "wall_clock_ms": now_ms_since(t0)},
             retryable=True,
         )

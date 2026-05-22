@@ -45,7 +45,8 @@ from scripts.v2.contracts.schemas import (
     requires=["author"],
     cost="heavy",
     cacheable=True,
-    timeout_s=120,
+    # Phase 5: per-tool timeout override removed (was 120s). Effective cap =
+    # min(DEFAULT_TOOL_TIMEOUT_S, request_budget.remaining) via chokepoint.
     # E18 (2026-05-22) — E15 now reads v1's «top» key first (was reading
     # phantom «top_ngrams» only → empty view). Bump to invalidate stale.
     wrapper_version="v4-phase2-contract",

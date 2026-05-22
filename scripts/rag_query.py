@@ -148,8 +148,22 @@ def _truncate_for_summary(obj, max_chars: int = 200) -> str:
     return s if len(s) <= max_chars else s[:max_chars] + "...(truncated)"
 
 
+# Phase 5 (REFACTOR_BRIEF): hardcoded 300s timeout уезжает — теперь это
+# default ceiling, который проигрывает request budget. Если v2-путь ставит
+# `OLLAMA_HTTP_TIMEOUT_S` env (rag_v2 в legacy-fallback это и делает) или
+# bake-time подставляет аргумент `timeout_s`, _call_chat обрезается до min
+# с этим значением. Закрывает гейт «ни один вызов тула не может превысить
+# request budget» для legacy-агентского пути.
+_DEFAULT_OLLAMA_HTTP_TIMEOUT_S = int(
+    os.environ.get("OLLAMA_HTTP_TIMEOUT_S", "60") or 60
+)
+
+
 def _call_chat(messages: list, model: str, ollama_host: str,
-               temperature: float, keep_alive: str) -> dict:
+               temperature: float, keep_alive: str,
+               *, timeout_s: int | None = None) -> dict:
+    eff = timeout_s if timeout_s is not None else _DEFAULT_OLLAMA_HTTP_TIMEOUT_S
+    eff = max(1, int(eff))
     payload = {
         "model":      model,
         "messages":   messages,
@@ -159,7 +173,7 @@ def _call_chat(messages: list, model: str, ollama_host: str,
         "options":    {"temperature": temperature},
         "think":      False,
     }
-    resp = requests.post(f"{ollama_host}/api/chat", json=payload, timeout=300)
+    resp = requests.post(f"{ollama_host}/api/chat", json=payload, timeout=eff)
     resp.raise_for_status()
     return resp.json()
 

@@ -69,7 +69,7 @@ class V4FollowupRoutesToLLM(unittest.TestCase):
         })
 
         called_tools: list[str] = []
-        def fake_dispatch(name, args):
+        def fake_dispatch(name, args, **_kw):
             called_tools.append(name)
             return _ok(name, {"word": args.get("word"),
                               "translation": "TRANSLATED",
@@ -118,7 +118,7 @@ class V4FollowupRoutesToLLM(unittest.TestCase):
         ]
         called_tools: list[str] = []
 
-        def fake_dispatch(name, args):
+        def fake_dispatch(name, args, **_kw):
             called_tools.append(name)
             return _ok(name, {})
 

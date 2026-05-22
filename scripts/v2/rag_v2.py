@@ -715,10 +715,11 @@ def _v5_budget_from_envelope(envelope, *, intent_label: str | None = None):
     try:
         from scripts.v2 import budget as _b
         b = _b.RequestBudget.for_intent(intent_label)
-        # Track envelope's existing usage so router accounts for time
-        # already spent in planner / entity resolution.
-        elapsed = time.perf_counter() - envelope["t0"]
-        b.wall_clock_s = max(1.0, b.wall_clock_s - elapsed)
+        # Phase 5: anchor budget clock to envelope start so remaining_s()
+        # automatically subtracts planner / entity-resolution elapsed time.
+        # dispatch chokepoint uses min(spec.timeout_s, budget.remaining_s)
+        # — no need to mutate wall_clock_s manually.
+        b.set_clock(envelope["t0"])
         envelope["budget"] = b
         return b
     except Exception as e:
@@ -1599,13 +1600,18 @@ def ask_stream(
                                           for s in plan.steps]}
 
         results: list[ToolResult] = []
+        # Phase 5: derive budget once so every dispatch in this stream
+        # path respects the per-request envelope (was unbounded — last
+        # known runaway path in the streaming branch).
+        _v5_stream_budget = _v5_budget_from_envelope(
+            _v5_env, intent_label=intent.label)
         for idx, step in enumerate(plan.steps):
             # use the same injector logic the non-streaming router uses
             args = router_mod._inject(step.args, results, step.depends_on,
                                       step.inject_result_as)
             yield {"event": "tool_call", "name": step.tool, "args": args}
             from scripts.v2.legacy_dispatch import dispatch_any
-            tr = dispatch_any(step.tool, args)
+            tr = dispatch_any(step.tool, args, budget=_v5_stream_budget)
             results.append(tr)
             yield {"event": "tool_result", "name": step.tool,
                    "ms": tr.runtime_ms, "ok": tr.ok,

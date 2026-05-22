@@ -67,7 +67,7 @@ class ExecuteSpecBasic(unittest.TestCase):
                               needs=["s1"]),
         ])
         captured_args = []
-        def fake_dispatch(name, args):
+        def fake_dispatch(name, args, **_kw):
             captured_args.append((name, args))
             if name == "resolver":
                 return _fake_tool_result(name, {"pg_id": "PG16328"})
@@ -88,7 +88,7 @@ class ExecuteSpecBasic(unittest.TestCase):
                               needs=["s1"]),
         ])
         captured = []
-        def fake_dispatch(name, args):
+        def fake_dispatch(name, args, **_kw):
             captured.append((name, args))
             return _fake_tool_result(
                 name,
@@ -104,7 +104,7 @@ class ExecuteSpecBasic(unittest.TestCase):
             ps.PlanStepSpec(id="s1", tool="a", args={}),
             ps.PlanStepSpec(id="s2", tool="b", args={}, needs=["s1"]),
         ])
-        def fake_dispatch(name, _args):
+        def fake_dispatch(name, _args, **_kw):
             return _fake_tool_result(name, {}, ok=(name != "a"))
         with mock.patch("scripts.v2.planner.router.dispatch_any",
                           side_effect=fake_dispatch):
@@ -119,7 +119,7 @@ class ExecuteSpecBasic(unittest.TestCase):
             ps.PlanStepSpec(id="s1", tool="a", args={}, optional=True),
             ps.PlanStepSpec(id="s2", tool="b", args={}),
         ])
-        def fake_dispatch(name, _args):
+        def fake_dispatch(name, _args, **_kw):
             return _fake_tool_result(name, {}, ok=(name != "a"))
         with mock.patch("scripts.v2.planner.router.dispatch_any",
                           side_effect=fake_dispatch):
@@ -139,7 +139,7 @@ class ExecuteSpecBasic(unittest.TestCase):
             ps.PlanStepSpec(id="s3", tool="x", args={"word": "aeroplane"}),
         ])
         call_words: list[str] = []
-        def fake_dispatch(name, args):
+        def fake_dispatch(name, args, **_kw):
             call_words.append(args.get("word"))
             # First call fails, others succeed
             ok = args.get("word") != "telephone"
@@ -168,7 +168,7 @@ class ExecuteSpecBasic(unittest.TestCase):
                               args={"pg_id": "$s1.pg_id"}, needs=["s1"]),
         ])
         called: list[str] = []
-        def fake_dispatch(name, _args):
+        def fake_dispatch(name, _args, **_kw):
             called.append(name)
             return _fake_tool_result(name, {}, ok=(name != "resolver"))
         with mock.patch("scripts.v2.planner.router.dispatch_any",
@@ -190,7 +190,7 @@ class ExecuteSpecDAGOrdering(unittest.TestCase):
         ])
         order: list[str] = []
         with mock.patch("scripts.v2.planner.router.dispatch_any",
-                          side_effect=lambda name, _args: (
+                          side_effect=lambda name, _args, **_kw: (
                               order.append(name) or
                               _fake_tool_result(name, {}))):
             rr = router_mod.execute_spec(spec)
@@ -219,7 +219,7 @@ class ExecuteSpecDAGOrdering(unittest.TestCase):
                                     "family": "latin"}),
         ])
         # Mock: resolvers return pg_id, etymology returns top-words
-        def fake_dispatch(name, args):
+        def fake_dispatch(name, args, **_kw):
             if name == "resolve_book_title":
                 pg = "PG16328" if args["query"] == "Beowulf" else "PG26"
                 return _fake_tool_result(name, {"pg_id": pg})
@@ -244,7 +244,7 @@ class StreamingVariant(unittest.TestCase):
                                   needs=["s1"]),
             ],
         )
-        def fake_dispatch(name, args):
+        def fake_dispatch(name, args, **_kw):
             return _fake_tool_result(
                 name,
                 {"pg_id": "PG16328"} if name == "resolve_book_title"

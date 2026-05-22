@@ -167,6 +167,11 @@ class RequestBudget:
 
     `response_bytes_max` is enforced at the frontend layer (P8) — server
     truncates with a "full response in server log, trace_id=…" marker.
+
+    Phase 5: `ts_start` фиксируется в момент создания бюджета (или явно
+    через `set_clock`), и `remaining_s()` отдаёт «сколько секунд осталось
+    до wall_clock_s». Этот метод — единый источник истины для
+    dispatch-chokepoint при вычислении effective tool timeout.
     """
     wall_clock_s: float = DEFAULT_WALL_CLOCK_MAX_S
     llm_calls_max: int = 3              # planner + render + critic
@@ -175,6 +180,18 @@ class RequestBudget:
 
     # The intent the budget was sized for (for log/debug)
     sized_for_intent: str | None = None
+    ts_start: float = field(default_factory=time.perf_counter)
+
+    def remaining_s(self) -> float:
+        """Seconds left in the envelope. Negative = already over budget;
+        callers should treat <=0 as «no time, fail fast»."""
+        return self.wall_clock_s - (time.perf_counter() - self.ts_start)
+
+    def set_clock(self, ts_start: float) -> None:
+        """Re-anchor the budget clock — used when budget is derived from a
+        pipeline envelope that started earlier (planner/entity resolution
+        already consumed some wall-clock before the router gets here)."""
+        self.ts_start = ts_start
 
     @classmethod
     def for_intent(cls, intent: str | None) -> "RequestBudget":

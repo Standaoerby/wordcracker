@@ -128,11 +128,11 @@ def _translate_topic(topic: str) -> tuple[str, str | None]:
     },
     requires=[],
     cost="heavy",
-    # E11 (R-22 P11) — book_similar (uses this tool) hit 317s in probe.
-    # Lower default timeout 60s → 45s. SIGALRM forces abort, returns
-    # «timeout» error to user with retry hint, instead of hanging
-    # endlessly. Heavy ChromaDB + BGE rerank cold path is the slow tip.
-    timeout_s=45,
+    # Phase 5 (REFACTOR_BRIEF): per-tool timeout overrides removed.
+    # Effective cap = min(DEFAULT_TOOL_TIMEOUT_S, request_budget.remaining)
+    # is enforced by tool_registry.dispatch chokepoint. Was timeout_s=45
+    # (E11 fix). Cost stays «heavy» so the budget estimator still
+    # downsizes / clarifies on heavy queries before dispatch.
     cacheable=True,
     # E26 (2026-05-22) — META blocklist drops bibliography/catalogue
     # books from recommendation results. Invalidates entries written

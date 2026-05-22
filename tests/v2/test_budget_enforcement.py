@@ -65,8 +65,11 @@ def _fake_step(tool: str, args: dict | None = None, optional: bool = False) -> P
 
 
 def _stub_dispatch_factory(per_call_delay: float = 0.0):
-    """Returns a dispatch_any-shaped stub that sleeps + returns success."""
-    def _stub(tool: str, args: dict) -> ToolResult:
+    """Returns a dispatch_any-shaped stub that sleeps + returns success.
+
+    Accepts and ignores `budget=` kwarg (Phase 5 added it to the dispatch
+    signature so the chokepoint can compute effective tool timeout)."""
+    def _stub(tool: str, args: dict, *, budget=None) -> ToolResult:
         if per_call_delay > 0:
             time.sleep(per_call_delay)
         return ToolResult.success(

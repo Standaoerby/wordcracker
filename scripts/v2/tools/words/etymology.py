@@ -96,7 +96,8 @@ def word_etymology(word: str) -> ToolResult:
     requires=["scope"],
     cost="heavy",
     cacheable=True,
-    timeout_s=90,
+    # Phase 5: per-tool timeout override removed (was 90s). Effective cap =
+    # min(DEFAULT_TOOL_TIMEOUT_S, request_budget.remaining) via chokepoint.
     wrapper_version="v2-phase2-contract",
 )
 @v1_contract(v1_fn="scripts.rag_tools.find_words_by_etymology",

@@ -195,7 +195,13 @@ class BudgetEnvelopeWiring(unittest.TestCase):
 
     def test_v5_budget_subtracts_elapsed_time(self):
         """If envelope was created N seconds ago, budget for downstream
-        router should be (intent_budget - N)."""
+        router should reflect elapsed time via remaining_s().
+
+        Phase 5: `wall_clock_s` остаётся per-intent константой; уменьшается
+        `remaining_s()` через привязку `ts_start` к envelope t0 (см.
+        `RequestBudget.set_clock`). dispatch-chokepoint считает effective
+        timeout именно по remaining_s().
+        """
         import time as _t
         from scripts.v2 import rag_v2 as r2
         env = r2._v5_pipeline_envelope("q")
@@ -205,18 +211,25 @@ class BudgetEnvelopeWiring(unittest.TestCase):
         from scripts.v2.budget import INTENT_BUDGETS_S
         author_md_budget = INTENT_BUDGETS_S["author_metadata"]
         # Budget should reflect the small elapsed already consumed
-        self.assertLess(b.wall_clock_s, author_md_budget)
-        self.assertGreater(b.wall_clock_s, author_md_budget - 1.0)
+        self.assertLess(b.remaining_s(), author_md_budget)
+        self.assertGreater(b.remaining_s(), author_md_budget - 1.0)
+        # wall_clock_s itself is the per-intent ceiling, unchanged
+        self.assertEqual(b.wall_clock_s, author_md_budget)
 
     def test_minimum_budget_floor(self):
-        """If envelope already burned all budget, downstream gets at
-        least 1s — router will abort fast but not raise."""
+        """If envelope already burned all budget, downstream remaining_s()
+        goes negative — chokepoint floors to >=1s so the tool can return
+        a clean timeout error instead of hanging."""
         from scripts.v2 import rag_v2 as r2
+        from scripts.v2.tool_registry import effective_timeout_s
         env = r2._v5_pipeline_envelope("q")
         # Manually fast-forward time by mutating t0
         env["t0"] = 0.0       # makes elapsed = enormous
         b = r2._v5_budget_from_envelope(env, intent_label="introduction")
+        # Spec ceiling stays intact
         self.assertGreaterEqual(b.wall_clock_s, 1.0)
+        # Effective timeout floored to >=1 so tool aborts cleanly
+        self.assertGreaterEqual(effective_timeout_s(60, b), 1)
 
 
 # =====================================================================

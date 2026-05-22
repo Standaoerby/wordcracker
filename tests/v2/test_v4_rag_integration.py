@@ -85,7 +85,7 @@ class FlagOnEndToEnd(unittest.TestCase):
         llm_planner.reset_cache_for_tests()
 
         dispatched: list[tuple[str, dict]] = []
-        def fake_dispatch(name, args):
+        def fake_dispatch(name, args, **_kw):
             dispatched.append((name, dict(args)))
             return _ok(name, {"pg_id": "PG999"})
 

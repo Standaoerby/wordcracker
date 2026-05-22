@@ -146,7 +146,10 @@ def execute(plan: QueryPlan, *, budget=None) -> RouterResult:
         args = _inject(step.args, results, step.depends_on, step.inject_result_as)
         events.append(StepEvent(kind="step_start", step_idx=idx,
                                 tool=step.tool, args=args))
-        result = dispatch_any(step.tool, args)
+        # Phase 5 chokepoint: budget идёт ВНУТРЬ dispatch, где effective
+        # timeout = min(spec.timeout_s, budget.remaining_s). Гарантирует,
+        # что ни один тул не переживёт request envelope.
+        result = dispatch_any(step.tool, args, budget=budget)
         results.append(result)
         if usage is not None:
             usage.tool_calls_used += 1
@@ -255,7 +258,8 @@ def execute_spec(spec: PlanSpec, *, budget=None) -> RouterResult:
             resolved_args = {}
         events.append(StepEvent(kind="step_start", step_idx=idx,
                                  tool=step.tool, args=resolved_args))
-        result = dispatch_any(step.tool, resolved_args)
+        # Phase 5 chokepoint: см. execute() выше.
+        result = dispatch_any(step.tool, resolved_args, budget=budget)
         if usage is not None:
             usage.tool_calls_used += 1
         results_ordered.append(result)
@@ -314,11 +318,15 @@ def _spec_stub_query_plan(spec: PlanSpec) -> QueryPlan:
     return qp
 
 
-def execute_stream(plan: QueryPlan) -> Iterator[dict]:
+def execute_stream(plan: QueryPlan, *, budget=None) -> Iterator[dict]:
     """Generator variant for SSE wiring in chat_server.
 
     Yields dicts with the same shape v1 emits, plus the v2-specific
-    `intent`/`plan` events at the start."""
+    `intent`/`plan` events at the start.
+
+    Phase 5: `budget` proxied into `dispatch_any` like `execute()` so the
+    SSE path is timeout-bounded symmetrically with the blocking path.
+    """
     yield {"event": "intent", "label": plan.intent,
            "explain": plan.explain,
            "needs_clarify": plan.needs_clarify}
@@ -332,7 +340,7 @@ def execute_stream(plan: QueryPlan) -> Iterator[dict]:
         return
     # Phase 4 — invariant application matches `execute()` so SSE
     # consumers see the same fanned-out step list.
-    plan = apply_invariants(plan)
+    plan = apply_invariants(plan, budget=budget)
     yield {"event": "plan", "steps": [{"tool": s.tool, "args": s.args}
                                       for s in plan.steps]}
 
@@ -340,7 +348,7 @@ def execute_stream(plan: QueryPlan) -> Iterator[dict]:
     for idx, step in enumerate(plan.steps):
         args = _inject(step.args, results, step.depends_on, step.inject_result_as)
         yield {"event": "tool_call", "name": step.tool, "args": args, "step_idx": idx}
-        tr = dispatch_any(step.tool, args)
+        tr = dispatch_any(step.tool, args, budget=budget)
         results.append(tr)
         yield {"event": "tool_result", "name": step.tool,
                "ok": tr.ok, "ms": tr.runtime_ms,
@@ -353,11 +361,13 @@ def execute_stream(plan: QueryPlan) -> Iterator[dict]:
     yield {"event": "done", "kind": "results"}
 
 
-def execute_spec_stream(spec: PlanSpec) -> Iterator[dict]:
+def execute_spec_stream(spec: PlanSpec, *, budget=None) -> Iterator[dict]:
     """SSE-friendly streaming variant of `execute_spec`.
 
     Emits the same event shape as `execute_stream` so chat_server's SSE
     handler can pipe v4 plans without forking the protocol.
+
+    Phase 5: `budget` proxied into `dispatch_any` for timeout enforcement.
     """
     yield {"event": "intent", "label": spec.intent_hint or "v4_llm_plan",
            "explain": spec.rationale,
@@ -399,7 +409,7 @@ def execute_spec_stream(spec: PlanSpec) -> Iterator[dict]:
             resolved_args = {}
         yield {"event": "tool_call", "name": step.tool, "args": resolved_args,
                "step_idx": idx, "step_id": step.id}
-        tr = dispatch_any(step.tool, resolved_args)
+        tr = dispatch_any(step.tool, resolved_args, budget=budget)
         results_by_id[step.id] = (
             tr.data if (tr and tr.data is not None) else None
         )
