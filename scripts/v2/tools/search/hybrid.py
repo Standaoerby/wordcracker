@@ -264,7 +264,7 @@ def hybrid_search(query: str, k: int = 12, per_retriever: int = 50,
     if rerank_applied:
         data["reranked_by"] = rerank_applied
 
-    return ToolResult.success(
+    result = ToolResult.success(
         tool="hybrid_search",
         data=data,
         coverage=Coverage(books_matched=len(out_matches), books_total=-1),
@@ -272,3 +272,41 @@ def hybrid_search(query: str, k: int = 12, per_retriever: int = 50,
         query={"query": query, "k": k, "per_retriever": per_retriever,
                "author_filter": author_filter, "rerank_with": rerank_with},
     )
+
+    # E16 (2026-05-22) — emit WORD_CONTEXTS view so the renderer can
+    # surface examples. Without this hybrid_search has snippets in
+    # `data["matches"]` but no typed view, so select_primary_view ignores
+    # it. For «примеры использования слова X» the plan dispatches
+    # hybrid_search + enrich_word; previously only enrich_word emitted
+    # a view (ETYMOLOGY_BUNDLE) which the renderer picked — examples
+    # were invisible.
+    try:
+        from scripts.v2 import view_builders as vb
+        from scripts.v2.view_types import DataValidity
+        contexts = []
+        for m in out_matches[:10]:
+            if not isinstance(m, dict):
+                continue
+            snip = m.get("snippet")
+            if not snip or not str(snip).strip():
+                continue
+            contexts.append({
+                "snippet": str(snip).strip(),
+                "pg_id": m.get("pg_id") or m.get("id"),
+                "title": m.get("title") or "",
+                "author": m.get("author") or "",
+            })
+        view = vb.build_word_contexts(
+            word=query,
+            contexts=contexts,
+            scope_label="весь корпус (FTS5+semantic RRF)",
+            language="ru",
+        )
+        validity = DataValidity.OK if contexts else DataValidity.EMPTY_EXPECTED
+        vb.attach_view(result, view, data_validity=validity)
+    except Exception as e:
+        import logging
+        logging.getLogger("wordcracker.v2.tools.search.hybrid").warning(
+            "hybrid_search view emission failed: %s", e,
+        )
+    return result

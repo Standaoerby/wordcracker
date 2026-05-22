@@ -231,16 +231,37 @@ class EtymologyBundleRendering(unittest.TestCase):
         self.assertIn("Yet ajar", s)
         self.assertIn("Germanic", s)
 
-    def test_b_r14_2_partial_bundle_surfaces_missing_etymology(self):
-        """When etymology slot is empty, renderer must say so once,
-        not silently skip (Q12 case)."""
+    def test_e16_partial_bundle_silent_on_missing_etymology(self):
+        """E16 (2026-05-22) — REVERSAL of original B-R14-2 fix.
+
+        Previous behavior: when etymology slot was None, renderer
+        explicitly said «Этимология не извлеклась» so the LLM (Phase B
+        prose) couldn't hallucinate a fake etymology.
+
+        New behavior (E16): renderer stays SILENT on missing etymology
+        when the user didn't ask about it. Stan «ajar» prod bug:
+        intent=word_contexts dispatched enrich_word as B101 bundle
+        bonus; «ajar» has no Wiktionary etymology → template printed
+        «Этимология не извлеклась» → critic flagged it as unsupported
+        claim → user saw a useless empty card with a critic flag.
+
+        Hallucination-prevention is still handled by:
+          1. Phase B prose audit (rejects claims with no payload anchor)
+          2. dedicated word_etymology tool's empty_state when intent=etymology
+        """
         v = vb.build_etymology_bundle(
             word="ajar",
             translation_ru="приоткрытый",
             pos="ADJ",
         )
         s = te.render_view(v)
-        self.assertIn("Этимология не извлеклась", s)
+        # The line MUST NOT appear (it would be unsolicited noise)
+        self.assertNotIn("Этимология не извлеклась", s)
+        # The translation + POS still render
+        self.assertIn("приоткрытый", s)
+        self.assertIn("ADJ", s)
+        # No phantom etymology either (we shouldn't have invented one)
+        self.assertNotIn("**Этимология:**", s)
 
 
 class LearningWordsRendering(unittest.TestCase):

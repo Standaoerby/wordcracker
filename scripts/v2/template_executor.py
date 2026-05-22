@@ -314,11 +314,16 @@ def _render_etymology_bundle(view: RenderableView) -> str:
                 bits.append(chain_str)
         etym_str = " ".join(bits) if bits else "—"
         parts.append(f"\n**Этимология:** {etym_str}")
-    else:
-        # Slot explicitly None — say so once, don't hang.
-        slots = p.get("slots_available") or {}
-        if slots.get("etymology") is False:
-            parts.append("\n_Этимология не извлеклась._")
+    # E16 (2026-05-22) — removed the «_Этимология не извлеклась._» fallback.
+    # Stan «ajar» bug: user asks «примеры использования слова X»; plan
+    # dispatches enrich_word as bonus side-step (B101 bundle). enrich_word
+    # has no etymology for «ajar» → slots_available[etymology]=False →
+    # template printed «Этимология не извлеклась» → critic flagged it as
+    # unsupported claim. The line was added to prevent etymology
+    # hallucination but it itself is unsolicited noise when the user
+    # didn't ask about etymology. If user DID ask (intent=word_etymology),
+    # the dedicated word_etymology tool's empty_state handles the
+    # «not found» case properly.
 
     return "\n".join(parts) + render_caveats(view.caveats)
 

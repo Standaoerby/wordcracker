@@ -85,8 +85,43 @@ _VIEW_PRIORITY: dict[ViewType, int] = {
 }
 
 
+# E16 — intent → preferred view-type bonus. Static priority alone makes
+# every full-bundle view (ETYMOLOGY_BUNDLE prio 90) beat partial-content
+# views (WORD_CONTEXTS prio 70), even when the user explicitly asked for
+# the latter. Bonus tilts the contest for matching intents without
+# disturbing the unrelated default ordering.
+_INTENT_VIEW_BONUS: dict[str, dict[ViewType, int]] = {
+    "word_contexts": {
+        ViewType.WORD_CONTEXTS: 40,   # 70 + 40 = 110 beats ETYMOLOGY_BUNDLE (90)
+    },
+    "word_collocates": {
+        ViewType.COLLOCATES:    40,
+    },
+    "word_emotion": {
+        ViewType.COLLOCATES:    30,   # emotion_collocates → COLLOCATES view
+    },
+    "word_etymology": {
+        ViewType.ETYMOLOGY_BUNDLE: 10,  # already 90, gentle bump
+    },
+    "word_timeline": {
+        ViewType.TIMELINE_CHART: 30,
+    },
+}
+
+
+def _intent_alignment_bonus(intent: str | None, vt: ViewType) -> int:
+    if not intent:
+        return 0
+    bonuses = _INTENT_VIEW_BONUS.get(intent)
+    if not bonuses:
+        return 0
+    return bonuses.get(vt, 0)
+
+
 def select_primary_view(
     results: list[ToolResult],
+    *,
+    intent: str | None = None,
 ) -> tuple[ToolResult | None, RenderableView | None]:
     """Pick the most informative view from a list of ToolResults.
 
@@ -97,6 +132,13 @@ def select_primary_view(
       3. Prefer views with non-empty payload.
       4. Within equal-payload-ness, use _VIEW_PRIORITY table.
       5. Tie-break: later-in-plan ToolResult (terminal step in DAG).
+
+    `intent` (optional): when provided, applies an intent-aligned bonus
+    so the view that semantically matches the user's intent beats
+    incidental support views.  E16 («примеры использования слова X»
+    intent=word_contexts but enrich_word's ETYMOLOGY_BUNDLE outranked
+    hybrid_search's WORD_CONTEXTS by static priority alone, hiding the
+    examples Stan actually asked for.)
     """
     if not results:
         return None, None
@@ -120,8 +162,14 @@ def select_primary_view(
         is_explained_empty = view.is_empty() and view.empty_state is not None
         is_junk_empty = view.is_empty() and view.empty_state is None
         empty_penalty = -200 if is_junk_empty else 0
+        # E16 — intent-aligned bonus. When user asks «примеры
+        # использования», we want WORD_CONTEXTS to beat ETYMOLOGY_BUNDLE
+        # (which only carries translation/POS/def — no examples).
+        intent_bonus = _intent_alignment_bonus(intent, view.view_type)
         # Higher idx = later in plan = closer to the user-facing answer
-        candidates.append((priority + empty_penalty, idx, priority, r, view))
+        candidates.append((
+            priority + empty_penalty + intent_bonus, idx, priority, r, view,
+        ))
 
     if not candidates:
         return None, None
@@ -257,7 +305,10 @@ def render_v5(
         return skeleton, meta
 
     # ---- Step 1 — pick the primary view ----
-    primary_r, primary_v = select_primary_view(results)
+    # E16 — pass intent so word_contexts queries don't lose to
+    # ETYMOLOGY_BUNDLE from a parallel enrich_word step.
+    plan_intent = getattr(plan, "intent", None)
+    primary_r, primary_v = select_primary_view(results, intent=plan_intent)
     if primary_v is None:
         # No views available — return a friendly empty message; the
         # legacy renderer would have called the LLM, but we're in v5
