@@ -2091,19 +2091,21 @@ def _plan_translate_word_list(e: Entities) -> QueryPlan:
 
     if not prior_words:
         # Extraction failed — surface honest clarify.
+        # E36 (2026-05-22) — was leaking `WC_LLM_PLANNER=on` env var name
+        # and «спроси админа» to the end user (Stan caught it 2026-05-22).
+        # Also had hardcoded dev-test fixture words («tuppence, stitching,
+        # embroidery, strychnine, vavasour») that read like prod data leak.
+        # Cleaned to neutral guidance without internal-config references
+        # or specific words that suggest a particular query.
         return QueryPlan(
             intent="translate_word_list", entities=e, steps=[],
             needs_clarify=True,
             clarify_question=(
-                "Хочешь перевод слов из предыдущего ответа? Я не смог "
-                "автоматически вытащить их из текста (формат не "
-                "распознался).\n\n"
-                "Скопируй 5-10 слов из списка и спроси: «переведи "
-                "tuppence, stitching, embroidery, strychnine, vavasour» "
-                "— я подготовлю переводы с IPA и определением.\n\n"
-                "Совет: спроси админа включить `WC_LLM_PLANNER=on` — "
-                "v4 LLM-планнер видит conversation и решает это "
-                "автоматически."
+                "Не получилось автоматически вытащить слова из "
+                "предыдущего ответа — формат списка не распознался.\n\n"
+                "Скопируй нужные 5-10 слов и пришли их одним "
+                "сообщением, например: «переведи X, Y, Z» — я "
+                "подготовлю перевод, IPA и определение для каждого."
             ),
             explain="translate_word_list — extraction failed, surfacing clarify",
         )

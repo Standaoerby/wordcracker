@@ -191,14 +191,18 @@ def learning_words(scope, level: str = "intermediate", top: int = 30,
     # renderer tells the user explicitly.
     if _translate_followup_disclose and isinstance(raw, dict):
         prev = raw.get("_render_note", "")
+        # E36 (2026-05-22) — removed hardcoded dev-test words («tuppence/
+        # stitching/embroidery») and internal-architecture phrasing
+        # («v3 rules-path не передаёт…»). Both leaked to end users via
+        # the renderer in clarify outputs. Disclosure now uses generic
+        # placeholders + plain user-facing wording.
+        prev = raw.get("_render_note", "")
         disclosure = (
             "ВАЖНО: список слов ПЕРЕФОРМИРОВАН — это learning_words "
-            "(CEFR-band intermediate), НЕ тот же affinity-список из "
-            "предыдущего хода. Если пользователь хотел перевод "
-            "конкретных слов («tuppence», «stitching», «embroidery») "
-            "из прошлого ответа — попроси его явно перечислить слова: "
-            "«переведи tuppence, stitching, embroidery». "
-            "v3 rules-path не передаёт prior tool output между ходами."
+            "(подборка по уровню CEFR), НЕ тот же affinity-список "
+            "из предыдущего ответа. Если пользователь хотел перевод "
+            "конкретных слов из прошлого ответа — попроси его "
+            "перечислить эти слова явно (например: «переведи X, Y, Z»)."
         )
         raw["_render_note"] = (prev + " | " + disclosure if prev else disclosure)
         warnings.append(ToolWarning(

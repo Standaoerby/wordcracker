@@ -168,7 +168,18 @@ class TranslateFollowupRouting(unittest.TestCase):
         e = history_mod.merge_with_history(e, empty_history, q)
         plan = plan_mod.build(inferred or m.label, e)
         self.assertTrue(plan.needs_clarify)
-        self.assertIn("WC_LLM_PLANNER", plan.clarify_question or "")
+        # E36 (2026-05-22) — clarify message used to leak `WC_LLM_PLANNER`
+        # env var name + «спроси админа» phrasing to end user. Now the
+        # message stays neutral. Assert recovery guidance is present
+        # (not the env-var advice).
+        msg = plan.clarify_question or ""
+        self.assertNotIn("WC_LLM_PLANNER", msg,
+                          "env var name must not leak to end user (E36)")
+        self.assertNotIn("админ", msg.lower(),
+                          "«admin» phrase must not appear in user-facing text")
+        # Useful guidance must remain — user needs to know what to do.
+        self.assertIn("переведи", msg.lower(),
+                       "must include the recovery example phrase")
 
 
 class TranslateFollowupNonWordlistPrior(unittest.TestCase):
