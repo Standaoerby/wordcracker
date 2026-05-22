@@ -204,17 +204,37 @@ class IntentEdgeCases(unittest.TestCase):
     def test_meta_questions_about_corpus(self):
         """Stan's adversarial round 2026-05-18: «что у тебя с копирайтом?»
         used to clarify-out. Extended corpus_meta rules cover coverage /
-        copyright / language scope phrasings now."""
+        language scope phrasings now.
+
+        E43 (2026-05-22): «что у тебя с копирайтом?» is a POLICY question,
+        not a corpus enumeration. Persona test confirmed: routing to
+        corpus_meta returned tool stats («Книг: 55,108») which doesn't
+        answer the user's question. Now routes to out_of_scope so the
+        renderer gives the PG-public-domain disclosure.
+        The «copyright coverage» / «copyright share» enumeration variants
+        STILL route to corpus_meta — discriminator on policy-phrasing."""
         meta_qs = [
-            "что у тебя с копирайтом?",
+            # Coverage / language / time-range — pure corpus_meta
             "как у тебя с охватом русских книг?",
             "расскажи про охват корпуса",
             "какие книги в корпусе после 1929?",
-            "copyright coverage в books",
+            "copyright coverage в books",  # COUNT not policy
         ]
         for q in meta_qs:
             with self.subTest(q=q):
-                self.assertEqual(classify(q).label, "corpus_meta")
+                self.assertEqual(classify(q).label, "corpus_meta",
+                                  msg=f"q={q!r}")
+        # Policy-phrasing — must route to OOS (E43)
+        policy_qs = [
+            "что у тебя с копирайтом?",
+            "как у тебя с лицензией",
+            "можно ли использовать книги",
+        ]
+        for q in policy_qs:
+            with self.subTest(q=q):
+                self.assertEqual(classify(q).label, "out_of_scope",
+                                  msg=f"q={q!r} (E43 — policy question, "
+                                       f"not corpus enumeration)")
 
     def test_prompt_injection_guards(self):
         """Demon-mode hardening: jailbreak attempts route to out_of_scope at

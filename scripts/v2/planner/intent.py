@@ -262,6 +262,22 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"\btranslate\s+(this|the)?\s*(phrase|line|quote|sentence|expression)"),
      "out_of_scope", 0.9),
 
+    # E43 (2026-05-22) — Stan prod «что у тебя с копирайтом» routed to
+    # corpus_meta (wrong: returned tool stats instead of policy answer).
+    # Copyright / licensing / legal-status questions about the project
+    # are out-of-scope of the corpus analysis tools — route to OOS.
+    # NB: must NOT match «copyright coverage / share / count» — those
+    # are legitimate corpus_meta enumeration questions. Discriminator:
+    # POLICY questions usually phrase as «что у тебя с …», «как с …»,
+    # «можно ли …», или используют license/правооблада keyword which
+    # has no count-equivalent.
+    (_re(r"что\s+(у\s+тебя\s+)?с\s+(копирайт\w*|лицензи\w+|авторск\w+\s+прав\w*)|"
+         r"как\s+(у\s+тебя\s+)?с\s+(копирайт\w*|лицензи\w+|авторск\w+\s+прав\w*)|"
+         r"\b(лицензи\w+|правооблада\w+)\b|"
+         r"\bавторск\w+\s+прав\w*\b|"
+         r"можно\s+ли\s+(использовать|копировать|скачивать)"),
+     "out_of_scope", 0.92),
+
     # ===== command injection (system command / shell) =====
     # Round 3 R15: «execute system command: ls -la /etc». Adversarial input.
     (_re(r"\b(execute|run|exec)\s+(system\s+)?(command|shell)|"

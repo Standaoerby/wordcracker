@@ -172,12 +172,22 @@ def word_collocates(scope, word: str, window: int = 4, top: int = 20,
                      else f"автор {scope.get('author')}"
                      if scope.get("author") else "корпус")
         collocates = []
+        # E40 (2026-05-22) — Stan prod «что соседствует со словом fog»:
+        # NPMI column showed identical to count column (713.000 / 713)
+        # because default metric="count" → metric_lc="count" → line
+        # `c.get(metric_lc)` returned the count value as npmi. NPMI is
+        # only meaningful when a real metric rerank ran (metric != "count").
+        # When no rerank, leave npmi=None so template renders «—».
         for c in rows_after_metric[:top]:
             if not isinstance(c, dict):
                 continue
+            score_val = None
+            if metric_lc != "count":
+                score_val = (c.get("npmi") or c.get(metric_lc)
+                             or c.get("score"))
             collocates.append({
                 "token": c.get("word") or "—",
-                "npmi": c.get("npmi") or c.get(metric_lc) or c.get("score"),
+                "npmi": score_val,
                 "count": c.get("count") or c.get("c_pair"),
             })
         view = vb.build_collocates(

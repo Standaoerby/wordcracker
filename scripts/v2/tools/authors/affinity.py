@@ -592,14 +592,24 @@ def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
         # E15 — burrows_delta was a phantom field; v1 compare_authors never
         # returned it (separate `burrows_delta` tool computes it). Show only
         # cosine_similarity which v1 actually returns.
+        # E38 (2026-05-22) — Stan prod: «Cosine Similarity» + «Shared High
+        # Affinity» columns в entity table показывали «—» для обеих сторон
+        # потому что (a) entity stored под «Cosine similarity» (lowercase
+        # 's'), а template lookup'ил «Cosine Similarity» (title case из
+        # metric_explanations.metric → `.title()`); (b) entity вообще не
+        # имел ключа «Shared High Affinity». Названия теперь exact-match
+        # title-case + добавлен shared count.
         cosine_val = raw.get("cosine_similarity")
+        shared_n = len(raw.get("shared_high_affinity") or [])
+        per_entity_metrics = {
+            "Cosine Similarity": cosine_val,
+            "Shared High Affinity": shared_n,
+        }
         entities = []
         if raw.get("top_unique_a"):
             entities.append({
                 "name": author1_regex.lstrip("^").rstrip(",").strip(),
-                "metrics": {
-                    "Cosine similarity": cosine_val,
-                },
+                "metrics": dict(per_entity_metrics),
                 "signature_words": [
                     w.get("word") if isinstance(w, dict) else str(w)
                     for w in (raw.get("top_unique_a") or [])[:30]
@@ -608,9 +618,7 @@ def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
         if raw.get("top_unique_b"):
             entities.append({
                 "name": author2_regex.lstrip("^").rstrip(",").strip(),
-                "metrics": {
-                    "Cosine similarity": cosine_val,
-                },
+                "metrics": dict(per_entity_metrics),
                 "signature_words": [
                     w.get("word") if isinstance(w, dict) else str(w)
                     for w in (raw.get("top_unique_b") or [])[:30]

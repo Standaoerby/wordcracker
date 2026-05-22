@@ -159,9 +159,9 @@ def book_readability(pg_id: str, sample_chars: int = 200_000) -> ToolResult:
     requires=["book"],
     cost="medium",
     cacheable=True,
-    # E18 (2026-05-22) — E15 view now reads v1's «top» key. Bump
-    # invalidates entries cached with the always-empty view.
-    wrapper_version="v2-e15-top-key",
+    # E41 — view now reads v1's `book_count` key (not phantom `count` /
+    # `frequency` → empty column). Invalidates entries with «—» values.
+    wrapper_version="v3-e41-book-count-key",
 )
 def book_archaic_words(pg_id: str, top: int = 30) -> ToolResult:
     if not pg_id or (isinstance(pg_id, str) and not pg_id.strip()):
@@ -215,10 +215,15 @@ def book_archaic_words(pg_id: str, top: int = 30) -> ToolResult:
         for i, r in enumerate(rows[:top], start=1):
             if not isinstance(r, dict):
                 continue
+            # E41 (2026-05-22) — v1 book_archaic_words returns row key
+            # `book_count` (learning_tools.py:768), NOT `count`/«frequency».
+            # Stan persona prod: «архаизмы в Dracula» showed frequency
+            # column «—» for all 20 archaic words. Same B-R14-7 class.
             view_rows.append({
                 "rank": i,
                 "word": r.get("word") or r.get("lemma") or "—",
-                "frequency": r.get("count") or r.get("frequency") or "—",
+                "frequency": (r.get("book_count") or r.get("count")
+                              or r.get("frequency") or "—"),
             })
         view = vb.build_top_n_table(
             rows=view_rows,

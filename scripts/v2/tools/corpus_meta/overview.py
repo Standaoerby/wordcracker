@@ -152,15 +152,42 @@ def corpus_overview() -> ToolResult:
     )
 
     # v5 Phase 2.5 — CORPUS_META_SNAPSHOT view.
+    # E39 (2026-05-22) — Stan prod: «сколько книг в базе» showed
+    # «Авторов: 0, Токенов: —». Wrapper was reading phantom keys
+    # `spgc.get("n_authors")` and `spgc.get("n_tokens")` — actual
+    # corpus_meta.json (built by scripts/spgc_corpus_stats.py:87) has:
+    #     {books_matched, books_aggregated, total_tokens, vocab_size, ...}
+    # — NO n_authors, NO n_tokens. Same B-R14-7 contract class as E15.
+    # Fix: read v1's `total_tokens`; compute n_authors lazily from
+    # _metadata_df author column.
     try:
         from scripts.v2 import view_builders as vb
         from scripts.v2.view_types import DataValidity
         chunks = data.get("chromadb_chunks")
         spgc = data.get("spgc_baseline") or {}
+        # v1 key is `total_tokens` (E39 fix); `n_tokens` was a phantom
+        n_tokens = (spgc.get("total_tokens")
+                    or spgc.get("n_tokens"))  # legacy fallback
+        # n_authors is NOT in corpus_meta.json — compute from metadata
+        # DataFrame. Lazy import to avoid pandas cost when view path
+        # is skipped.
+        n_authors = 0
+        try:
+            from scripts.rag_tools import _metadata_df
+            df = _metadata_df()
+            if "author" in df.columns:
+                n_authors = int(df["author"].dropna().nunique())
+        except Exception as e:
+            import logging
+            logging.getLogger("wordcracker.v2.tools.corpus_meta.overview").info(
+                "n_authors lazy compute failed: %s", e,
+            )
+            # fall back to spgc fields if any
+            n_authors = int(spgc.get("n_authors") or 0)
         view = vb.build_corpus_meta_snapshot(
             n_books=int(data.get("raw_books_available") or 0),
-            n_authors=int(spgc.get("n_authors") or 0),
-            n_tokens=int(spgc.get("n_tokens") or 0) or None,
+            n_authors=n_authors,
+            n_tokens=int(n_tokens) if n_tokens else None,
             spgc_baseline="SPGC-2018-07-18",
             chroma_chunks=chunks if isinstance(chunks, int) else None,
             user_uploads=int(data.get("raw_books_user_uploads") or 0),

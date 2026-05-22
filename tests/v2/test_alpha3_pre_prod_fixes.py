@@ -529,7 +529,7 @@ class CacheKey_WrapperVersionInvalidation(unittest.TestCase):
         self.assertEqual(REGISTRY["emotion_collocates"].wrapper_version,
                           "v2-e15-top-collocates")
         self.assertEqual(REGISTRY["book_archaic_words"].wrapper_version,
-                          "v2-e15-top-key")
+                          "v3-e41-book-count-key")
         # E24 — book_emotion_profile counts now from per_million
         self.assertEqual(REGISTRY["book_emotion_profile"].wrapper_version,
                           "v3-e24-emotion-counts")

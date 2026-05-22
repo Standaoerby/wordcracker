@@ -325,10 +325,14 @@ def hybrid_search(query: str, k: int = 12, per_retriever: int = 50,
                 "title": m.get("title") or "",
                 "author": m.get("author") or "",
             })
+        # E42 (2026-05-22) — scope_label «весь корпус (FTS5+semantic RRF)»
+        # leaked internal index implementation в headline rendered to user.
+        # Stan flagged it as «неправильный» in persona prod. Replace with
+        # plain user-facing phrase.
         view = vb.build_word_contexts(
             word=query,
             contexts=contexts,
-            scope_label="весь корпус (FTS5+semantic RRF)",
+            scope_label="во всём корпусе",
             language="ru",
         )
         validity = DataValidity.OK if contexts else DataValidity.EMPTY_EXPECTED
