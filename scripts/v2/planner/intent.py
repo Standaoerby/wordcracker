@@ -957,6 +957,23 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     # Punishment) which returns thematically similar books.
     (_re(r"что\s+(почитать|читать)\b.{0,60}\b(после|подобн|похож|типа)"),
      "book_similar", 0.93),
+    # E44 (2026-05-22) — Stan prod «что почитать, если нравится Толстой?»
+    # matched `book_recommendation` generic → top_books_by_downloads
+    # (Gatsby, Blue Castle, JFK Commission report — zero relation к
+    # Tolstoy). Existing rule above only catches «после|подобн|похож|типа»
+    # — «если нравится X» phrasing slipped through. Same structural class
+    # as the Sprint 17 fix; add the «taste» / «fan» variants.
+    # Route to `similar_to` (NOT `book_similar`) because the entity may
+    # be an AUTHOR (Tolstoy) OR a BOOK (Pride & Prejudice). `_plan_similar_to`
+    # dispatches to author_closest (Burrows Delta neighbours) or
+    # book_similar (find_book_by_topic) depending on which entity slot
+    # filled — see plan.py:1683-1707.
+    (_re(r"что\s+(почитать|читать)\b.{0,80}\bесли\s+нравится\b|"
+         r"если\s+нравится\b.{0,30}\bчто\s+(почитать|читать)\b|"
+         r"if\s+you\s+like\b.{0,40}\bwhat\s+to\s+read\b|"
+         r"\bfans?\s+of\s+[A-ZА-Я]\w+.{0,30}\b(read|enjoy|recommend)|"
+         r"я\s+люблю\s+\w+\s*,?\s*что\s+(почитать|посоветуешь)"),
+     "similar_to", 0.93),
 
     # ===== word_etymology =====
     (_re(r"этимолог\w*|origin of the word"), "word_etymology", 0.95),
