@@ -207,24 +207,46 @@ def _attach_top_books_view(result, rows, *, metric: str, top: int,
 
 
 def _attach_emotion_profile_view(result, raw, pg_id: str) -> None:
+    # E15 P0 FIX (2026-05-22): v1 book_emotion_profile (rag_tools.py:1900)
+    # returns keys `per_million` (dict {emo: float}),
+    # `share_among_primary_emotions` (dict {emo: share}), and
+    # `sample_anchor_words`, NOT `emotions`/`profile`/`distribution`.
+    # View has been silently empty since Phase 2.5. Same class as B-R14-7
+    # / E9 / E14b / E15. Read v1's actual keys first; legacy names kept
+    # as fallback for test mocks.
     try:
         from scripts.v2 import view_builders as vb
         from scripts.v2.view_types import DataValidity
         if not isinstance(raw, dict):
             return
         title = raw.get("book_title") or raw.get("title") or pg_id
-        emotions_raw = (raw.get("emotions") or raw.get("profile")
+        # v1 actual keys come first; legacy fallback for test mocks.
+        share_raw = raw.get("share_among_primary_emotions")
+        per_million_raw = raw.get("per_million")
+        emotions_raw = (share_raw or per_million_raw
+                        or raw.get("emotions") or raw.get("profile")
                         or raw.get("distribution") or {})
         emotions: list[dict] = []
         if isinstance(emotions_raw, dict):
-            total = sum(v for v in emotions_raw.values()
-                        if isinstance(v, (int, float)))
-            for emo, cnt in emotions_raw.items():
-                share = (float(cnt) / total) if total else 0.0
+            # If we have shares already (sum to ~1), use directly; if not
+            # (e.g. per_million), recompute shares.
+            values = [v for v in emotions_raw.values()
+                      if isinstance(v, (int, float))]
+            total = sum(values) if values else 0
+            already_shares = (0.95 <= total <= 1.05) and bool(share_raw)
+            for emo, val in emotions_raw.items():
+                if not isinstance(val, (int, float)):
+                    continue
+                if already_shares:
+                    share = float(val)
+                    count = None
+                else:
+                    share = (float(val) / total) if total else 0.0
+                    count = val
                 emotions.append({
                     "emotion": emo,
                     "share": share,
-                    "count": cnt,
+                    "count": count,
                 })
         elif isinstance(emotions_raw, list):
             for e in emotions_raw:
@@ -234,7 +256,15 @@ def _attach_emotion_profile_view(result, raw, pg_id: str) -> None:
                         "share": e.get("share"),
                         "count": e.get("count"),
                     })
+        # Compute dominant from share if v1 didn't supply it. NRC ranking:
+        # top 3 emotions by share.
         dominant = raw.get("dominant") or raw.get("top_emotions") or []
+        if not dominant and emotions:
+            dominant = [
+                e["emotion"] for e in
+                sorted(emotions, key=lambda x: x.get("share") or 0,
+                       reverse=True)[:3]
+            ]
         if not isinstance(dominant, list):
             dominant = [str(dominant)]
         view = vb.build_emotion_profile(

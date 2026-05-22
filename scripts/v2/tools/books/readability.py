@@ -180,7 +180,13 @@ def book_archaic_words(pg_id: str, top: int = 30) -> ToolResult:
         if not isinstance(raw, dict):
             return result
         title = raw.get("book_title") or raw.get("title") or pg_id
-        rows = raw.get("archaic_words") or raw.get("top_words") or raw.get("words") or []
+        # E15 P0 FIX — v1 book_archaic_words returns key «top» (line 777
+        # of learning_tools.py), NOT «archaic_words»/«top_words»/«words».
+        # Archaic-words view was always empty. Read v1's actual key first.
+        rows = (raw.get("top")
+                or raw.get("archaic_words")
+                or raw.get("top_words")
+                or raw.get("words") or [])
         if not rows:
             view = vb.build_top_n_table(
                 rows=[], columns=["rank", "word", "frequency"],

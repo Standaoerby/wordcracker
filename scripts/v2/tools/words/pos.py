@@ -51,12 +51,19 @@ def word_pos_distribution(scope, word: str) -> ToolResult:
     )
 
     # v5 Phase 2.5 — TOP_N_TABLE view of POS distribution.
+    # E15 P0 FIX (2026-05-22): v1 word_pos_distribution (rag_tools.py:1649)
+    # returns `pos_distribution` as a LIST of dicts
+    # `[{"pos": str, "count": int, "share": float, "samples": [...]}]`,
+    # NOT a dict. Old wrapper read it as dict → fell into the empty path
+    # every time. Same class as B-R14-7 / E9 / E14b / E15. Handle BOTH
+    # shapes (real v1 = list, test mocks may use dict).
     try:
         from scripts.v2 import view_builders as vb
         from scripts.v2.view_types import DataValidity, EmptyReason
         if not isinstance(raw, dict):
             return result
-        dist = (raw.get("distribution") or raw.get("pos_distribution")
+        # v1's actual key + shape comes first; legacy fallbacks for test mocks.
+        dist = (raw.get("pos_distribution") or raw.get("distribution")
                 or raw.get("counts") or {})
         scope_str = (str(scope) if not isinstance(scope, dict)
                      else f"книга {scope.get('book') or scope.get('pg_id')}"
@@ -64,7 +71,25 @@ def word_pos_distribution(scope, word: str) -> ToolResult:
                      else f"автор {scope.get('author')}"
                      if scope.get("author") else "корпус")
         view_rows = []
-        if isinstance(dist, dict) and dist:
+        if isinstance(dist, list) and dist:
+            # v1 actual shape: already sorted by count (Counter.most_common).
+            total = sum(int(r.get("count") or 0) for r in dist
+                        if isinstance(r, dict))
+            for i, r in enumerate(dist, start=1):
+                if not isinstance(r, dict):
+                    continue
+                cnt = r.get("count") or 0
+                # v1 already provides `share` (rounded float 0..1)
+                share = r.get("share")
+                if share is None:
+                    share = (float(cnt) / total) if total else 0
+                view_rows.append({
+                    "rank": i,
+                    "pos": r.get("pos") or "—",
+                    "share": f"{float(share) * 100:.1f}%",
+                    "count": cnt,
+                })
+        elif isinstance(dist, dict) and dist:
             total = sum(v for v in dist.values()
                         if isinstance(v, (int, float)))
             sorted_items = sorted(dist.items(), key=lambda kv: -float(kv[1] or 0))

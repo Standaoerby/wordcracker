@@ -50,7 +50,18 @@ def emotion_collocates(scope, emotion: str, window: int = 4,
                       else "not_found"),
             message=err, query=query,
         )
-    rows = (raw.get("top") if isinstance(raw, dict) else None) or []
+    # E15 P0 FIX (2026-05-22): v1 returns key «top_collocates» (line 2052
+    # of rag_tools.py), NOT «top». Old wrapper read wrong key → rows
+    # always empty → view always EMPTY_EXPECTED. Same class as B-R14-7
+    # (learning_words «results» vs «words»), E9 (word_contexts «context»
+    # vs «snippet»), E14b (affinity_by_book «top» vs «top_words»).
+    # R-22 P5 («слова страха у По и Лавкрафта одновременно») got
+    # nothing meaningful — both authors silently empty. Fix: read v1's
+    # actual key; legacy «top» fallback for test mocks.
+    rows = None
+    if isinstance(raw, dict):
+        rows = raw.get("top_collocates") or raw.get("top")
+    rows = rows or []
     result = ToolResult.success(
         tool="emotion_collocates", data=raw,
         coverage=Coverage(

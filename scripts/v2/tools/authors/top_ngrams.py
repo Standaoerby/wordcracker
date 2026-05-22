@@ -70,7 +70,15 @@ def top_ngrams_by_author(author_regex: str, n: int = 2, top: int = 20,
     if isinstance(raw, dict) and raw.get("error"):
         return ToolResult.fail(tool="top_ngrams_by_author", err_type="not_found",
                                message=str(raw["error"]), query=query)
-    rows = (raw.get("top_ngrams") if isinstance(raw, dict) else None) or []
+    # E15 P0 FIX (2026-05-22): v1 returns key «top» (line 597 of
+    # rag_tools.py), NOT «top_ngrams». Sprint #24 view emission code
+    # has been silently empty for months — top-ngrams was never
+    # actually rendered. Same class as B-R14-7/E14b. Read v1's actual
+    # key first; legacy «top_ngrams» fallback for test mocks.
+    rows = None
+    if isinstance(raw, dict):
+        rows = raw.get("top") or raw.get("top_ngrams")
+    rows = rows or []
 
     # E2: apply semantic-class lexicon filter
     if semantic_class and rows:
@@ -79,6 +87,8 @@ def top_ngrams_by_author(author_regex: str, n: int = 2, top: int = 20,
             before = len(rows)
             rows = filter_motion_verbs(rows, word_key="ngram")[:top]
             if isinstance(raw, dict):
+                # E15 — write both keys for downstream consistency
+                raw["top"] = rows
                 raw["top_ngrams"] = rows
                 raw["_semantic_filter"] = {
                     "class": "motion",

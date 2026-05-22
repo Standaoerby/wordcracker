@@ -148,19 +148,39 @@ def words_disappearing_after(year: int = 1920, top: int = 25) -> ToolResult:
                       else "internal"),
             message=err, query=query,
         )
-    rows = (raw.get("words") if isinstance(raw, dict) else None) or []
+    # E15 P0 FIX (2026-05-22): v1 words_disappearing_after (rag_tools.py:1381)
+    # returns key «top», NOT «words»; bucket counts live under
+    # «pre_bucket»/«post_bucket» dicts (with «books» field), NOT flat
+    # «books_before»/«books_after». Same class as B-R14-7 / E9 / E14b /
+    # E15. Read v1's actual keys first; legacy fallbacks for test mocks.
+    rows = None
+    if isinstance(raw, dict):
+        rows = raw.get("top") or raw.get("words")
+    rows = rows or []
     warnings: list[ToolWarning] = []
-    if isinstance(raw, dict) and raw.get("books_before"):
+    books_before = 0
+    books_after = 0
+    if isinstance(raw, dict):
+        # v1 actual shape — nested buckets
+        pre_b = raw.get("pre_bucket") or {}
+        post_b = raw.get("post_bucket") or {}
+        if isinstance(pre_b, dict):
+            books_before = int(pre_b.get("books") or 0)
+        if isinstance(post_b, dict):
+            books_after = int(post_b.get("books") or 0)
+        # Legacy flat fallback for test mocks
+        books_before = books_before or int(raw.get("books_before") or 0)
+        books_after = books_after or int(raw.get("books_after") or 0)
+    if books_before or books_after:
         warnings.append(ToolWarning(
             code="coverage",
-            message=f"{raw.get('books_before')} books before {year}, "
-                    f"{raw.get('books_after', 0)} after",
+            message=f"{books_before} books before {year}, "
+                    f"{books_after} after",
         ))
     result = ToolResult.success(
         tool="words_disappearing_after", data=raw,
         coverage=Coverage(
-            books_matched=(raw.get("books_before", 0) + raw.get("books_after", 0))
-                          if isinstance(raw, dict) else -1,
+            books_matched=(books_before + books_after) or -1,
             books_total=-1,
         ),
         warnings=warnings, query=query,
@@ -224,11 +244,14 @@ def _attach_disappearing_view(result, rows, *, year: int, top: int) -> None:
         for i, r in enumerate(rows[:top], start=1):
             if not isinstance(r, dict):
                 continue
+            # E15 — v1 actual key «drop_ratio»; legacy fallbacks for mocks
+            drop = (r.get("drop_ratio") or r.get("drop_factor")
+                    or r.get("ratio") or r.get("score"))
             view_rows.append({
                 "rank": i,
                 "word": r.get("word") or r.get("lemma") or "—",
-                "drop_factor": (r.get("drop_factor") or r.get("ratio")
-                                 or r.get("score") or "—"),
+                "drop_factor": (f"{drop:.1f}×" if isinstance(drop, (int, float))
+                                else (drop or "—")),
             })
         view = vb.build_top_n_table(
             rows=view_rows,

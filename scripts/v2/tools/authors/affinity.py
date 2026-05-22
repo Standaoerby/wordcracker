@@ -56,6 +56,40 @@ _LITERARY_PROPN_BLACKLIST = frozenset({
 })
 
 
+def _normalize_compare_shape(raw):
+    """E15 P0 FIX (2026-05-22): v1 compare_authors (rag_tools.py:857)
+    returns NESTED shape:
+        {"author1": {"regex", "slug", "top_unique": [...]},
+         "author2": {"regex", "slug", "top_unique": [...]},
+         "shared_high_affinity": [...],
+         "cosine_similarity": float,
+         "cosine_note": str,
+         "min_corpus_count": int}
+    NOT flat «top_unique_a / top_unique_b / books_a / books_b /
+    burrows_delta». Old wrapper read flat keys → top_unique_a/b always
+    empty → retry chain triggered every time → all views silently empty.
+    Phantom «burrows_delta» reference (never in v1 output) made the
+    metric row always None.
+
+    This normalizes the v1 shape to expose flat aliases the rest of
+    the wrapper (and downstream renderer + view) already expects.
+    Mutates raw in place; legacy flat-key test mocks pass through
+    unchanged because we only set keys that are missing.
+    Same class as B-R14-7 / E9 / E14b / E15.
+    """
+    if not isinstance(raw, dict):
+        return raw
+    a1 = raw.get("author1") if isinstance(raw.get("author1"), dict) else None
+    a2 = raw.get("author2") if isinstance(raw.get("author2"), dict) else None
+    if a1 is not None and "top_unique_a" not in raw:
+        raw["top_unique_a"] = a1.get("top_unique") or a1.get("top") or []
+        raw["slug_a"] = a1.get("slug")
+    if a2 is not None and "top_unique_b" not in raw:
+        raw["top_unique_b"] = a2.get("top_unique") or a2.get("top") or []
+        raw["slug_b"] = a2.get("slug")
+    return raw
+
+
 def _drop_author_self_name(author_regex: str, words: list[dict]) -> list[dict]:
     """Stan round 2 Q3: «фирменные слова Уайльда» returned **wilde** as a
     signature word. An author's own name shouldn't be in their signature
@@ -329,6 +363,9 @@ def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
 
     raw = _v1(author1_regex=author1_regex, author2_regex=author2_regex,
               top=top, min_corpus_count=min_corpus_count)
+    # E15 — normalize v1's nested shape into flat aliases before any
+    # downstream code reads top_unique_a/b. See _normalize_compare_shape.
+    raw = _normalize_compare_shape(raw)
     query = {"author1_regex": author1_regex, "author2_regex": author2_regex,
              "top": top, "min_corpus_count": min_corpus_count}
 
@@ -362,6 +399,8 @@ def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
                                      author2_regex=author2_regex,
                                      top=top,
                                      min_corpus_count=retry_threshold)
+                    # E15 — normalize retry result too
+                    retry_raw = _normalize_compare_shape(retry_raw)
                 except Exception:
                     retry_raw = None
                     continue
@@ -470,12 +509,11 @@ def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
     # Sprint 20+ B2 — stamp metric_explanations so renderer doesn't
     # invent direction. Stan Round 11: «чем выше delta, тем сильнее
     # влияние» — НЕВЕРНО, distance metric, lower = closer.
+    # E15 — removed phantom `burrows_delta` (v1 compare_authors never
+    # returns it; separate tool). Explain only metrics that are
+    # actually in the output.
     if isinstance(raw, dict):
         raw.setdefault("metric_explanations", []).extend([
-            {"metric": "burrows_delta",
-              "direction": "LOWER = more similar style (distance metric)",
-              "scale": "typically 0.3-1.5; <0.5 close, >0.8 distinct",
-              "interpret": "Stevenson 0.4385 closer to Doyle than Twain 0.6021"},
             {"metric": "cosine_similarity",
               "direction": "HIGHER = more similar (affinity vectors)",
               "scale": "0-1; cosine on top-N affinity word vectors",
@@ -487,11 +525,18 @@ def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
               "scale": "0+; integer",
               "interpret": "0 shared between distinct genres is normal"},
         ])
+    # E15 — v1 doesn't return flat books_a/b; books count is buried in
+    # the inner affinity_by_author calls and not re-exposed. Use -1
+    # (unknown) for coverage rather than producing garbage (-2 from
+    # -1 + -1).
     result = ToolResult.success(
         tool="compare_authors", data=raw,
         coverage=Coverage(
-            books_matched=raw.get("books_a", -1) + raw.get("books_b", -1)
-                          if isinstance(raw, dict) else -1,
+            books_matched=(
+                int(raw.get("books_a") or 0) + int(raw.get("books_b") or 0)
+                if isinstance(raw, dict)
+                   and (raw.get("books_a") or raw.get("books_b")) else -1
+            ),
             books_total=-1,
         ),
         warnings=warnings, query=query,
@@ -540,13 +585,16 @@ def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
         # Build entities — include only the non-empty sides. The empty
         # side is mentioned in caveats; renderer template knows to skip
         # its signature_words block.
+        # E15 — burrows_delta was a phantom field; v1 compare_authors never
+        # returned it (separate `burrows_delta` tool computes it). Show only
+        # cosine_similarity which v1 actually returns.
+        cosine_val = raw.get("cosine_similarity")
         entities = []
         if raw.get("top_unique_a"):
             entities.append({
                 "name": author1_regex.lstrip("^").rstrip(",").strip(),
                 "metrics": {
-                    "Burrows Delta": raw.get("burrows_delta"),
-                    "Cosine similarity": raw.get("cosine_similarity"),
+                    "Cosine similarity": cosine_val,
                 },
                 "signature_words": [
                     w.get("word") if isinstance(w, dict) else str(w)
@@ -557,8 +605,7 @@ def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
             entities.append({
                 "name": author2_regex.lstrip("^").rstrip(",").strip(),
                 "metrics": {
-                    "Burrows Delta": raw.get("burrows_delta"),
-                    "Cosine similarity": raw.get("cosine_similarity"),
+                    "Cosine similarity": cosine_val,
                 },
                 "signature_words": [
                     w.get("word") if isinstance(w, dict) else str(w)
