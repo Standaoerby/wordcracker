@@ -29,12 +29,20 @@ class CollectionBucketFilter(unittest.TestCase):
 
 class ConfidenceFloor(unittest.TestCase):
     """Stan round 6 R19: Doyle/Poe returned identical baseline list.
-    Mark as low-confidence so renderer tells user honestly."""
+    Mark as low-confidence so renderer tells user honestly.
+
+    Phase 2 contract: V1AuthorInfluences canonical key is `top` (see
+    scripts/v2/contracts/schemas.py). The pre-contract tests stored rows
+    under `closest` — that key was never returned by the real v1
+    (rag_tools.author_influences returns `{"pivot_author", "top": rows,
+    ...}`). Per R4, the mock is wrong, not the wrapper — fixture key
+    aligned with the real v1 shape below.
+    """
 
     def test_tight_cluster_marked_low(self):
         # 5 candidates with deltas within 0.502-0.510 — all near baseline
         raw = {
-            "closest": [
+            "top": [
                 {"author": "Beckford", "delta": 0.504},
                 {"author": "Oliphant", "delta": 0.509},
                 {"author": "Gosse",    "delta": 0.510},
@@ -50,7 +58,7 @@ class ConfidenceFloor(unittest.TestCase):
     def test_clear_winner_marked_high(self):
         # First candidate clearly closer than the rest
         raw = {
-            "closest": [
+            "top": [
                 {"author": "Lovecraft", "delta": 0.30},
                 {"author": "Bierce",    "delta": 0.48},
                 {"author": "Machen",    "delta": 0.52},
@@ -63,13 +71,13 @@ class ConfidenceFloor(unittest.TestCase):
 
     def test_too_few_candidates_no_annotation(self):
         # 2 candidates — can't compute meaningful spread
-        raw = {"closest": [{"author": "X", "delta": 0.5},
-                            {"author": "Y", "delta": 0.6}]}
+        raw = {"top": [{"author": "X", "delta": 0.5},
+                       {"author": "Y", "delta": 0.6}]}
         _annotate_confidence(raw, "^Z,")
         self.assertNotIn("similarity_confidence", raw)
 
     def test_missing_delta_field_safe(self):
-        raw = {"closest": [{"author": "X"}, {"author": "Y"}, {"author": "Z"}]}
+        raw = {"top": [{"author": "X"}, {"author": "Y"}, {"author": "Z"}]}
         # No delta field → can't compute → no annotation, no crash
         _annotate_confidence(raw, "^Z,")
         self.assertNotIn("similarity_confidence", raw)
