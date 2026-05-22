@@ -198,7 +198,15 @@ class V2PipelineE2E(unittest.TestCase):
         # Quoted "Преступление и наказание" → resolved via KNOWN_BOOKS directly,
         # so single-step affinity_by_book. No find_book chain needed.
         self.assertEqual(rr.results[0].tool, "affinity_by_book")
-        self.assertEqual(rr.results[0].data["args"]["pg_id"], "PG2554")
+        # Phase 4 — args dispatched to the wrapper live on
+        # `ToolResult.query`, not inside `data`. The pre-Phase-4 path
+        # echoed args back into `data["args"]`, but the v2 envelope
+        # (scripts/v2/_types.py) standardized this: `query` is the
+        # input, `data` is the v1 payload. Asserting on `.query` keeps
+        # the test honest even on machines where the real corpus is
+        # absent (data == None, ok == False), because routing — the
+        # actual behavior under test — still ran.
+        self.assertEqual(rr.results[0].query["pg_id"], "PG2554")
 
     def test_q14_uses_replacement_book(self):
         # Q14 was rewritten to use «Heart of Darkness» Conrad (PG219) since
