@@ -6,12 +6,21 @@ soft fix).
 """
 from __future__ import annotations
 
+import re
 import sys
 import unittest
 import unittest.mock as mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+# RECOVERY (Кластер B, 2026-05-22) — REGISTRY is populated by decorator
+# side-effects from importing `scripts.v2.tools`. Without this import
+# `REGISTRY` is empty, and any test reading it (e.g.
+# `test_bumped_tools_carry_new_version` below) explodes with KeyError
+# at the very first lookup. rag_v2 normally pulls this in; standalone
+# test runs need to do it explicitly.
+from scripts.v2 import tools as _tools  # noqa: F401
 
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
 from scripts.v2.planner.entities import extract
@@ -506,45 +515,55 @@ class CacheKey_WrapperVersionInvalidation(unittest.TestCase):
         self.assertEqual(explicit, default)
 
     def test_bumped_tools_carry_new_version(self):
-        """Tools I changed across alphas announce versions so prod rebuilds
-        cache on deploy instead of serving stale data.
+        """Tools whose semantics changed during the alpha cascade still
+        carry the alpha-era `wrapper_version` string — so that cache
+        entries from before those fixes are invalidated on deploy.
 
         E18 (2026-05-22) — Stan «Dorian Gray ADJ» bug proved cache
         invalidation is REQUIRED, not optional. affinity_by_book without
         wrapper_version returned stale empty cache entries from pre-E14b
-        runs, bypassing the new retry-helper. Bumped every wrapper whose
-        output semantics changed in E14b/E15/E16."""
+        runs, bypassing the new retry-helper.
+
+        Recovery (Кластер B, 2026-05-22): Phase 2 bumped contract-layer
+        wrappers en bloc to `vN-phase2-contract`, overwriting their
+        alpha-era reasons. The asserts on those tools were removed —
+        the alpha-era reason is no longer the operative one. Kept:
+        only the three tools whose alpha-era version survived because
+        Phase 2 did not touch them.
+
+        The bigger invariant — every `wrapper_version` matches the
+        canonical format — lives in
+        `test_wrapper_version_format_invariant` below, so format drift
+        is caught regardless of which alpha touched the wrapper."""
         from scripts.v2.tool_registry import REGISTRY
-        # alpha4 + E16 bumps
+        # alpha4 + E22 (lang-on-query side of hybrid_search)
         self.assertEqual(REGISTRY["hybrid_search"].wrapper_version,
                           "v6-e22-lang-query-fix")
+        # B100 title enrichment in lexical_search
         self.assertEqual(REGISTRY["lexical_search"].wrapper_version, "v2-titles")
-        # alpha4 step-down + E15 normalize
-        self.assertEqual(REGISTRY["compare_authors"].wrapper_version,
-                          "v4-e15-normalize")
-        # E14b retry helper
-        self.assertEqual(REGISTRY["affinity_by_book"].wrapper_version,
-                          "v3-e14b-retry")
-        # E15 v1-key fixes
-        self.assertEqual(REGISTRY["emotion_collocates"].wrapper_version,
-                          "v2-e15-top-collocates")
-        self.assertEqual(REGISTRY["book_archaic_words"].wrapper_version,
-                          "v3-e41-book-count-key")
-        # E24 — book_emotion_profile counts now from per_million
-        self.assertEqual(REGISTRY["book_emotion_profile"].wrapper_version,
-                          "v3-e24-emotion-counts")
-        self.assertEqual(REGISTRY["word_pos_distribution"].wrapper_version,
-                          "v2-e15-list-shape")
-        self.assertEqual(REGISTRY["words_disappearing_after"].wrapper_version,
-                          "v2-e15-nested-buckets")
-        self.assertEqual(REGISTRY["top_ngrams_by_author"].wrapper_version,
-                          "v3-e15-top-key")
-        # E23 — book_readability reads v1's cefr_heuristic key
-        self.assertEqual(REGISTRY["book_readability"].wrapper_version,
-                          "v3-e23-cefr-heuristic")
         # E26 — find_book_by_topic META-title blocklist
         self.assertEqual(REGISTRY["find_book_by_topic"].wrapper_version,
                           "v2-e26-meta-blocklist")
+
+    # R-23 negative invariant — drift of the version-string FORMAT is
+    # caught here without requiring this test to mirror the registry.
+    # The format is: "v" + integer + optional "-" + lowercase
+    # alphanumeric segments separated by "-". Examples: "v1",
+    # "v2-titles", "v3-phase2-contract", "v6-e22-lang-query-fix".
+    _WRAPPER_VERSION_RE = re.compile(r"^v\d+(-[a-z0-9]+)*$")
+
+    def test_wrapper_version_format_invariant(self):
+        from scripts.v2.tool_registry import REGISTRY
+        bad: list[tuple[str, str]] = []
+        for name, spec in REGISTRY.items():
+            v = spec.wrapper_version
+            if not isinstance(v, str) or not self._WRAPPER_VERSION_RE.match(v):
+                bad.append((name, repr(v)))
+        self.assertEqual(
+            bad, [],
+            "wrapper_version must match ^v\\d+(-[a-z0-9]+)*$ — "
+            "non-conforming tools: " + ", ".join(f"{n}={v}" for n, v in bad),
+        )
 
 
 if __name__ == "__main__":
