@@ -833,6 +833,29 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"\s+в\s+[«\"“‘][^»\"”’]{4,80}[»\"”’]"
          r".{0,40}\b(использу\w*|чаще|часто|намного\s+чаще)"),
      "book_vocab", 0.9),
+    # E17 (2026-05-22) — Stan prod: «характерные прилагательные в "The
+    # Picture of Dorian Gray"». No «книге» word, trigger word
+    # («характерные») BEFORE the «в», not after the quoted title.
+    # author_vocab line 781 matched first («характерн\w+\s+прилаг\w*»),
+    # but author_vocab priority is 85 vs book_vocab 100 — so book_vocab
+    # WINS once we have a matching rule. Add the rule with the same
+    # trigger words as author_vocab but require a quoted title (Latin
+    # quotes OR Russian guillemets) after «в» / «in» — preposition is
+    # OPTIONAL so «top-30 affinity words "Heart of Darkness"» also lands
+    # here. Title regex is loose to accept multi-word English titles
+    # (≥4 chars, ≤80) like "The Picture of Dorian Gray", "Crime and
+    # Punishment", "Heart of Darkness". Same vocabulary tier as
+    # author_vocab rule.
+    (_re(r"\b(фирменн\w+|характерн\w+|любим\w+|аффинн\w+|"
+         r"characteristic|distinctive|signature|favou?rite|affinity|high-affinity)\s+"
+         r"(слов\w*|прилаг\w*|глагол\w*|сущ\w*|лексик\w*|"
+         r"adjectives?|verbs?|nouns?|vocabulary|words?)\s+"
+         r"(?:(?:в|in|of)\s+)?[«\"“‘][^»\"”’]{4,80}[»\"”’]"),
+     "book_vocab", 0.92),
+    # E17 — mirror for «слова|лексика [BOOK_QUOTED]» without modifier
+    (_re(r"\b(слов\w+|лексик\w+|vocabulary|words?)\s+"
+         r"(?:в|in|of)\s+[«\"“‘][^»\"”’]{4,80}[»\"”’]"),
+     "book_vocab", 0.82),
 
     # ===== book_readability =====
     (_re(r"уровень\s+сложн\w*|cefr|flesch|reading\s+(level|grade)|"

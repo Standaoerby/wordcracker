@@ -318,6 +318,43 @@ def _conversation_summary(history: list[dict] | None, plan: plan_mod.QueryPlan) 
     }
 
 
+def _harvest_view_filter_values(view) -> dict:
+    """E17 (2026-05-22) — extract filter-value numbers from a RenderableView
+    that the template_executor renders as part of an «Применённые
+    фильтры:» block or provenance. These are not in tool data but ARE
+    in the user-visible answer, so numeric_audit must treat them as
+    legitimate sources.
+
+    Returns a flat dict {key: value} mixing empty_state.filters_applied
+    + provenance.requested + provenance.filtered. Keys are not used by
+    the audit (it walks values), but the dict shape lets numeric_audit's
+    _walk_numbers recurse naturally.
+    """
+    if view is None:
+        return {}
+    out: dict = {}
+    try:
+        es = getattr(view, "empty_state", None)
+        if es is not None:
+            fa = getattr(es, "filters_applied", None)
+            if isinstance(fa, dict):
+                out["empty_filters_applied"] = fa
+        prov = getattr(view, "provenance", None)
+        if prov is not None:
+            req = getattr(prov, "requested", None)
+            if isinstance(req, dict):
+                out["provenance_requested"] = req
+            filt = getattr(prov, "filtered", None)
+            if isinstance(filt, dict):
+                out["provenance_filtered"] = filt
+            ret = getattr(prov, "returned", None)
+            if isinstance(ret, dict):
+                out["provenance_returned"] = ret
+    except Exception:
+        pass
+    return out
+
+
 def _collect_render_instructions(results: list[ToolResult]) -> list[str]:
     """Pull `_render_note` strings out of every tool's data payload and
     promote them into a top-level field the LLM sees first. The Qwen3
@@ -1169,9 +1206,20 @@ def ask(
     # the critic flagged something; silent on a clean answer.
     critic_summary_records = [
         {"tool": r.tool, "ok": r.ok, "data": r.data,
+         # E17 (2026-05-22) — include r.query so numeric_audit treats
+         # filter values (min_corpus_count=200, top=30, etc) as legitimate
+         # numbers. Stan «Dorian Gray ADJ» bug: empty_state said «при
+         # min_corpus_count=200» and audit flagged 200 as «not in data»
+         # because query field was hidden in the harvest path.
+         "query": r.query,
          "coverage": {"books_matched": r.coverage.books_matched,
                       "books_total": r.coverage.books_total},
-         "warnings": [{"code": w.code, "message": w.message} for w in r.warnings]}
+         "warnings": [{"code": w.code, "message": w.message} for w in r.warnings],
+         # E17 — view-side filter values rendered by template_executor's
+         # empty_state block («Применённые фильтры: min_corpus_count=200»)
+         # also need to count as «in data».
+         "_view_filter_values": _harvest_view_filter_values(r.view),
+        }
         for r in rr.results
     ]
     verdict = critic_mod.review(

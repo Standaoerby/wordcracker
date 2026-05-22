@@ -205,7 +205,16 @@ def collect_data_numbers(tool_records: Iterable[dict]) -> set[float]:
 
     Also includes lengths of any lists found (so «top 10» can match the
     actual length of the returned list even if the answer phrases it as
-    a count rather than echoing every number in the list)."""
+    a count rather than echoing every number in the list).
+
+    E17 (2026-05-22) — also walks `query` (the tool's request parameters
+    like min_corpus_count=200) and `_view_filter_values` (numbers from
+    view.empty_state.filters_applied / provenance.requested). Stan «Dorian
+    Gray ADJ» bug: empty_state said «при min_corpus_count=200» and audit
+    flagged 200 because the harvest only looked at `data` + `coverage`.
+    The 200 IS in the user-visible answer, IS the actual filter value
+    the wrapper used — but the previous harvest missed it.
+    """
     out: set[float] = set()
     for rec in tool_records:
         if not isinstance(rec, dict):
@@ -216,6 +225,12 @@ def collect_data_numbers(tool_records: Iterable[dict]) -> set[float]:
         _walk_list_lengths(data, out, depth=0)
         cov = rec.get("coverage")
         _walk_numbers(cov, out)
+        # E17 — request parameters (filter values shown to user)
+        q = rec.get("query")
+        _walk_numbers(q, out)
+        # E17 — view-side filter values harvested by rag_v2 helper
+        view_aux = rec.get("_view_filter_values")
+        _walk_numbers(view_aux, out)
     return out
 
 
