@@ -62,9 +62,10 @@ def _rank_map(items: list[dict[str, Any]], key: str = "pg_id") -> dict[str, int]
     cost="medium",
     cacheable=True,
     # Sprint 22+ Stan B4: `lang` filter changes the output set. Bump.
-    # E18 (2026-05-22) — E16 added WORD_CONTEXTS view emission. Old
-    # cached entries don't have the view → renderer can't show examples.
-    wrapper_version="v4-e16-emit-view",
+    # E18 — E16 view emission. E20 — lang filter fix for stringified
+    # list shape ("['en']"). Both invalidate prior cache entries that
+    # may carry mismatched view/lang-drop behavior.
+    wrapper_version="v5-e20-lang-substring",
 )
 def hybrid_search(query: str, k: int = 12, per_retriever: int = 50,
                   author_filter: str | None = None,
@@ -202,10 +203,18 @@ def hybrid_search(query: str, k: int = 12, per_retriever: int = 50,
         for m in out_matches:
             meta = _meta_lookup(m["pg_id"])
             book_lang = (meta.get("language") or "").lower().strip()
+            # E20 (2026-05-22) — PG metadata stores `language` as a
+            # stringified Python list, e.g. "['en']" / "['en', 'fr']" /
+            # "['fr']", NOT plain "en". Old equality check
+            # (`book_lang == want`) was therefore always False — every
+            # match got dropped, giving the false «не встретилось в
+            # корпус» for ALL English-lit queries that supplied
+            # lang_hint. Substring containment handles both raw "en"
+            # and stringified-list shapes; bracketed multi-lang lists
+            # match when the wanted code is one of the entries.
             # Books with no language metadata are kept (better than
-            # over-aggressive filter). Books with mismatched lang are
-            # dropped — this is the actual user-visible fix.
-            if not book_lang or book_lang == want:
+            # over-aggressive filter).
+            if not book_lang or want in book_lang:
                 filtered.append(m)
             else:
                 lang_dropped += 1
