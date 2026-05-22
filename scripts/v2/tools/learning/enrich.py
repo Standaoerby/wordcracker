@@ -10,6 +10,8 @@ if str(_REPO) not in sys.path:
 
 from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult
+from scripts.v2.contracts import v1_contract
+from scripts.v2.contracts.schemas import V1EnrichWord, V1ExportWordList
 
 
 @tool(
@@ -34,14 +36,12 @@ from scripts.v2._types import Coverage, ToolResult
     requires=["word"],
     cost="medium",   # LLM round-trip
     cacheable=False,  # has its own on-disk word_dictionary cache
+    wrapper_version="v2-phase2-contract",
 )
+@v1_contract(v1_fn="learning_tools.enrich_word", schema=V1EnrichWord)
 def enrich_word(word: str, contexts=None, lemma_hint: str = "",
                 pos_hint: str = "", target_lang: str = "ru") -> ToolResult:
-    try:
-        from scripts.learning_tools import enrich_word as _v1
-    except ImportError as e:
-        return ToolResult.fail(tool="enrich_word", err_type="internal",
-                               message=f"v1 unavailable: {e}")
+    from learning_tools import enrich_word as _v1
     raw = _v1(word=word, contexts=contexts or [],
               lemma_hint=lemma_hint, pos_hint=pos_hint,
               target_lang=target_lang)
@@ -98,13 +98,16 @@ def enrich_word(word: str, contexts=None, lemma_hint: str = "",
                 "primary_family": raw.get("primary_family"),
                 "family_chain": raw.get("family_chain") or raw.get("etymology_chain") or [],
             }
+        # V1EnrichWord canonical: translation_ru / translation_<lang>, ipa,
+        # pos, definition_en.
         view = vb.build_etymology_bundle(
             word=word,
-            translation_ru=(raw.get("translation_ru") or raw.get("translation")
-                             if target_lang == "ru" else raw.get("translation")),
+            translation_ru=(raw.get("translation_ru")
+                            if target_lang == "ru"
+                            else raw.get("translation")),
             ipa=raw.get("ipa"),
-            pos=raw.get("pos") or raw.get("pos_tag"),
-            definition_en=raw.get("definition") or raw.get("definition_en"),
+            pos=raw.get("pos"),
+            definition_en=raw.get("definition_en"),
             etymology=etym,
             language="ru",
         )
@@ -140,16 +143,15 @@ def enrich_word(word: str, contexts=None, lemma_hint: str = "",
     requires=[],
     cost="cheap",
     cacheable=False,  # writes to disk
+    wrapper_version="v2-phase2-contract",
 )
+@v1_contract(v1_fn="learning_tools.export_word_list",
+             schema=V1ExportWordList)
 def export_word_list(words, format: str = "anki_csv",
                      out_path: str | None = None,
                      target_lang: str = "ru",
                      deck_name: str = "wordcracker") -> ToolResult:
-    try:
-        from scripts.learning_tools import export_word_list as _v1
-    except ImportError as e:
-        return ToolResult.fail(tool="export_word_list", err_type="internal",
-                               message=f"v1 unavailable: {e}")
+    from learning_tools import export_word_list as _v1
     raw = _v1(words=words, format=format, out_path=out_path,
               target_lang=target_lang, deck_name=deck_name)
     query = {"format": format, "n_words": len(words), "target_lang": target_lang}
@@ -168,11 +170,12 @@ def export_word_list(words, format: str = "anki_csv",
                     "csv": "csv", "tsv": "tsv",
                     "markdown": "markdown", "json": "json"}
         fmt_normalized = fmt_map.get(format, "csv")
+        # V1ExportWordList canonical: out_path, format, entries, content.
         view = vb.build_export_artifact(
             format=fmt_normalized,
-            content=str(raw.get("content") or raw.get("text") or "")[:8000],
-            filename_suggestion=raw.get("filename") or raw.get("out_path")
-                                  or f"wordcracker_export.{fmt_normalized.split('_')[-1]}",
+            content=str(raw.get("content") or "")[:8000],
+            filename_suggestion=(raw.get("out_path")
+                                 or f"wordcracker_export.{fmt_normalized.split('_')[-1]}"),
             item_count=len(words) if isinstance(words, list) else 0,
             language="ru",
         )

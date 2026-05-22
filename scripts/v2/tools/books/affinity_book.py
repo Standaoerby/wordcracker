@@ -17,6 +17,8 @@ from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
 from scripts.v2.tools.authors._surname_filter import filter_surnames
 from scripts.v2.tools.authors._corpus_artifacts import filter_corpus_artifacts
+from scripts.v2.contracts import v1_contract
+from scripts.v2.contracts.schemas import V1AffinityByBook
 
 
 @tool(
@@ -46,8 +48,10 @@ from scripts.v2.tools.authors._corpus_artifacts import filter_corpus_artifacts
     # new retry-step-down logic. Bumping wrapper_version invalidates all
     # stale empty entries; first request after deploy fully re-runs v1
     # with the retry helper.
-    wrapper_version="v3-e14b-retry",
+    wrapper_version="v4-phase2-contract",
 )
+@v1_contract(v1_fn="learning_tools.affinity_by_book",
+             schema=V1AffinityByBook)
 def affinity_by_book(pg_id: str, top: int = 50,
                      pos_filter: list[str] | None = None,
                      min_corpus_count: int = 200,
@@ -58,11 +62,7 @@ def affinity_by_book(pg_id: str, top: int = 50,
             message="pg_id is required and must be non-empty (e.g. 'PG1342')",
             query={"pg_id": pg_id},
         )
-    try:
-        from scripts.learning_tools import affinity_by_book as _v1
-    except ImportError as e:
-        return ToolResult.fail(tool="affinity_by_book", err_type="internal",
-                               message=f"v1 unavailable: {e}")
+    from learning_tools import affinity_by_book as _v1
 
     # E14 architectural fix — shared retry-on-empty helper.
     # `compare_authors` had step-down chain (500→200→100→50) for Poe/
@@ -86,8 +86,8 @@ def affinity_by_book(pg_id: str, top: int = 50,
         },
         threshold_arg="min_corpus_count",
         steps=(100, 50, 20, 10),
-        is_empty_fn=lambda r: not ((r or {}).get("top")
-                                    or (r or {}).get("top_words")),
+        # V1AffinityByBook canonical key is `top` (learning_tools.py:275).
+        is_empty_fn=lambda r: not (r or {}).get("top"),
         min_initial=50,
     )
     query = {"pg_id": pg_id, "top": top, "pos_filter": pos_filter,
@@ -103,11 +103,8 @@ def affinity_by_book(pg_id: str, top: int = 50,
                       else "internal"),
             message=err, query=query,
         )
-    # E14b — accept both v1's «top» and legacy «top_words» test-mock key
-    rows = None
-    if isinstance(raw, dict):
-        rows = raw.get("top") or raw.get("top_words")
-    rows = rows or []
+    # Phase 2 — V1AffinityByBook canonical key is `top`.
+    rows = (raw.get("top") if isinstance(raw, dict) else None) or []
     # Sprint 19+ — surname blocklist (see authors._surname_filter docstring).
     # Same defence layer as affinity_by_author: PG-metadata surnames +
     # curated literary characters. Stan 2026-05-19 «фамилии не должны
@@ -116,8 +113,6 @@ def affinity_by_book(pg_id: str, top: int = 50,
         rows, surname_dropped = filter_surnames(rows)
         rows, artifact_dropped = filter_corpus_artifacts(rows)
         if isinstance(raw, dict):
-            # E14b — write both keys for downstream consistency
-            raw["top_words"] = rows
             raw["top"] = rows
             notes = []
             if surname_dropped:
@@ -170,7 +165,8 @@ def affinity_by_book(pg_id: str, top: int = 50,
         from scripts.v2.view_types import DataValidity, EmptyReason
         if not isinstance(raw, dict):
             return result
-        title = raw.get("book_title") or raw.get("title") or pg_id
+        # V1AffinityByBook canonical key is `title` (no `book_title`).
+        title = raw.get("title") or pg_id
         if not rows:
             view = vb.build_top_n_table(
                 rows=[], columns=["rank", "word", "affinity"],
@@ -188,9 +184,10 @@ def affinity_by_book(pg_id: str, top: int = 50,
         for i, r in enumerate(rows[:top], start=1):
             if not isinstance(r, dict):
                 continue
+            # V1AffinityByBook rows: word, book_count, corpus_count, affinity.
             view_rows.append({
                 "rank": i,
-                "word": r.get("word") or r.get("token") or "—",
+                "word": r.get("word") or "—",
                 "affinity": (f"{r.get('affinity'):.3f}"
                               if isinstance(r.get("affinity"), (int, float))
                               else "—"),

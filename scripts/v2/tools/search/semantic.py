@@ -10,6 +10,8 @@ if str(_REPO) not in sys.path:
 
 from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
+from scripts.v2.contracts import v1_contract
+from scripts.v2.contracts.schemas import V1SemanticSearch
 
 
 @tool(
@@ -33,14 +35,13 @@ from scripts.v2._types import Coverage, ToolResult, ToolWarning
     requires=[],
     cost="medium",
     cacheable=True,
+    wrapper_version="v2-phase2-contract",
 )
+@v1_contract(v1_fn="scripts.rag_tools.semantic_search",
+             schema=V1SemanticSearch)
 def semantic_search(query: str, k: int = 8,
                     author_filter: str | None = None) -> ToolResult:
-    try:
-        from scripts.rag_tools import semantic_search as _v1
-    except ImportError as e:
-        return ToolResult.fail(tool="semantic_search", err_type="internal",
-                               message=f"v1 unavailable: {e}")
+    from scripts.rag_tools import semantic_search as _v1
     raw = _v1(query=query, k=k, author_filter=author_filter)
     qq = {"query": query, "k": k, "author_filter": author_filter}
     if isinstance(raw, dict) and raw.get("error"):

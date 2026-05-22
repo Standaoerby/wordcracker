@@ -10,6 +10,10 @@ if str(_REPO) not in sys.path:
 
 from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
+from scripts.v2.contracts import v1_contract
+from scripts.v2.contracts.schemas import (
+    V1TopNgramsByAuthor, V1LexicalDiversity,
+)
 
 
 @tool(
@@ -44,16 +48,14 @@ from scripts.v2._types import Coverage, ToolResult, ToolWarning
     timeout_s=120,
     # E18 (2026-05-22) — E15 now reads v1's «top» key first (was reading
     # phantom «top_ngrams» only → empty view). Bump to invalidate stale.
-    wrapper_version="v3-e15-top-key",
+    wrapper_version="v4-phase2-contract",
 )
+@v1_contract(v1_fn="scripts.rag_tools.top_ngrams_by_author",
+             schema=V1TopNgramsByAuthor)
 def top_ngrams_by_author(author_regex: str, n: int = 2, top: int = 20,
                          pos_filter=None, year_from=None, year_to=None,
                          country=None, semantic_class: str | None = None) -> ToolResult:
-    try:
-        from scripts.rag_tools import top_ngrams_by_author as _v1
-    except ImportError as e:
-        return ToolResult.fail(tool="top_ngrams_by_author", err_type="internal",
-                               message=f"v1 unavailable: {e}")
+    from scripts.rag_tools import top_ngrams_by_author as _v1
 
     # E2 (R-22 P2): when semantic_class is set, pull a wider top from v1
     # (lexicon filter will narrow). Without this, top=25 might contain
@@ -71,15 +73,9 @@ def top_ngrams_by_author(author_regex: str, n: int = 2, top: int = 20,
     if isinstance(raw, dict) and raw.get("error"):
         return ToolResult.fail(tool="top_ngrams_by_author", err_type="not_found",
                                message=str(raw["error"]), query=query)
-    # E15 P0 FIX (2026-05-22): v1 returns key «top» (line 597 of
-    # rag_tools.py), NOT «top_ngrams». Sprint #24 view emission code
-    # has been silently empty for months — top-ngrams was never
-    # actually rendered. Same class as B-R14-7/E14b. Read v1's actual
-    # key first; legacy «top_ngrams» fallback for test mocks.
-    rows = None
-    if isinstance(raw, dict):
-        rows = raw.get("top") or raw.get("top_ngrams")
-    rows = rows or []
+    # Phase 2 — V1TopNgramsByAuthor canonical key is `top` (rag_tools.py
+    # line ~597). Phantom `top_ngrams` fallback removed per R3.
+    rows = (raw.get("top") if isinstance(raw, dict) else None) or []
 
     # E2: apply semantic-class lexicon filter
     if semantic_class and rows:
@@ -88,9 +84,7 @@ def top_ngrams_by_author(author_regex: str, n: int = 2, top: int = 20,
             before = len(rows)
             rows = filter_motion_verbs(rows, word_key="ngram")[:top]
             if isinstance(raw, dict):
-                # E15 — write both keys for downstream consistency
                 raw["top"] = rows
-                raw["top_ngrams"] = rows
                 raw["_semantic_filter"] = {
                     "class": "motion",
                     "before": before,
@@ -140,13 +134,12 @@ def top_ngrams_by_author(author_regex: str, n: int = 2, top: int = 20,
     requires=["scope"],
     cost="medium",
     cacheable=True,
+    wrapper_version="v2-phase2-contract",
 )
+@v1_contract(v1_fn="scripts.rag_tools.lexical_diversity",
+             schema=V1LexicalDiversity)
 def lexical_diversity(scope) -> ToolResult:
-    try:
-        from scripts.rag_tools import lexical_diversity as _v1
-    except ImportError as e:
-        return ToolResult.fail(tool="lexical_diversity", err_type="internal",
-                               message=f"v1 unavailable: {e}")
+    from scripts.rag_tools import lexical_diversity as _v1
     raw = _v1(scope=scope)
     query = {"scope": scope}
     if isinstance(raw, dict) and raw.get("error"):
@@ -156,7 +149,11 @@ def lexical_diversity(scope) -> ToolResult:
             err_type=("invalid_args" if "scope" in err.lower() else "not_found"),
             message=err, query=query,
         )
-    n_books = raw.get("books_total", -1) if isinstance(raw, dict) else -1
+    # V1LexicalDiversity exposes books_used (per-author scope) — no
+    # generic books_total. Per-book / all_corpus scopes don't report
+    # a book count.
+    n_books = (raw.get("books_used", -1)
+                if isinstance(raw, dict) else -1)
     result = ToolResult.success(
         tool="lexical_diversity", data=raw,
         coverage=Coverage(books_matched=n_books, books_total=-1),
@@ -195,10 +192,11 @@ def _attach_top_ngrams_view(result, rows, author_regex: str,
         for i, r in enumerate(rows[:top], start=1):
             if not isinstance(r, dict):
                 continue
+            # V1TopNgramsByAuthor row_keys: ngram, count.
             view_rows.append({
                 "rank": i,
-                "ngram": r.get("ngram") or r.get("words") or r.get("phrase") or "—",
-                "count": r.get("count") or r.get("freq") or "—",
+                "ngram": r.get("ngram") or "—",
+                "count": r.get("count") or "—",
             })
         view = vb.build_top_n_table(
             rows=view_rows,
@@ -224,8 +222,11 @@ def _attach_lexical_diversity_view(result, raw, scope) -> None:
         from scripts.v2.view_types import DataValidity, EmptyReason
         if not isinstance(raw, dict):
             return
-        ttr = raw.get("ttr") or raw.get("aggregate_ttr") or raw.get("value")
-        per_book = raw.get("per_book") or raw.get("books") or []
+        # V1LexicalDiversity: book scope → `ttr`; author scope →
+        # `ttr_aggregate` + per-book lists `top_5_most_varied` /
+        # `bottom_5_least_varied`; all_corpus → `ttr`.
+        ttr = raw.get("ttr") or raw.get("ttr_aggregate")
+        per_book = raw.get("top_5_most_varied") or []
         scope_str = (str(scope) if not isinstance(scope, dict)
                      else f"книга {scope.get('book') or scope.get('pg_id')}"
                      if scope.get("book") or scope.get("pg_id")
@@ -246,9 +247,10 @@ def _attach_lexical_diversity_view(result, raw, scope) -> None:
         for i, b in enumerate(per_book[:30], start=1):
             if not isinstance(b, dict):
                 continue
+            # V1LexicalDiversity per-book rows: pg_id, tokens, types, ttr.
             view_rows.append({
                 "rank": i,
-                "book": b.get("title") or b.get("pg_id") or "—",
+                "book": b.get("pg_id") or "—",
                 "ttr": (f"{b.get('ttr'):.3f}" if isinstance(b.get("ttr"), (int, float)) else "—"),
             })
         caveats = []

@@ -49,7 +49,11 @@ LRU_SIZE = 512
 #
 #   "v1"        — pre-v5 (no view / data_validity in ToolResult)
 #   "v2-views"  — v5 Phase 2+ tools emit view + data_validity
-CACHE_SCHEMA_VERSION = "v2-views"
+#   "v3-ast-fp" — Phase 2 (REFACTOR_BRIEF): AST-fingerprint of
+#                  (wrapper, v1_callee) folded into key. Editing either
+#                  source invalidates cache automatically — no more
+#                  manual `wrapper_version` bumps to track.
+CACHE_SCHEMA_VERSION = "v3-ast-fp"
 
 # Per-tool TTL in seconds. Tools not listed = infinite (corpus_version is the
 # only invalidator). Etymology stays forever (Wiktionary is immutable for
@@ -79,15 +83,40 @@ def _normalize_args(args: dict) -> str:
     return json.dumps(cleaned, sort_keys=True, ensure_ascii=False, default=str)
 
 
+def _ast_fingerprint_for(tool: str) -> str:
+    """Compute an AST fingerprint of (wrapper_fn, v1_callee) for `tool`.
+
+    Returns "" when the tool isn't contract-bound (legacy/v2-native).
+    Cached at module level — fingerprints don't change at runtime.
+    """
+    cached = _AST_FP_CACHE.get(tool)
+    if cached is not None:
+        return cached
+    try:
+        from scripts.v2.contracts.registry import wrapper_fingerprint_for_tool
+        fp = wrapper_fingerprint_for_tool(tool) or ""
+    except Exception as e:
+        log.debug("ast fingerprint lookup failed for %s: %s", tool, e)
+        fp = ""
+    _AST_FP_CACHE[tool] = fp
+    return fp
+
+
+_AST_FP_CACHE: dict[str, str] = {}
+
+
 def cache_key(tool: str, args: dict, wrapper_version: str = "v1") -> str:
     norm = _normalize_args(args)
-    # Sprint 21+ (Stan B100): wrapper_version becomes part of the hash so
-    # bumping the wrapper invalidates old entries automatically.
-    # v3.3.1 — also fold CACHE_SCHEMA_VERSION at hash front so a schema
-    # bump globally invalidates ALL cached entries across all tools
-    # (e.g. when ToolResult adds .view / .data_validity in Phase 2.5).
+    # Phase 2 (REFACTOR_BRIEF R-23 Tier 1A) — AST fingerprint of the
+    # wrapper + its v1 callee. Touching either source flips the
+    # fingerprint, so the next call after deploy reads through-not-
+    # from-cache automatically. Previously `wrapper_version` had to be
+    # bumped by hand (and was forgotten — Stan B100 was the original
+    # incident; coverage was opt-in across ~10/37 tools).
+    ast_fp = _ast_fingerprint_for(tool)
     h = hashlib.sha256(
-        (f"{CACHE_SCHEMA_VERSION}\0{wrapper_version}\0" + norm).encode("utf-8")
+        (f"{CACHE_SCHEMA_VERSION}\0{wrapper_version}\0{ast_fp}\0" + norm)
+        .encode("utf-8")
     ).hexdigest()[:16]
     # v3.3.1 — "__" separator (was ":") — NTFS reserves ":" for ADS, so
     # the old key shape broke any Windows-side dev/testing of cache.

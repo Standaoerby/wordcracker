@@ -22,6 +22,10 @@ from scripts.v2._types import Coverage, ToolResult, ToolWarning
 from scripts.v2.tools._result_filters import (
     apply_filters, drop_null_authors, dedup_book_editions,
 )
+from scripts.v2.contracts import v1_contract
+from scripts.v2.contracts.schemas import (
+    V1TopAuthorsBy, V1TopAuthorsByCountry,
+)
 
 
 # Sprint 11.2 cache: pre-built author → tokens lookup table. Built by
@@ -76,7 +80,10 @@ _GENERIC_SUBSTRINGS = (
     requires=[],
     cost="medium",
     cacheable=True,
+    wrapper_version="v2-phase2-contract",
 )
+@v1_contract(v1_fn="scripts.rag_tools.top_authors_by",
+             schema=V1TopAuthorsBy)
 def top_authors_by(metric: str = "books", top: int = 10, lang: str = "en",
                    include_generic: bool = False) -> ToolResult:
     query = {"metric": metric, "top": top, "lang": lang,
@@ -121,14 +128,7 @@ def top_authors_by(metric: str = "books", top: int = 10, lang: str = "en",
             return result
         # Fall through to live scan if cache absent
 
-    try:
-        from scripts.rag_tools import top_authors_by as _v1
-    except ImportError as e:
-        return ToolResult.fail(
-            tool="top_authors_by", err_type="internal",
-            message=f"v1 rag_tools unavailable: {e}",
-        )
-
+    from scripts.rag_tools import top_authors_by as _v1
     raw = _v1(metric=metric, top=top, lang=lang, include_generic=include_generic)
 
     if isinstance(raw, dict) and raw.get("error"):
@@ -174,22 +174,17 @@ def top_authors_by(metric: str = "books", top: int = 10, lang: str = "en",
     requires=["country"],
     cost="medium",
     cacheable=True,
+    wrapper_version="v2-phase2-contract",
 )
+@v1_contract(v1_fn="scripts.rag_tools.top_authors_by_country",
+             schema=V1TopAuthorsByCountry)
 def top_authors_by_country(country: str, metric: str = "books", top: int = 20) -> ToolResult:
     if not country or not country.strip():
         return ToolResult.fail(
             tool="top_authors_by_country", err_type="invalid_args",
             message="country code required (e.g. 'GB')",
         )
-
-    try:
-        from scripts.rag_tools import top_authors_by_country as _v1
-    except ImportError as e:
-        return ToolResult.fail(
-            tool="top_authors_by_country", err_type="internal",
-            message=f"v1 rag_tools unavailable: {e}",
-        )
-
+    from scripts.rag_tools import top_authors_by_country as _v1
     raw = _v1(country=country, metric=metric, top=top)
     query = {"country": country, "metric": metric, "top": top}
 

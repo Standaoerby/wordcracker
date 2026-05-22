@@ -10,6 +10,8 @@ if str(_REPO) not in sys.path:
 
 from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
+from scripts.v2.contracts import v1_contract
+from scripts.v2.contracts.schemas import V1EmotionCollocates
 
 
 @tool(
@@ -35,15 +37,13 @@ from scripts.v2._types import Coverage, ToolResult, ToolWarning
     # E15/E17 — wrapper now reads v1's `top_collocates` key (was reading
     # `top` and silently returning empty). Bump invalidates entries from
     # all pre-E15 runs that cached the empty result.
-    wrapper_version="v2-e15-top-collocates",
+    wrapper_version="v3-phase2-contract",
 )
+@v1_contract(v1_fn="scripts.rag_tools.emotion_collocates",
+             schema=V1EmotionCollocates)
 def emotion_collocates(scope, emotion: str, window: int = 4,
                        top: int = 25) -> ToolResult:
-    try:
-        from scripts.rag_tools import emotion_collocates as _v1
-    except ImportError as e:
-        return ToolResult.fail(tool="emotion_collocates", err_type="internal",
-                               message=f"v1 unavailable: {e}")
+    from scripts.rag_tools import emotion_collocates as _v1
     raw = _v1(scope=scope, emotion=emotion, window=window, top=top)
     query = {"scope": scope, "emotion": emotion, "window": window, "top": top}
     if isinstance(raw, dict) and raw.get("error"):
@@ -54,24 +54,13 @@ def emotion_collocates(scope, emotion: str, window: int = 4,
                       else "not_found"),
             message=err, query=query,
         )
-    # E15 P0 FIX (2026-05-22): v1 returns key «top_collocates» (line 2052
-    # of rag_tools.py), NOT «top». Old wrapper read wrong key → rows
-    # always empty → view always EMPTY_EXPECTED. Same class as B-R14-7
-    # (learning_words «results» vs «words»), E9 (word_contexts «context»
-    # vs «snippet»), E14b (affinity_by_book «top» vs «top_words»).
-    # R-22 P5 («слова страха у По и Лавкрафта одновременно») got
-    # nothing meaningful — both authors silently empty. Fix: read v1's
-    # actual key; legacy «top» fallback for test mocks.
-    rows = None
-    if isinstance(raw, dict):
-        rows = raw.get("top_collocates") or raw.get("top")
-    rows = rows or []
+    # Phase 2 — V1EmotionCollocates declares canonical `top_collocates`
+    # (rag_tools.py:2052). Phantom `top` fallback removed per R3.
+    rows = (raw.get("top_collocates")
+             if isinstance(raw, dict) else None) or []
     result = ToolResult.success(
         tool="emotion_collocates", data=raw,
-        coverage=Coverage(
-            books_matched=raw.get("n_books", -1) if isinstance(raw, dict) else -1,
-            books_total=-1,
-        ),
+        coverage=Coverage(books_matched=-1, books_total=-1),
         warnings=[ToolWarning("no_collocates", "no words near emotion anchors")]
                  if not rows else [],
         query=query,
@@ -91,9 +80,12 @@ def emotion_collocates(scope, emotion: str, window: int = 4,
         for c in (rows or [])[:top]:
             if not isinstance(c, dict):
                 continue
+            # Per V1EmotionCollocates row_keys — only `word`, `count`.
+            # `npmi` only meaningful if a metric was applied; v1 returns
+            # raw counts so this stays None at the view layer.
             collocates.append({
-                "token": c.get("word") or c.get("token") or "—",
-                "npmi": c.get("npmi") or c.get("score"),
+                "token": c.get("word") or "—",
+                "npmi": None,
                 "count": c.get("count"),
             })
         view = vb.build_collocates(

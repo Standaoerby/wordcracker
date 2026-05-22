@@ -10,6 +10,10 @@ if str(_REPO) not in sys.path:
 
 from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult
+from scripts.v2.contracts import v1_contract
+from scripts.v2.contracts.schemas import (
+    V1AuthorProfile, V1AuthorInfluences, V1AuthorAttribution,
+)
 
 
 @tool(
@@ -28,7 +32,10 @@ from scripts.v2._types import Coverage, ToolResult
     cost="heavy",
     cacheable=True,
     timeout_s=60,
+    wrapper_version="v2-phase2-contract",
 )
+@v1_contract(v1_fn="scripts.rag_tools.author_profile",
+             schema=V1AuthorProfile)
 def author_profile(author_regex: str, country: str | None = None) -> ToolResult:
     # Sprint 7.2: AuthorProfile SQLite store is the fast path. Re-asks for
     # the same author return in <5ms instead of paying the ~11s parallel
@@ -44,27 +51,29 @@ def author_profile(author_regex: str, country: str | None = None) -> ToolResult:
         md = cached.get("metadata") or {}
         result = ToolResult.success(
             tool="author_profile", data=cached,
-            coverage=Coverage(books_matched=md.get("books_total", -1),
-                              books_total=-1),
+            coverage=Coverage(
+                books_matched=md.get("books_matched", -1),
+                books_total=-1,
+            ),
             query=query,
         )
         _attach_author_profile_view(result, cached, author_regex)
         return result
     # Cache miss + build failed → fall through to direct v1 call so we
     # at least return *something* useful instead of bubbling up an error.
-    try:
-        from scripts.rag_tools import author_profile as _v1
-    except ImportError as e:
-        return ToolResult.fail(tool="author_profile", err_type="internal",
-                               message=f"v1 unavailable: {e}")
+    from scripts.rag_tools import author_profile as _v1
     raw = _v1(author_regex=author_regex, country=country)
     if isinstance(raw, dict) and raw.get("error"):
         return ToolResult.fail(tool="author_profile", err_type="not_found",
                                message=str(raw["error"]), query=query)
     md = (raw.get("metadata") if isinstance(raw, dict) else None) or {}
+    # V1AuthorMetadata canonical key is books_matched; metadata sub-dict
+    # mirrors that shape.
     result = ToolResult.success(
         tool="author_profile", data=raw,
-        coverage=Coverage(books_matched=md.get("books_total", -1), books_total=-1),
+        coverage=Coverage(
+            books_matched=md.get("books_matched", -1), books_total=-1,
+        ),
         query=query,
     )
     _attach_author_profile_view(result, raw, author_regex)
@@ -86,13 +95,12 @@ def author_profile(author_regex: str, country: str | None = None) -> ToolResult:
     requires=["author"],
     cost="medium",
     cacheable=True,
+    wrapper_version="v2-phase2-contract",
 )
+@v1_contract(v1_fn="scripts.rag_tools.author_influences",
+             schema=V1AuthorInfluences)
 def author_influences(author_regex: str, top: int = 10) -> ToolResult:
-    try:
-        from scripts.rag_tools import author_influences as _v1
-    except ImportError as e:
-        return ToolResult.fail(tool="author_influences", err_type="internal",
-                               message=f"v1 unavailable: {e}")
+    from scripts.rag_tools import author_influences as _v1
     # Sprint 16 Phase B1: ask v1 for more candidates than `top` so that
     # after filtering aggregate buckets we still have `top` valid rows.
     # Stan round 6 R19: Doyle/Poe returned identical top — Burrows Delta
@@ -103,13 +111,13 @@ def author_influences(author_regex: str, top: int = 10) -> ToolResult:
     if isinstance(raw, dict) and raw.get("error"):
         return ToolResult.fail(tool="author_influences", err_type="not_found",
                                message=str(raw["error"]), query=query)
+    # Phase 2 — V1AuthorInfluences canonical key is `top`. The phantom
+    # `closest`/`neighbours`/`authors` aliases never existed in v1.
     if isinstance(raw, dict):
-        for key in ("closest", "neighbours", "top", "authors"):
-            lst = raw.get(key)
-            if isinstance(lst, list):
-                filtered = [r for r in lst if not _is_collection_bucket(r)]
-                # Trim back to requested `top` after filtering
-                raw[key] = filtered[:top]
+        lst = raw.get("top")
+        if isinstance(lst, list):
+            filtered = [r for r in lst if not _is_collection_bucket(r)]
+            raw["top"] = filtered[:top]
 
         # Sprint 16 Phase B2: confidence floor. If the top-N distances
         # are all near corpus baseline (small range), the «closest authors»
@@ -151,17 +159,13 @@ def _annotate_confidence(raw: dict, author_regex: str) -> None:
     baseline-overlap. LLM render sees `confidence: low` + note → tells
     user honestly «no clear stylistic match, this author sits near
     corpus mean»."""
-    rows = None
-    for key in ("closest", "neighbours", "top", "authors"):
-        lst = raw.get(key)
-        if isinstance(lst, list) and lst:
-            rows = lst
-            break
+    rows = raw.get("top") if isinstance(raw.get("top"), list) else None
     if not rows:
         return
     distances: list[float] = []
     for r in rows[:10]:
-        d = r.get("delta") or r.get("distance") or r.get("score")
+        # V1AuthorInfluences row keys: author, delta, books_in_training.
+        d = r.get("delta")
         if isinstance(d, (int, float)):
             distances.append(float(d))
     if len(distances) < 3:
@@ -222,13 +226,12 @@ def _is_collection_bucket(row) -> bool:
     requires=[],
     cost="medium",
     cacheable=False,  # texts are unique, no point caching
+    wrapper_version="v2-phase2-contract",
 )
+@v1_contract(v1_fn="scripts.rag_tools.author_attribution",
+             schema=V1AuthorAttribution)
 def author_attribution(text: str, top: int = 5) -> ToolResult:
-    try:
-        from scripts.rag_tools import author_attribution as _v1
-    except ImportError as e:
-        return ToolResult.fail(tool="author_attribution", err_type="internal",
-                               message=f"v1 unavailable: {e}")
+    from scripts.rag_tools import author_attribution as _v1
     raw = _v1(text=text, top=top)
     query = {"text_chars": len(text), "top": top}
     if isinstance(raw, dict) and raw.get("error"):
@@ -250,24 +253,31 @@ def _attach_author_profile_view(result, raw, author_regex: str) -> None:
         from scripts.v2.view_types import DataValidity
         if not isinstance(raw, dict):
             return
+        # V1AuthorProfile shape: metadata dict (from author_metadata),
+        # signature dict (from affinity_by_author), top_bigrams,
+        # diversity, influences, dominant_emotions — each is a nested
+        # dict containing the relevant tool result.
         md = raw.get("metadata") or {}
-        author_canonical = (md.get("author")
-                            or author_regex.lstrip("^").rstrip(",").strip())
-        sig = raw.get("signature_words") or raw.get("top_signature") or []
-        if isinstance(sig, list):
+        am = md.get("authors_matched") or []
+        author_canonical = (
+            (am[0] if am and isinstance(am[0], str) else None)
+            or author_regex.lstrip("^").rstrip(",").strip()
+        )
+        sig_block = raw.get("signature") or {}
+        sig_rows = sig_block.get("top") if isinstance(sig_block, dict) else []
+        sig_words = []
+        if isinstance(sig_rows, list):
             sig_words = [s.get("word") if isinstance(s, dict) else str(s)
-                         for s in sig]
-        else:
-            sig_words = []
-        infl = raw.get("influences") or []
-        if isinstance(infl, list):
+                         for s in sig_rows]
+        infl_block = raw.get("influences") or {}
+        infl_rows = infl_block.get("top") if isinstance(infl_block, dict) else []
+        infl_names = []
+        if isinstance(infl_rows, list):
             infl_names = [i.get("author") if isinstance(i, dict) else str(i)
-                          for i in infl[:10]]
-        else:
-            infl_names = []
-        diversity = raw.get("lexical_diversity")
-        if isinstance(diversity, dict):
-            diversity = diversity.get("ttr") or diversity.get("value")
+                          for i in infl_rows[:10]]
+        div_block = raw.get("diversity") or {}
+        diversity = (div_block.get("ttr_aggregate")
+                     or div_block.get("ttr")) if isinstance(div_block, dict) else None
         view = vb.build_top_n_table(  # use TOP_N as fallback since composite stub
             rows=[],
             columns=["x"],
@@ -284,7 +294,7 @@ def _attach_author_profile_view(result, raw, author_regex: str) -> None:
                 "metadata": {
                     "birth_year": md.get("year_of_birth_min"),
                     "death_year": md.get("year_of_death_max"),
-                    "books_in_corpus": md.get("books_total"),
+                    "books_in_corpus": md.get("books_matched"),
                 },
                 "signature_words": sig_words,
                 "lexical_diversity": diversity,
@@ -310,11 +320,7 @@ def _attach_author_influences_view(result, raw, author_regex: str,
         )
         if not isinstance(raw, dict):
             return
-        rows = None
-        for key in ("closest", "neighbours", "top", "authors"):
-            if isinstance(raw.get(key), list) and raw[key]:
-                rows = raw[key]
-                break
+        rows = raw.get("top") if isinstance(raw.get("top"), list) else None
         if not rows:
             view = vb.build_top_n_table(
                 rows=[], columns=["rank", "author", "delta"],
@@ -332,10 +338,11 @@ def _attach_author_influences_view(result, raw, author_regex: str,
         for i, r in enumerate(rows[:top], start=1):
             if not isinstance(r, dict):
                 continue
-            d = r.get("delta") or r.get("distance") or r.get("score")
+            # V1AuthorInfluences rows: author, delta, books_in_training.
+            d = r.get("delta")
             view_rows.append({
                 "rank": i,
-                "author": r.get("author") or r.get("name") or "—",
+                "author": r.get("author") or "—",
                 "delta": (f"{d:.4f}" if isinstance(d, (int, float)) else "—"),
             })
         confidence = raw.get("similarity_confidence")
@@ -374,15 +381,17 @@ def _attach_author_attribution_view(result, raw) -> None:
         from scripts.v2.view_types import DataValidity
         if not isinstance(raw, dict):
             return
-        cands_raw = raw.get("candidates") or raw.get("top") or []
+        # V1AuthorAttribution canonical key is `top` with rows
+        # {author, delta, books_in_training} (rag_tools.py:1739).
+        cands_raw = raw.get("top") or []
         cands = []
         for c in cands_raw[:10]:
             if not isinstance(c, dict):
                 continue
             cands.append({
-                "author": c.get("author") or c.get("name", "—"),
-                "score": c.get("delta") or c.get("score") or c.get("distance"),
-                "books_matched": c.get("books_matched") or c.get("books"),
+                "author": c.get("author") or "—",
+                "score": c.get("delta"),
+                "books_matched": c.get("books_in_training"),
             })
         view = vb.build_attribution_result(
             candidates=cands,

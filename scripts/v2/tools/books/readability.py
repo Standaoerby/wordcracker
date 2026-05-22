@@ -10,6 +10,10 @@ if str(_REPO) not in sys.path:
 
 from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult
+from scripts.v2.contracts import v1_contract
+from scripts.v2.contracts.schemas import (
+    V1BookReadability, V1BookArchaicWords,
+)
 
 
 @tool(
@@ -31,27 +35,18 @@ from scripts.v2._types import Coverage, ToolResult
     # (was reading non-existent `cefr`/`cefr_estimate` → always None
     # in the view). Persona Q5/Q8 «насколько Дракула сложна для
     # изучающих английский» showed CEFR empty.
-    wrapper_version="v3-e23-cefr-heuristic",
+    wrapper_version="v4-phase2-contract",
 )
+@v1_contract(v1_fn="scripts.rag_tools.book_readability",
+             schema=V1BookReadability)
 def book_readability(pg_id: str, sample_chars: int = 200_000) -> ToolResult:
-    # Defensive — pre-existing crash from journalctl 2026-05-21:
-    # «AttributeError: 'NoneType' object has no attribute 'upper'» at
-    # rag_tools.book_readability:1120 → `pg = pg_id.upper()`. Triggers
-    # when planner emits a step with pg_id=None (unresolved find_book
-    # chain or v4 LLM-planner schema gap). Hard-fail with invalid_args
-    # so the renderer can surface a friendly «нужен pg_id» message
-    # instead of an internal traceback.
     if not pg_id or (isinstance(pg_id, str) and not pg_id.strip()):
         return ToolResult.fail(
             tool="book_readability", err_type="invalid_args",
             message="pg_id is required and must be non-empty (e.g. 'PG1342')",
             query={"pg_id": pg_id},
         )
-    try:
-        from scripts.rag_tools import book_readability as _v1
-    except ImportError as e:
-        return ToolResult.fail(tool="book_readability", err_type="internal",
-                               message=f"v1 unavailable: {e}")
+    from scripts.rag_tools import book_readability as _v1
     raw = _v1(pg_id=pg_id, sample_chars=sample_chars)
     query = {"pg_id": pg_id, "sample_chars": sample_chars}
     if isinstance(raw, dict) and raw.get("error"):
@@ -115,15 +110,12 @@ def book_readability(pg_id: str, sample_chars: int = 200_000) -> ToolResult:
         from scripts.v2.view_types import DataValidity
         if not isinstance(raw, dict):
             return result
-        title = raw.get("book_title") or raw.get("title") or pg_id
-        flesch = raw.get("flesch") or raw.get("flesch_reading_ease")
-        fk = raw.get("flesch_kincaid") or raw.get("fk_grade") or raw.get("flesch_kincaid_grade")
-        # E23 (2026-05-22) — v1 returns key `cefr_heuristic`
-        # (rag_tools.py:1169), not `cefr` / `cefr_estimate`. Persona test
-        # Q5/Q8: «насколько Дракула сложна для изучающих английский»
-        # showed CEFR пуст — exactly the metric the user asked for.
-        cefr = (raw.get("cefr_heuristic") or raw.get("cefr")
-                or raw.get("cefr_estimate"))
+        # V1BookReadability canonical keys: title, flesch_reading_ease,
+        # flesch_kincaid_grade, cefr_heuristic, words. No phantom aliases.
+        title = raw.get("title") or pg_id
+        flesch = raw.get("flesch_reading_ease")
+        fk = raw.get("flesch_kincaid_grade")
+        cefr = raw.get("cefr_heuristic")
         wc = raw.get("total_words_estimate") or raw.get("words")
         if flesch is not None or fk is not None:
             view = vb.build_readability_summary(
@@ -161,8 +153,10 @@ def book_readability(pg_id: str, sample_chars: int = 200_000) -> ToolResult:
     cacheable=True,
     # E41 — view now reads v1's `book_count` key (not phantom `count` /
     # `frequency` → empty column). Invalidates entries with «—» values.
-    wrapper_version="v3-e41-book-count-key",
+    wrapper_version="v4-phase2-contract",
 )
+@v1_contract(v1_fn="learning_tools.book_archaic_words",
+             schema=V1BookArchaicWords)
 def book_archaic_words(pg_id: str, top: int = 30) -> ToolResult:
     if not pg_id or (isinstance(pg_id, str) and not pg_id.strip()):
         return ToolResult.fail(
@@ -170,11 +164,7 @@ def book_archaic_words(pg_id: str, top: int = 30) -> ToolResult:
             message="pg_id is required and must be non-empty (e.g. 'PG345')",
             query={"pg_id": pg_id},
         )
-    try:
-        from scripts.learning_tools import book_archaic_words as _v1
-    except ImportError as e:
-        return ToolResult.fail(tool="book_archaic_words", err_type="internal",
-                               message=f"v1 unavailable: {e}")
+    from learning_tools import book_archaic_words as _v1
     raw = _v1(pg_id=pg_id, top=top)
     query = {"pg_id": pg_id, "top": top}
     if isinstance(raw, dict) and raw.get("error"):
@@ -192,14 +182,11 @@ def book_archaic_words(pg_id: str, top: int = 30) -> ToolResult:
         from scripts.v2.view_types import DataValidity, EmptyReason
         if not isinstance(raw, dict):
             return result
-        title = raw.get("book_title") or raw.get("title") or pg_id
-        # E15 P0 FIX — v1 book_archaic_words returns key «top» (line 777
-        # of learning_tools.py), NOT «archaic_words»/«top_words»/«words».
-        # Archaic-words view was always empty. Read v1's actual key first.
-        rows = (raw.get("top")
-                or raw.get("archaic_words")
-                or raw.get("top_words")
-                or raw.get("words") or [])
+        # V1BookArchaicWords doesn't include title at top level — fall
+        # back to pg_id for the headline.
+        title = pg_id
+        # Phase 2 — V1BookArchaicWords canonical key is `top`.
+        rows = raw.get("top") or []
         if not rows:
             view = vb.build_top_n_table(
                 rows=[], columns=["rank", "word", "frequency"],
@@ -215,15 +202,11 @@ def book_archaic_words(pg_id: str, top: int = 30) -> ToolResult:
         for i, r in enumerate(rows[:top], start=1):
             if not isinstance(r, dict):
                 continue
-            # E41 (2026-05-22) — v1 book_archaic_words returns row key
-            # `book_count` (learning_tools.py:768), NOT `count`/«frequency».
-            # Stan persona prod: «архаизмы в Dracula» showed frequency
-            # column «—» for all 20 archaic words. Same B-R14-7 class.
+            # V1BookArchaicWords rows: word, book_count, source, note.
             view_rows.append({
                 "rank": i,
-                "word": r.get("word") or r.get("lemma") or "—",
-                "frequency": (r.get("book_count") or r.get("count")
-                              or r.get("frequency") or "—"),
+                "word": r.get("word") or "—",
+                "frequency": r.get("book_count") or "—",
             })
         view = vb.build_top_n_table(
             rows=view_rows,

@@ -1,0 +1,3 @@
+# Единые концы строк: LF в репозитории и при checkout.
+# Код исполняется в Docker/Linux — CRLF ломает .sh-скрипты и docker entrypoints.
+* text=auto eol=lf

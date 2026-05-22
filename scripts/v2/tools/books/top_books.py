@@ -10,6 +10,10 @@ if str(_REPO) not in sys.path:
 
 from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
+from scripts.v2.contracts import v1_contract
+from scripts.v2.contracts.schemas import (
+    V1TopBooksByDownloads, V1TopBooksByRecency, V1BookEmotionProfile,
+)
 
 
 @tool(
@@ -30,14 +34,13 @@ from scripts.v2._types import Coverage, ToolResult, ToolWarning
     requires=[],
     cost="cheap",
     cacheable=True,
+    wrapper_version="v2-phase2-contract",
 )
+@v1_contract(v1_fn="scripts.rag_tools.top_books_by_downloads",
+             schema=V1TopBooksByDownloads)
 def top_books_by_downloads(top: int = 20, lang: str = "en",
                            author_regex: str | None = None) -> ToolResult:
-    try:
-        from scripts.rag_tools import top_books_by_downloads as _v1
-    except ImportError as e:
-        return ToolResult.fail(tool="top_books_by_downloads", err_type="internal",
-                               message=f"v1 unavailable: {e}")
+    from scripts.rag_tools import top_books_by_downloads as _v1
     raw = _v1(top=top, lang=lang, author_regex=author_regex)
     query = {"top": top, "lang": lang, "author_regex": author_regex}
     if isinstance(raw, dict) and raw.get("error"):
@@ -77,15 +80,14 @@ def top_books_by_downloads(top: int = 20, lang: str = "en",
     requires=[],
     cost="cheap",
     cacheable=True,
+    wrapper_version="v2-phase2-contract",
 )
+@v1_contract(v1_fn="scripts.rag_tools.top_books_by_recency",
+             schema=V1TopBooksByRecency)
 def top_books_by_recency(top: int = 20, lang: str = "en",
                          author_regex: str | None = None,
                          metric: str = "pg_id") -> ToolResult:
-    try:
-        from scripts.rag_tools import top_books_by_recency as _v1
-    except ImportError as e:
-        return ToolResult.fail(tool="top_books_by_recency", err_type="internal",
-                               message=f"v1 unavailable: {e}")
+    from scripts.rag_tools import top_books_by_recency as _v1
     raw = _v1(top=top, lang=lang, author_regex=author_regex, metric=metric)
     query = {"top": top, "lang": lang, "author_regex": author_regex,
              "metric": metric}
@@ -125,8 +127,10 @@ def top_books_by_recency(top: int = 20, lang: str = "en",
     # E24 (2026-05-22) — view now fills `count` from per_million when
     # share is source (was None → «Вхождений» column empty in persona
     # Q4/Q12 — exactly the column the user looks at for frequency).
-    wrapper_version="v3-e24-emotion-counts",
+    wrapper_version="v4-phase2-contract",
 )
+@v1_contract(v1_fn="scripts.rag_tools.book_emotion_profile",
+             schema=V1BookEmotionProfile)
 def book_emotion_profile(pg_id: str) -> ToolResult:
     if not pg_id or (isinstance(pg_id, str) and not pg_id.strip()):
         return ToolResult.fail(
@@ -134,11 +138,7 @@ def book_emotion_profile(pg_id: str) -> ToolResult:
             message="pg_id is required and must be non-empty (e.g. 'PG84')",
             query={"pg_id": pg_id},
         )
-    try:
-        from scripts.rag_tools import book_emotion_profile as _v1
-    except ImportError as e:
-        return ToolResult.fail(tool="book_emotion_profile", err_type="internal",
-                               message=f"v1 unavailable: {e}")
+    from scripts.rag_tools import book_emotion_profile as _v1
     raw = _v1(pg_id=pg_id)
     query = {"pg_id": pg_id}
     if isinstance(raw, dict) and raw.get("error"):
@@ -187,8 +187,11 @@ def _attach_top_books_view(result, rows, *, metric: str, top: int,
         for i, r in enumerate(rows[:top], start=1):
             if not isinstance(r, dict):
                 continue
-            v = (r.get(metric) or r.get("downloads") or r.get("pub_year")
-                 or r.get("id"))
+            # V1TopBooksByDownloads / V1TopBooksByRecency row_keys:
+            # id, title, author, downloads, author_birth, pub_year, pg_id.
+            v = r.get(metric)
+            if v is None:
+                v = r.get("downloads") if metric != "pub_year" else r.get("pub_year")
             view_rows.append({
                 "rank": i,
                 "title": r.get("title") or "—",
@@ -223,13 +226,12 @@ def _attach_emotion_profile_view(result, raw, pg_id: str) -> None:
         from scripts.v2.view_types import DataValidity
         if not isinstance(raw, dict):
             return
-        title = raw.get("book_title") or raw.get("title") or pg_id
-        # v1 actual keys come first; legacy fallback for test mocks.
+        # V1BookEmotionProfile canonical: title, share_among_primary_emotions,
+        # per_million, sample_anchor_words.
+        title = raw.get("title") or pg_id
         share_raw = raw.get("share_among_primary_emotions")
         per_million_raw = raw.get("per_million")
-        emotions_raw = (share_raw or per_million_raw
-                        or raw.get("emotions") or raw.get("profile")
-                        or raw.get("distribution") or {})
+        emotions_raw = share_raw or per_million_raw or {}
         emotions: list[dict] = []
         if isinstance(emotions_raw, dict):
             # If we have shares already (sum to ~1), use directly; if not
@@ -265,18 +267,12 @@ def _attach_emotion_profile_view(result, raw, pg_id: str) -> None:
                     "share": share,
                     "count": count,
                 })
-        elif isinstance(emotions_raw, list):
-            for e in emotions_raw:
-                if isinstance(e, dict):
-                    emotions.append({
-                        "emotion": e.get("emotion") or e.get("name", "—"),
-                        "share": e.get("share"),
-                        "count": e.get("count"),
-                    })
-        # Compute dominant from share if v1 didn't supply it. NRC ranking:
-        # top 3 emotions by share.
-        dominant = raw.get("dominant") or raw.get("top_emotions") or []
-        if not dominant and emotions:
+        # V1BookEmotionProfile share_among_primary_emotions is always
+        # a dict (never list) — list branch removed.
+        # V1BookEmotionProfile doesn't expose `dominant`/`top_emotions` at
+        # top level; compute from emotions list.
+        dominant: list = []
+        if emotions:
             dominant = [
                 e["emotion"] for e in
                 sorted(emotions, key=lambda x: x.get("share") or 0,

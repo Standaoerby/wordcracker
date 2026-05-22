@@ -10,6 +10,8 @@ if str(_REPO) not in sys.path:
 
 from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult
+from scripts.v2.contracts import v1_contract
+from scripts.v2.contracts.schemas import V1WordPosDistribution
 
 
 @tool(
@@ -30,14 +32,12 @@ from scripts.v2._types import Coverage, ToolResult
     # E18 (2026-05-22) — E15 view now handles v1's LIST shape for
     # pos_distribution. Old cached entries built the view as dict-only
     # and silently fell into the empty path.
-    wrapper_version="v2-e15-list-shape",
+    wrapper_version="v3-phase2-contract",
 )
+@v1_contract(v1_fn="scripts.rag_tools.word_pos_distribution",
+             schema=V1WordPosDistribution)
 def word_pos_distribution(scope, word: str) -> ToolResult:
-    try:
-        from scripts.rag_tools import word_pos_distribution as _v1
-    except ImportError as e:
-        return ToolResult.fail(tool="word_pos_distribution", err_type="internal",
-                               message=f"v1 unavailable: {e}")
+    from scripts.rag_tools import word_pos_distribution as _v1
     raw = _v1(scope=scope, word=word)
     query = {"scope": scope, "word": word}
     if isinstance(raw, dict) and raw.get("error"):
@@ -66,9 +66,9 @@ def word_pos_distribution(scope, word: str) -> ToolResult:
         from scripts.v2.view_types import DataValidity, EmptyReason
         if not isinstance(raw, dict):
             return result
-        # v1's actual key + shape comes first; legacy fallbacks for test mocks.
-        dist = (raw.get("pos_distribution") or raw.get("distribution")
-                or raw.get("counts") or {})
+        # Phase 2 — V1WordPosDistribution declares `pos_distribution` as
+        # the canonical list. Phantom `distribution`/`counts` removed.
+        dist = raw.get("pos_distribution") or []
         scope_str = (str(scope) if not isinstance(scope, dict)
                      else f"книга {scope.get('book') or scope.get('pg_id')}"
                      if scope.get("book") or scope.get("pg_id")

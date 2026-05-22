@@ -220,7 +220,9 @@ class CacheViewRoundtrip(unittest.TestCase):
 
 class SchemaVersionBumping(unittest.TestCase):
     def test_schema_version_set(self):
-        self.assertEqual(cache_mod.CACHE_SCHEMA_VERSION, "v2-views")
+        # Phase 2 (REFACTOR_BRIEF) bumped this from "v2-views" → "v3-ast-fp"
+        # when AST-fingerprint folded into cache key (R-23 Tier 1A).
+        self.assertEqual(cache_mod.CACHE_SCHEMA_VERSION, "v3-ast-fp")
 
     def test_schema_version_in_cache_key(self):
         """The hash MUST depend on CACHE_SCHEMA_VERSION. Bumping the

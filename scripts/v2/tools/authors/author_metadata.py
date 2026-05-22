@@ -12,6 +12,8 @@ if str(_REPO) not in sys.path:
 
 from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult
+from scripts.v2.contracts import v1_contract
+from scripts.v2.contracts.schemas import V1AuthorMetadata
 
 
 # Stan rounds 1-5: Poe «1809-1964» persisted 5 test rounds. The v2.5 fix
@@ -69,22 +71,17 @@ _AUTHOR_BIO_OVERRIDES: dict[str, dict] = {
     requires=["author"],
     cost="cheap",
     cacheable=True,
+    wrapper_version="v2-phase2-contract",
 )
+@v1_contract(v1_fn="scripts.rag_tools.author_metadata",
+             schema=V1AuthorMetadata)
 def author_metadata(author_regex: str) -> ToolResult:
     if not author_regex or not author_regex.strip():
         return ToolResult.fail(
             tool="author_metadata", err_type="invalid_args",
             message="author_regex is required",
         )
-
-    try:
-        from scripts.rag_tools import author_metadata as _v1
-    except ImportError as e:
-        return ToolResult.fail(
-            tool="author_metadata", err_type="internal",
-            message=f"v1 rag_tools unavailable: {e}",
-        )
-
+    from scripts.rag_tools import author_metadata as _v1
     raw = _v1(author_regex)
     query = {"author_regex": author_regex}
 
@@ -97,7 +94,11 @@ def author_metadata(author_regex: str) -> ToolResult:
             query=query,
         )
 
-    book_count = raw.get("books_total") or raw.get("book_count") or len(raw.get("sample_titles", []))
+    # Phase 2 — V1AuthorMetadata declares `books_matched` as the canonical
+    # book-count key (rag_tools.py:2832). Phantom `books_total`/`book_count`
+    # removed; fall back to sample_titles length only when v1 omits the field.
+    book_count = (raw.get("books_matched")
+                  or len(raw.get("sample_titles") or []))
 
     # Q12 from Stan's 2026-05-18 demon round: Poe came back as «1809–1964».
     # 1964 isn't a death year; Gutenberg metadata sometimes confuses
@@ -161,15 +162,18 @@ def author_metadata(author_regex: str) -> ToolResult:
         if not isinstance(raw, dict):
             return result
 
+        # V1AuthorMetadata doesn't expose canonical display name; derive
+        # from authors_matched[0] (first matched author string) or regex.
+        am = raw.get("authors_matched") or []
         author_canonical = (
-            raw.get("author")
+            (am[0] if am and isinstance(am[0], str) else None)
             or author_regex.lstrip("^").rstrip(",").strip()
         )
         view = vb.build_author_metadata(
             author_canonical=author_canonical,
             birth_year=raw.get("year_of_birth_min"),
             death_year=raw.get("year_of_death_max"),
-            nationality=raw.get("nationality") or raw.get("country"),
+            nationality=None,  # not in V1AuthorMetadata contract
             books_in_corpus=int(book_count or 0),
             bio_source=raw.get("_bio_source"),
             caveats=([

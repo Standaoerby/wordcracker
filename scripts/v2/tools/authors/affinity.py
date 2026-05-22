@@ -15,6 +15,8 @@ from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
 from scripts.v2.tools.authors._surname_filter import filter_surnames
 from scripts.v2.tools.authors._corpus_artifacts import filter_corpus_artifacts
+from scripts.v2.contracts import v1_contract
+from scripts.v2.contracts.schemas import V1AffinityByAuthor, V1CompareAuthors
 
 
 # Stan's 2026-05-18 round 3: «характерные прилагательные Оскара Уайльда»
@@ -81,11 +83,13 @@ def _normalize_compare_shape(raw):
         return raw
     a1 = raw.get("author1") if isinstance(raw.get("author1"), dict) else None
     a2 = raw.get("author2") if isinstance(raw.get("author2"), dict) else None
+    # Phase 2 — read only the canonical v1 row keys per V1CompareAuthors.
+    # v1 nests `top_unique` inside author1/author2 (rag_tools.py:858).
     if a1 is not None and "top_unique_a" not in raw:
-        raw["top_unique_a"] = a1.get("top_unique") or a1.get("top") or []
+        raw["top_unique_a"] = a1.get("top_unique") or []
         raw["slug_a"] = a1.get("slug")
     if a2 is not None and "top_unique_b" not in raw:
-        raw["top_unique_b"] = a2.get("top_unique") or a2.get("top") or []
+        raw["top_unique_b"] = a2.get("top_unique") or []
         raw["slug_b"] = a2.get("slug")
     return raw
 
@@ -137,16 +141,14 @@ def _drop_author_self_name(author_regex: str, words: list[dict]) -> list[dict]:
     # is `top` / `top_words`). Bumping wrapper_version busts any cached
     # results from before the alias landed. Structural fix in Phase 2
     # via v1↔v2 contracts.
-    wrapper_version="v2-phase0-words-alias",
+    wrapper_version="v2-phase2-contract",
 )
+@v1_contract(v1_fn="scripts.rag_tools.affinity_by_author",
+             schema=V1AffinityByAuthor)
 def affinity_by_author(author_regex: str, top: int = 50,
                        min_author_count: int = 5, min_corpus_count: int = 0,
                        pos_filter: list[str] | None = None) -> ToolResult:
-    try:
-        from scripts.rag_tools import affinity_by_author as _v1
-    except ImportError as e:
-        return ToolResult.fail(tool="affinity_by_author", err_type="internal",
-                               message=f"v1 unavailable: {e}")
+    from scripts.rag_tools import affinity_by_author as _v1
 
     raw = _v1(author_regex=author_regex, top=top,
               min_author_count=min_author_count,
@@ -163,9 +165,11 @@ def affinity_by_author(author_regex: str, top: int = 50,
             message=err, query=query,
         )
 
-    # v1 may return rows under "top" (old) or "top_words" (new). Normalize.
+    # Phase 2 — v1 affinity_by_author returns rows under the canonical
+    # `top` key (rag_tools.py:747). The wrapper used to also try
+    # `top_words` — a phantom key v1 never emits. Contract-bound now.
     if isinstance(raw, dict):
-        rows = raw.get("top_words") or raw.get("top") or []
+        rows = raw.get("top") or []
     else:
         rows = []
     # Post-filter literary proper nouns spaCy mis-tagged as ADJ/NOUN. Quick
@@ -201,13 +205,9 @@ def affinity_by_author(author_regex: str, top: int = 50,
             if isinstance(raw, dict):
                 raw["proper_noun_filter"] = (note + extra).lstrip("; ")
         # Propagate the filtered list back so the LLM renders only
-        # the clean list, not the raw one. Mutate `raw` in place
-        # (top_words / top, whichever was the source).
+        # the clean list, not the raw one. v1 canonical key is `top`.
         if isinstance(raw, dict):
-            if "top_words" in raw:
-                raw["top_words"] = rows
-            elif "top" in raw:
-                raw["top"] = rows
+            raw["top"] = rows
 
     # Phase 0 — `$s2.words[N]` P0 bind. The LLM planner sometimes emits
     # plans that reference this step's rows as `$s2.words[N]` (instead
@@ -371,15 +371,13 @@ def affinity_by_author(author_regex: str, top: int = 50,
     # author1/author2 → flat top_unique_a/b). Phantom burrows_delta
     # field also dropped. Bump invalidates old cached results that had
     # flat shape mismatches.
-    wrapper_version="v4-e15-normalize",
+    wrapper_version="v5-phase2-contract",
 )
+@v1_contract(v1_fn="scripts.rag_tools.compare_authors",
+             schema=V1CompareAuthors)
 def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
                     min_corpus_count: int = 500) -> ToolResult:
-    try:
-        from scripts.rag_tools import compare_authors as _v1
-    except ImportError as e:
-        return ToolResult.fail(tool="compare_authors", err_type="internal",
-                               message=f"v1 unavailable: {e}")
+    from scripts.rag_tools import compare_authors as _v1
 
     raw = _v1(author1_regex=author1_regex, author2_regex=author2_regex,
               top=top, min_corpus_count=min_corpus_count)
@@ -545,20 +543,12 @@ def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
               "scale": "0+; integer",
               "interpret": "0 shared between distinct genres is normal"},
         ])
-    # E15 — v1 doesn't return flat books_a/b; books count is buried in
-    # the inner affinity_by_author calls and not re-exposed. Use -1
-    # (unknown) for coverage rather than producing garbage (-2 from
-    # -1 + -1).
+    # Phase 2 — v1 compare_authors does NOT expose flat books_a/b
+    # (V1CompareAuthors contract). Books are buried in the inner
+    # affinity_by_author calls and not re-exported. Use -1 (unknown).
     result = ToolResult.success(
         tool="compare_authors", data=raw,
-        coverage=Coverage(
-            books_matched=(
-                int(raw.get("books_a") or 0) + int(raw.get("books_b") or 0)
-                if isinstance(raw, dict)
-                   and (raw.get("books_a") or raw.get("books_b")) else -1
-            ),
-            books_total=-1,
-        ),
+        coverage=Coverage(books_matched=-1, books_total=-1),
         warnings=warnings, query=query,
     )
 
@@ -684,11 +674,7 @@ def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
             caveats=view_caveats,
             provenance=vb.make_provenance(
                 requested={"min_corpus_count": min_corpus_count, "top": top},
-                returned={
-                    "books_a": raw.get("books_a"),
-                    "books_b": raw.get("books_b"),
-                    "shared_n": len(shared),
-                },
+                returned={"shared_n": len(shared)},
                 filtered={"min_corpus_count_used": mcc_used},
                 sources=["SPGC-2018-07-18"],
             ),

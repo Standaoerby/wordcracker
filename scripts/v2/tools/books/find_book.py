@@ -21,6 +21,8 @@ if str(_REPO) not in sys.path:
 
 from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
+from scripts.v2.contracts import v1_contract
+from scripts.v2.contracts.schemas import V1FindBook
 
 log = logging.getLogger("wordcracker.v2.tools.find_book")
 
@@ -47,7 +49,9 @@ log = logging.getLogger("wordcracker.v2.tools.find_book")
     requires=["book"],
     cost="cheap",
     cacheable=True,
+    wrapper_version="v2-phase2-contract",
 )
+@v1_contract(v1_fn="scripts.rag_tools.find_book", schema=V1FindBook)
 def find_book(title: str, author: str = "", top: int = 5,
               lang: str = "en") -> ToolResult:
     if not title or not title.strip():
@@ -57,17 +61,8 @@ def find_book(title: str, author: str = "", top: int = 5,
             query={"title": title},
         )
 
-    # Lazy import — v1 module pulls pandas + DataFrame load on first call.
-    try:
-        from scripts.rag_tools import find_book as _v1_find_book
-    except ImportError as e:
-        return ToolResult.fail(
-            tool="find_book", err_type="internal",
-            message=f"v1 rag_tools unavailable: {e}",
-            query={"title": title},
-        )
-
-    raw = _v1_find_book(title=title, author=author or "", top=top, lang=lang)
+    from scripts.rag_tools import find_book as _v1
+    raw = _v1(title=title, author=author or "", top=top, lang=lang)
     query = {"title": title, "author": author or None, "top": top, "lang": lang}
 
     if isinstance(raw, dict) and raw.get("error"):

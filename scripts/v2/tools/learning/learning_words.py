@@ -12,6 +12,8 @@ from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
 from scripts.v2.tools.authors._surname_filter import filter_surnames
 from scripts.v2.tools.authors._corpus_artifacts import filter_corpus_artifacts
+from scripts.v2.contracts import v1_contract
+from scripts.v2.contracts.schemas import V1LearningWords
 
 
 # Stan round 2 Q9: learning_words на P&P вернул `Lambton`, `Shire` — это
@@ -62,18 +64,16 @@ _LITERARY_LOCATION_BLACKLIST = frozenset({
     # 2026-05-21 (B-R14-7 root cause). The fix landed but cached results
     # from the broken period still poisoned downstream renders.
     # Bumping version busts the stale cache.
-    wrapper_version="v2-b-r14-7-results-key",
+    wrapper_version="v3-phase2-contract",
 )
+@v1_contract(v1_fn="learning_tools.learning_words",
+             schema=V1LearningWords)
 def learning_words(scope, level: str = "intermediate", top: int = 30,
                    lemmatize: bool = True,
                    pos_filter: list[str] | None = None,
                    _capped_from: int | None = None,
                    _translate_followup_disclose: bool = False) -> ToolResult:
-    try:
-        from scripts.learning_tools import learning_words as _v1
-    except ImportError as e:
-        return ToolResult.fail(tool="learning_words", err_type="internal",
-                               message=f"v1 unavailable: {e}")
+    from learning_tools import learning_words as _v1
     raw = _v1(scope=scope, level=level, top=top,
               lemmatize=lemmatize, pos_filter=pos_filter)
     query = {"scope": scope, "level": level, "top": top,
@@ -85,19 +85,11 @@ def learning_words(scope, level: str = "intermediate", top: int = 30,
                                      else "not_found",
             message=str(raw["error"]), query=query,
         )
-    # B-R14-7 ROOT CAUSE FIX (2026-05-21): v1 scripts/learning_tools.py
-    # returns rows under "results" key (line 564), NOT "words". The v2
-    # wrapper had been reading raw.get("words") since Sprint 22+ → always
-    # got None → empty rows → looks_broken=True → renderer reported
-    # «0 слов уровня B2» on EVERY query. Unit-tests passed because
-    # test_router.py:97 mock returns {"words": [...]} (the wrong shape),
-    # accidentally matching the wrong read key. Live behavioural golden
-    # catches it but is skipUnless(WC_GOLDEN_LIVE) gated.
-    # Fix: read "results" (true v1 key) with "words" fallback for
-    # backwards-compat with test mocks + any legacy callers.
-    rows = None
-    if isinstance(raw, dict):
-        rows = raw.get("results") or raw.get("words")
+    # Phase 2 — V1LearningWords contract declares the canonical key
+    # `results` (learning_tools.py line ~564). Pre-contract wrappers also
+    # read phantom `words`; that fallback is gone now. Mocks via
+    # mock_from_schema cannot drift from the real v1 shape (R3/R4).
+    rows = raw.get("results") if isinstance(raw, dict) else None
     rows = rows or []
     # Drop literary locations (Stan round 2 Q9: Lambton/Shire in P&P
     # learning list). The v1 NER misses some place names; this hardcoded
@@ -109,7 +101,6 @@ def learning_words(scope, level: str = "intermediate", top: int = 30,
                 not in _LITERARY_LOCATION_BLACKLIST]
         if len(rows) < before and isinstance(raw, dict):
             raw["results"] = rows
-            raw["words"] = rows
     # Sprint 20 — Stan 2026-05-19: translate-followup routes here, output
     # included character names (quin/kettering/giraud/lorraine — all
     # Christie characters), and the LLM "translator" hallucinated
@@ -142,7 +133,6 @@ def learning_words(scope, level: str = "intermediate", top: int = 30,
             r.pop("_word_for_filter", None)
         if (surname_dropped or artifact_dropped) and isinstance(raw, dict):
             raw["results"] = rows
-            raw["words"] = rows
             prev = raw.get("_render_note", "")
             notes = []
             if surname_dropped:

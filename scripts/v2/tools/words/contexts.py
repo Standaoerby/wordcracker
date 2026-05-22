@@ -10,6 +10,10 @@ if str(_REPO) not in sys.path:
 
 from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
+from scripts.v2.contracts import v1_contract
+from scripts.v2.contracts.schemas import (
+    V1WordContexts, V1WordContextsGlobal,
+)
 
 
 @tool(
@@ -32,15 +36,13 @@ from scripts.v2._types import Coverage, ToolResult, ToolWarning
     # R-23 Tier 0 — E9 fix (snippet vs context vs text key) + B17 dedup
     # landed without a version bump, so stale cached results from
     # before the fixes were still being served.
-    wrapper_version="v2-e9-context-key",
+    wrapper_version="v3-phase2-contract",
 )
+@v1_contract(v1_fn="scripts.rag_tools.word_contexts",
+             schema=V1WordContexts)
 def word_contexts(author_regex: str, word: str, window: int = 10,
                   max_samples: int = 5) -> ToolResult:
-    try:
-        from scripts.rag_tools import word_contexts as _v1
-    except ImportError as e:
-        return ToolResult.fail(tool="word_contexts", err_type="internal",
-                               message=f"v1 unavailable: {e}")
+    from scripts.rag_tools import word_contexts as _v1
     raw = _v1(author_regex=author_regex, word=word, window=window,
               max_samples=max_samples)
     query = {"author_regex": author_regex, "word": word,
@@ -98,15 +100,13 @@ def word_contexts(author_regex: str, word: str, window: int = 10,
     cost="medium",
     cacheable=True,
     # R-23 Tier 0 — see word_contexts: same context-key fix.
-    wrapper_version="v2-e9-context-key",
+    wrapper_version="v3-phase2-contract",
 )
+@v1_contract(v1_fn="scripts.rag_tools.word_contexts_global",
+             schema=V1WordContextsGlobal)
 def word_contexts_global(word: str, k: int = 12,
                          snippet_chars: int = 280) -> ToolResult:
-    try:
-        from scripts.rag_tools import word_contexts_global as _v1
-    except ImportError as e:
-        return ToolResult.fail(tool="word_contexts_global", err_type="internal",
-                               message=f"v1 unavailable: {e}")
+    from scripts.rag_tools import word_contexts_global as _v1
     raw = _v1(word=word, k=k, snippet_chars=snippet_chars)
     query = {"word": word, "k": k, "snippet_chars": snippet_chars}
     if isinstance(raw, dict) and raw.get("error"):

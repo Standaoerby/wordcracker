@@ -10,6 +10,10 @@ if str(_REPO) not in sys.path:
 
 from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
+from scripts.v2.contracts import v1_contract
+from scripts.v2.contracts.schemas import (
+    V1WordFreqTimeline, V1WordsDisappearingAfter,
+)
 
 
 @tool(
@@ -39,14 +43,13 @@ from scripts.v2._types import Coverage, ToolResult, ToolWarning
     requires=["word"],
     cost="medium",
     cacheable=True,
+    wrapper_version="v2-phase2-contract",
 )
+@v1_contract(v1_fn="scripts.rag_tools.word_freq_timeline",
+             schema=V1WordFreqTimeline)
 def word_freq_timeline(word: str, bucket_years: int = 25,
                       basis: str = "auto") -> ToolResult:
-    try:
-        from scripts.rag_tools import word_freq_timeline as _v1
-    except ImportError as e:
-        return ToolResult.fail(tool="word_freq_timeline", err_type="internal",
-                               message=f"v1 unavailable: {e}")
+    from scripts.rag_tools import word_freq_timeline as _v1
     raw = _v1(word=word, bucket_years=bucket_years, basis=basis)
     query = {"word": word, "bucket_years": bucket_years, "basis": basis}
     if isinstance(raw, dict) and raw.get("error"):
@@ -102,12 +105,11 @@ def word_freq_timeline(word: str, bucket_years: int = 25,
                       "birth_plus_30 for usable timeline"),
         ))
 
+    # v1 word_freq_timeline doesn't expose a books_total — coverage stays
+    # opaque (per V1WordFreqTimeline contract).
     result = ToolResult.success(
         tool="word_freq_timeline", data=raw,
-        coverage=Coverage(
-            books_matched=raw.get("books_total", -1) if isinstance(raw, dict) else -1,
-            books_total=-1,
-        ),
+        coverage=Coverage(books_matched=-1, books_total=-1),
         warnings=warnings,
         query=query,
     )
@@ -133,14 +135,12 @@ def word_freq_timeline(word: str, bucket_years: int = 25,
     cacheable=True,
     # E18 (2026-05-22) — E15 now reads v1's «top» key (not «words») and
     # nested pre_bucket/post_bucket counts (not flat books_before/after).
-    wrapper_version="v2-e15-nested-buckets",
+    wrapper_version="v3-phase2-contract",
 )
+@v1_contract(v1_fn="scripts.rag_tools.words_disappearing_after",
+             schema=V1WordsDisappearingAfter)
 def words_disappearing_after(year: int = 1920, top: int = 25) -> ToolResult:
-    try:
-        from scripts.rag_tools import words_disappearing_after as _v1
-    except ImportError as e:
-        return ToolResult.fail(tool="words_disappearing_after", err_type="internal",
-                               message=f"v1 unavailable: {e}")
+    from scripts.rag_tools import words_disappearing_after as _v1
     raw = _v1(year=year, top=top)
     query = {"year": year, "top": top}
     if isinstance(raw, dict) and raw.get("error"):
@@ -151,29 +151,20 @@ def words_disappearing_after(year: int = 1920, top: int = 25) -> ToolResult:
                       else "internal"),
             message=err, query=query,
         )
-    # E15 P0 FIX (2026-05-22): v1 words_disappearing_after (rag_tools.py:1381)
-    # returns key «top», NOT «words»; bucket counts live under
-    # «pre_bucket»/«post_bucket» dicts (with «books» field), NOT flat
-    # «books_before»/«books_after». Same class as B-R14-7 / E9 / E14b /
-    # E15. Read v1's actual keys first; legacy fallbacks for test mocks.
-    rows = None
-    if isinstance(raw, dict):
-        rows = raw.get("top") or raw.get("words")
-    rows = rows or []
+    # Phase 2 — V1WordsDisappearingAfter declares canonical `top` +
+    # nested pre_bucket/post_bucket with `books` field. Phantom fallbacks
+    # (`words`, flat `books_before`/`books_after`) removed per R3.
+    rows = (raw.get("top") if isinstance(raw, dict) else None) or []
     warnings: list[ToolWarning] = []
     books_before = 0
     books_after = 0
     if isinstance(raw, dict):
-        # v1 actual shape — nested buckets
         pre_b = raw.get("pre_bucket") or {}
         post_b = raw.get("post_bucket") or {}
         if isinstance(pre_b, dict):
             books_before = int(pre_b.get("books") or 0)
         if isinstance(post_b, dict):
             books_after = int(post_b.get("books") or 0)
-        # Legacy flat fallback for test mocks
-        books_before = books_before or int(raw.get("books_before") or 0)
-        books_after = books_after or int(raw.get("books_after") or 0)
     if books_before or books_after:
         warnings.append(ToolWarning(
             code="coverage",
@@ -202,14 +193,25 @@ def _attach_timeline_view(result, buckets, *, word: str, basis: str) -> None:
         from scripts.v2 import view_builders as vb
         from scripts.v2.view_types import DataValidity
         series = []
+        # Phase 2 — V1WordFreqTimeline buckets carry: period, books,
+        # total_tokens, occurrences, per_million. Derive bucket bounds
+        # from `period` ("1800-1824"); freq from `per_million`.
         for b in (buckets or []):
             if not isinstance(b, dict):
                 continue
+            bucket_start = bucket_end = None
+            period = b.get("period")
+            if isinstance(period, str) and "-" in period:
+                lo, _, hi = period.partition("-")
+                try:
+                    bucket_start = int(lo); bucket_end = int(hi)
+                except ValueError:
+                    pass
             series.append({
-                "bucket_start": b.get("bucket_start") or b.get("start") or b.get("year"),
-                "bucket_end": b.get("bucket_end") or b.get("end"),
-                "freq_per_million": b.get("freq_per_million") or b.get("fpm"),
-                "count": b.get("occurrences") or b.get("count"),
+                "bucket_start": bucket_start,
+                "bucket_end": bucket_end,
+                "freq_per_million": b.get("per_million"),
+                "count": b.get("occurrences"),
             })
         view = vb.build_timeline_chart(
             word=word,
@@ -247,12 +249,12 @@ def _attach_disappearing_view(result, rows, *, year: int, top: int) -> None:
         for i, r in enumerate(rows[:top], start=1):
             if not isinstance(r, dict):
                 continue
-            # E15 — v1 actual key «drop_ratio»; legacy fallbacks for mocks
-            drop = (r.get("drop_ratio") or r.get("drop_factor")
-                    or r.get("ratio") or r.get("score"))
+            # Phase 2 — V1WordsDisappearingAfter declares row.drop_ratio
+            # (rag_tools.py:1370). No phantom fallbacks.
+            drop = r.get("drop_ratio")
             view_rows.append({
                 "rank": i,
-                "word": r.get("word") or r.get("lemma") or "—",
+                "word": r.get("word") or "—",
                 "drop_factor": (f"{drop:.1f}×" if isinstance(drop, (int, float))
                                 else (drop or "—")),
             })

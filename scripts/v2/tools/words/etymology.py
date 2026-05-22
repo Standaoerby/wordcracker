@@ -10,6 +10,10 @@ if str(_REPO) not in sys.path:
 
 from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
+from scripts.v2.contracts import v1_contract
+from scripts.v2.contracts.schemas import (
+    V1WordEtymology, V1FindWordsByEtymology,
+)
 
 
 @tool(
@@ -24,13 +28,12 @@ from scripts.v2._types import Coverage, ToolResult, ToolWarning
     requires=["word"],
     cost="cheap",
     cacheable=True,
+    wrapper_version="v2-phase2-contract",
 )
+@v1_contract(v1_fn="scripts.rag_tools.word_etymology",
+             schema=V1WordEtymology)
 def word_etymology(word: str) -> ToolResult:
-    try:
-        from scripts.rag_tools import word_etymology as _v1
-    except ImportError as e:
-        return ToolResult.fail(tool="word_etymology", err_type="internal",
-                               message=f"v1 unavailable: {e}")
+    from scripts.rag_tools import word_etymology as _v1
     raw = _v1(word=word)
     query = {"word": word}
     if isinstance(raw, dict) and raw.get("error"):
@@ -53,10 +56,11 @@ def word_etymology(word: str) -> ToolResult:
         from scripts.v2.view_types import DataValidity
         if not isinstance(raw, dict):
             return result
+        # Phase 2 — V1WordEtymology canonical key is `primary_family`.
         view = vb.build_etymology_bundle(
             word=word,
             etymology={
-                "primary_family": raw.get("primary_family") or raw.get("family"),
+                "primary_family": raw.get("primary_family"),
                 "family_chain": chain,
             } if chain or raw.get("primary_family") else None,
             language="ru",
@@ -93,14 +97,13 @@ def word_etymology(word: str) -> ToolResult:
     cost="heavy",
     cacheable=True,
     timeout_s=90,
+    wrapper_version="v2-phase2-contract",
 )
+@v1_contract(v1_fn="scripts.rag_tools.find_words_by_etymology",
+             schema=V1FindWordsByEtymology)
 def find_words_by_etymology(scope, family: str, top: int = 30,
                             min_corpus_count: int = 500) -> ToolResult:
-    try:
-        from scripts.rag_tools import find_words_by_etymology as _v1
-    except ImportError as e:
-        return ToolResult.fail(tool="find_words_by_etymology", err_type="internal",
-                               message=f"v1 unavailable: {e}")
+    from scripts.rag_tools import find_words_by_etymology as _v1
     raw = _v1(scope=scope, family=family, top=top, min_corpus_count=min_corpus_count)
     query = {"scope": scope, "family": family, "top": top,
              "min_corpus_count": min_corpus_count}
@@ -143,11 +146,11 @@ def find_words_by_etymology(scope, family: str, top: int = 30,
             f"{min_corpus_count}",
         ))
 
+    # v1 find_words_by_etymology has no books_total in its declared
+    # contract — leave coverage opaque.
     result = ToolResult.success(
         tool="find_words_by_etymology", data=raw,
-        coverage=Coverage(books_matched=raw.get("books_total", -1)
-                                       if isinstance(raw, dict) else -1,
-                          books_total=-1),
+        coverage=Coverage(books_matched=-1, books_total=-1),
         warnings=warnings,
         query=query,
     )
@@ -183,10 +186,12 @@ def find_words_by_etymology(scope, family: str, top: int = 30,
         for i, r in enumerate(rows[:top], start=1):
             if not isinstance(r, dict):
                 continue
+            # V1FindWordsByEtymology rows: word, affinity, occurrences,
+            # corpus_count, family_chain, raw_codes. No `count`/`lemma`.
             view_rows.append({
                 "rank": i,
-                "word": r.get("word") or r.get("lemma") or "—",
-                "corpus_count": r.get("corpus_count") or r.get("count") or "—",
+                "word": r.get("word") or "—",
+                "corpus_count": r.get("corpus_count") or "—",
             })
         view = vb.build_top_n_table(
             rows=view_rows,

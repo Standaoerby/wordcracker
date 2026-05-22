@@ -23,6 +23,8 @@ if str(_REPO) not in sys.path:
 
 from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
+from scripts.v2.contracts import v1_contract
+from scripts.v2.contracts.schemas import V1WordCollocates
 
 
 @tool(
@@ -48,17 +50,20 @@ from scripts.v2._types import Coverage, ToolResult, ToolWarning
     requires=["word", "scope"],
     cost="medium",
     cacheable=True,
+    wrapper_version="v2-phase2-contract",
 )
+@v1_contract(v1_fn="scripts.rag_tools.word_collocates",
+             schema=V1WordCollocates)
 def word_collocates(scope, word: str, window: int = 4, top: int = 20,
                     exclude_stopwords: bool = True,
                     max_books: int = 8000,
                     metric: str = "count",
                     min_cooccurrence: int = 5) -> ToolResult:
-    try:
-        from scripts.rag_tools import word_collocates as _v1
-    except ImportError as e:
-        return ToolResult.fail(tool="word_collocates", err_type="internal",
-                               message=f"v1 unavailable: {e}")
+    # Late binding via fresh import so tests can `mock.patch
+    # ("scripts.rag_tools.word_collocates")` without re-loading the
+    # wrapper module. The top-level import above is kept solely to bind
+    # the v1 ref into the contract registry at decoration time.
+    from scripts.rag_tools import word_collocates as _v1
 
     # For metric ranking we ask v1 for a wider candidate pool so the
     # metric has room to reorder. The wrapper trims back to `top` after
@@ -75,15 +80,14 @@ def word_collocates(scope, word: str, window: int = 4, top: int = 20,
                                                        else "not_found",
                                message=str(raw["error"]), query=query)
 
-    rows = (raw.get("top_collocates") or raw.get("top")
-            if isinstance(raw, dict) else None) or []
+    # Phase 2 — V1WordCollocates canonical key is `top_collocates`
+    # (rag_tools.py:1083). The pre-contract fallback to `top` is gone.
+    rows = (raw.get("top_collocates") if isinstance(raw, dict) else None) or []
+    # Phase 2 — v1 word_collocates does NOT return books_capped /
+    # books_total (only scope, word, window, total_occurrences,
+    # books_with_hits, top_collocates per V1WordCollocates). Previous
+    # warnings block read phantom keys; removed per R3.
     warnings: list[ToolWarning] = []
-    if isinstance(raw, dict) and raw.get("books_capped"):
-        warnings.append(ToolWarning(
-            code="books_capped",
-            message=f"scope had {raw.get('books_total')} books; capped at {max_books}",
-            details={"books_total": raw.get("books_total"), "capped": max_books},
-        ))
 
     # ---- Optional metric reranking ----
     metric_lc = (metric or "count").lower()
@@ -130,10 +134,9 @@ def word_collocates(scope, word: str, window: int = 4, top: int = 20,
                                    if k not in ("c_pair", "c_neighbor")},
                             })
                         # Mutate raw dict to surface the reranked list
-                        # under both the legacy key and an explicit one.
+                        # under the canonical v1 key.
                         if isinstance(raw, dict):
                             raw["top_collocates"] = new_rows
-                            raw["top"] = new_rows
                             raw["metric"] = metric_lc
                             raw["min_cooccurrence"] = min_cooccurrence
                             raw["scope_total_tokens"] = N
@@ -151,10 +154,12 @@ def word_collocates(scope, word: str, window: int = 4, top: int = 20,
                 message=f"{metric_lc}: {type(e).__name__}: {e}",
             ))
 
+    # books_with_hits is the canonical books_matched proxy in v1.
     result = ToolResult.success(
         tool="word_collocates", data=raw,
         coverage=Coverage(
-            books_matched=raw.get("books_total", len(rows)) if isinstance(raw, dict) else -1,
+            books_matched=(raw.get("books_with_hits", -1)
+                            if isinstance(raw, dict) else -1),
             books_total=-1,
         ),
         warnings=warnings, query=query,
@@ -164,7 +169,7 @@ def word_collocates(scope, word: str, window: int = 4, top: int = 20,
     try:
         from scripts.v2 import view_builders as vb
         from scripts.v2.view_types import DataValidity
-        rows_after_metric = (raw.get("top_collocates") or raw.get("top")
+        rows_after_metric = (raw.get("top_collocates")
                               if isinstance(raw, dict) else None) or []
         scope_str = (str(scope) if not isinstance(scope, dict)
                      else f"книга {scope.get('book') or scope.get('pg_id')}"
