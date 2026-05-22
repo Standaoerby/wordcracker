@@ -62,10 +62,10 @@ def _rank_map(items: list[dict[str, Any]], key: str = "pg_id") -> dict[str, int]
     cost="medium",
     cacheable=True,
     # Sprint 22+ Stan B4: `lang` filter changes the output set. Bump.
-    # E18 — E16 view emission. E20 — lang filter fix for stringified
-    # list shape ("['en']"). Both invalidate prior cache entries that
-    # may carry mismatched view/lang-drop behavior.
-    wrapper_version="v5-e20-lang-substring",
+    # E22 — query-side lang normalization fix (twin of E21 book-side).
+    # «english» → «en» via regex, not «eng» via [:3] truncation.
+    # Invalidates entries written between E20 and E22 deploys.
+    wrapper_version="v6-e22-lang-query-fix",
 )
 def hybrid_search(query: str, k: int = 12, per_retriever: int = 50,
                   author_filter: str | None = None,
@@ -198,7 +198,25 @@ def hybrid_search(query: str, k: int = 12, per_retriever: int = 50,
     # via _meta_lookup helper (same v1 metadata cache used for titles).
     lang_dropped = 0
     if lang:
-        want = lang.lower().strip().split("-")[0][:3]
+        # E22 (2026-05-22) — twin of E21 _title_lookup fix. Old computation
+        #   want = lang.lower().strip().split("-")[0][:3]
+        # also truncated to 3 chars: for entity-extracted lang_hint
+        # "english" (from «английская литература»), want became "eng"
+        # — but `_title_lookup` (post-E21) stores book_lang as "en".
+        # «"eng" in "en"» is False → drop all matches → empty answer.
+        # Stan prod 2026-05-22: «примеры использования слова "ajar" в
+        # английской литературе» still failed after E21 because E21
+        # only fixed the BOOK side; the QUERY side still ate the 3-char
+        # truncation. Use the same robust extraction: try a 2-3 letter
+        # ISO-639 token first; fall back to a 2-char slice for full
+        # names («english» → «en», «russian» → «ru»).
+        import re as _re_q
+        _raw_lang = str(lang).lower().strip()
+        _m_iso = _re_q.match(r"^([a-z]{2,3})\b", _raw_lang)
+        if _m_iso:
+            want = _m_iso.group(1)
+        else:
+            want = _raw_lang[:2]
         filtered: list[dict] = []
         for m in out_matches:
             meta = _meta_lookup(m["pg_id"])

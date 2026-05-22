@@ -517,7 +517,7 @@ class CacheKey_WrapperVersionInvalidation(unittest.TestCase):
         from scripts.v2.tool_registry import REGISTRY
         # alpha4 + E16 bumps
         self.assertEqual(REGISTRY["hybrid_search"].wrapper_version,
-                          "v5-e20-lang-substring")
+                          "v6-e22-lang-query-fix")
         self.assertEqual(REGISTRY["lexical_search"].wrapper_version, "v2-titles")
         # alpha4 step-down + E15 normalize
         self.assertEqual(REGISTRY["compare_authors"].wrapper_version,
