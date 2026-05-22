@@ -23,6 +23,7 @@ from typing import Any, Iterator, Literal
 from scripts.v2.legacy_dispatch import dispatch_any
 from scripts.v2.planner.plan import PlanStep, QueryPlan
 from scripts.v2.planner import plan_spec as _spec_mod
+from scripts.v2.planner.invariants import apply_invariants
 from scripts.v2.planner.plan_spec import PlanSpec
 from scripts.v2._types import ToolResult
 
@@ -107,6 +108,12 @@ def execute(plan: QueryPlan, *, budget=None) -> RouterResult:
     if plan.out_of_scope_reason:
         return RouterResult(kind="out_of_scope", plan=plan,
                             message=plan.out_of_scope_reason)
+    # Phase 4 — apply plan-level invariants (fan-out per multi-author,
+    # timeout hook, clarify-guard hook) BEFORE executing. Builders now
+    # emit a single primary step plus a `fan_out` marker; the invariant
+    # expands the marker into N+1 steps per `multi_author_regex`. No
+    # builder reimplements the fan-out loop anymore (R6).
+    plan = apply_invariants(plan, budget=budget)
     if not plan.steps:
         return RouterResult(kind="no_steps", plan=plan,
                             message=plan.explain or "no tools to call")
@@ -323,6 +330,9 @@ def execute_stream(plan: QueryPlan) -> Iterator[dict]:
         yield {"event": "out_of_scope", "reason": plan.out_of_scope_reason}
         yield {"event": "done", "kind": "out_of_scope"}
         return
+    # Phase 4 — invariant application matches `execute()` so SSE
+    # consumers see the same fanned-out step list.
+    plan = apply_invariants(plan)
     yield {"event": "plan", "steps": [{"tool": s.tool, "args": s.args}
                                       for s in plan.steps]}
 

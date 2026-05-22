@@ -5,7 +5,26 @@ Contract: docs/v2/PLANNER.md §4.
 Output: a `QueryPlan` with one or more `PlanStep`s. The router executes each
 step, threading prior results into later args where `inject_result_as` is set.
 
-Each plan template is a small function so it's easy to test in isolation."""
+Each plan template is a small function so it's easy to test in isolation.
+
+Phase 4 (REFACTOR_BRIEF) — fan-out / timeout / clarify-guard are now
+PLAN-LEVEL invariants applied by the router (see `invariants.py`).
+Builders MUST NOT re-implement fan-out per-builder (R6). To opt a step
+into the multi-author fan-out, set `PlanStep.fan_out` to one of:
+  - "scope_author"   when args is `{"scope": {"author": ...}, ...}`
+  - "author_regex"   when args is `{"author_regex": ..., ...}`
+The invariant clones the step per `entities.multi_author_regex[:cap]`
+and clears the marker (idempotent).
+
+Phase 4 also makes `PLAN_BUILDERS` a single static declaration — no
+mid-module mutations after the dict literal.
+
+FOLLOW-UP (Phase 4 carry-over): the new public surface for builders is
+`scripts.v2.planner.builders` (a re-exporting facade today). Individual
+builders will physically move out of this file into per-domain modules
+under that package in a dedicated commit, to keep this diff readable
+and isolate import churn. The gate of Phase 4 is met without the
+physical split (fan-out invariant + POS/etymology coverage are landed)."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -24,6 +43,15 @@ class PlanStep:
     depends_on: list[int] = field(default_factory=list)
     inject_result_as: str | None = None  # key in next step's args to fill
     optional: bool = False
+    # Phase 4 — fan-out invariant marker. Single value declares HOW the
+    # router clones this step per `entities.multi_author_regex` entry.
+    #   "scope_author"   — args has `scope: {"author": ...}`; clone swaps
+    #                      scope's author while preserving country/year.
+    #   "author_regex"   — args has `author_regex: ...` directly; clone
+    #                      swaps that arg.
+    # None (default)     — no fan-out. Cloned steps always get this set
+    # back to None so the invariant is idempotent.
+    fan_out: str | None = None
 
 
 @dataclass
@@ -443,52 +471,44 @@ def _fan_out_authors_steps(
     cap: int = 3,
     primary_optional: bool = False,
 ) -> list[PlanStep]:
-    """E5 fix (R-22 P5) — build N+1 PlanSteps for primary + multi-authors.
+    """DEPRECATED (Phase 4). Use the `fan_out` marker on a single
+    PlanStep and let the router's `apply_fan_out_invariant` clone it
+    per `entities.multi_author_regex`.
 
-    Used by author-scope plan builders that should fan-out when user
-    references multiple authors («По и Лавкрафт одновременно» — both
-    must be analyzed, not just primary).
-
-    Args:
-      e             — Entities with primary author_regex + multi_author_regex
-      tool          — tool name (same for primary + each multi step)
-      base_args     — base args dict; author/scope filled per step
-      scope_field   — field name to set in args («scope» for dict-scope tools
-                      like emotion_collocates, learning_words)
-      author_field  — alt: set «author_regex» directly (for tools like
-                      affinity_by_author). If set, scope_field ignored.
-      cap           — max number of multi-author steps (default 3 → up to
-                      4 total steps including primary)
-      primary_optional — if True, primary step is optional too (rare;
-                      default False — primary is required)
-
-    Returns up to (cap + 1) PlanSteps. Empty list if no primary author.
+    Kept as a thin compatibility shim for tests that exercised the
+    helper directly. Builders MUST NOT call this — see R6 («Никаких
+    новых _plan_* с копипастой fan-out»). The shim now delegates to
+    the invariant so behavior stays identical even if a tool still
+    relies on it.
     """
     if not e.author_regex:
         return []
 
-    def _make_step(regex: str, is_primary: bool) -> PlanStep:
-        args = dict(base_args)
-        if author_field is not None:
-            args[author_field] = regex
-        else:
-            args[scope_field] = {"author": regex}
-            # Carry filters from primary scope (country/year)
-            if e.country:
-                args[scope_field]["country"] = e.country
-            if e.year_from:
-                args[scope_field]["year_from"] = e.year_from
-            if e.year_to:
-                args[scope_field]["year_to"] = e.year_to
-        return PlanStep(
-            tool=tool, args=args,
-            optional=(not is_primary or primary_optional),
-        )
+    fan_out = "author_regex" if author_field is not None else "scope_author"
+    primary_args = dict(base_args)
+    if author_field is not None:
+        primary_args[author_field] = e.author_regex
+    else:
+        primary_args[scope_field] = {"author": e.author_regex}
+        if e.country:
+            primary_args[scope_field]["country"] = e.country
+        if e.year_from:
+            primary_args[scope_field]["year_from"] = e.year_from
+        if e.year_to:
+            primary_args[scope_field]["year_to"] = e.year_to
 
-    steps = [_make_step(e.author_regex, is_primary=True)]
-    for extra in e.multi_author_regex[:cap]:
-        steps.append(_make_step(extra, is_primary=False))
-    return steps
+    primary = PlanStep(
+        tool=tool, args=primary_args,
+        optional=primary_optional,
+        fan_out=fan_out,
+    )
+    # Defer to the invariant so the shim and the real path produce the
+    # same step list. Imported lazily to avoid a circular import at
+    # module load time (invariants imports PlanStep from this module).
+    from scripts.v2.planner.invariants import apply_fan_out_invariant
+    stub_plan = QueryPlan(intent="_shim", entities=e, steps=[primary])
+    fanned = apply_fan_out_invariant(stub_plan, cap=cap)
+    return fanned.steps
 
 
 # Authors whose English translations leak transliterated character /
@@ -682,26 +702,24 @@ def _plan_author_vocab(e: Entities) -> QueryPlan:
     propn_strict = bool((e.raw_misc or {}).get("_propn_strict"))
     min_cc = max(_auto_min_corpus_count(e), 5000) if propn_strict \
         else _auto_min_corpus_count(e)
-    # Sprint 11.3: when several authors are named (Q27 «морские авторы —
-    # Мелвилл, Конрад, Стивенсон»), run affinity_by_author for each in
-    # parallel — the renderer can present the joined signature lists or
-    # compute set intersections downstream.
-    steps = [PlanStep(tool="affinity_by_author",
-                      args={"author_regex": e.author_regex,
-                            "top": e.top_n or 30,
-                            "min_corpus_count": min_cc,
-                            "pos_filter": e.pos_filter})]
-    for extra in e.multi_author_regex[:3]:  # cap at 4 total to bound time
-        steps.append(PlanStep(
-            tool="affinity_by_author",
-            args={"author_regex": extra,
-                  "top": e.top_n or 30,
-                  "min_corpus_count": min_cc,
-                  "pos_filter": e.pos_filter},
-            optional=True))
+    # Phase 4 — fan-out invariant. Builder emits a SINGLE primary step
+    # with `fan_out="author_regex"`; the router clones it per
+    # `e.multi_author_regex[:3]` before executing. Closes E5
+    # structurally: «X у автор-1 и автор-2» works the same way for
+    # author_vocab / word_contexts / word_emotion / word_collocates /
+    # word_pos / word_etymology — all rely on the same invariant, no
+    # builder reimplements the loop.
+    steps = [PlanStep(
+        tool="affinity_by_author",
+        args={"author_regex": e.author_regex,
+              "top": e.top_n or 30,
+              "min_corpus_count": min_cc,
+              "pos_filter": e.pos_filter},
+        fan_out="author_regex",
+    )]
     explain = f"affinity_by_author({e.author_regex})"
     if e.multi_author_regex:
-        explain += f" + {len(e.multi_author_regex[:3])} more"
+        explain += f" + fan-out [{len(e.multi_author_regex[:3])} more]"
     if propn_strict:
         explain += f" [propn_strict: min_corpus_count={min_cc}]"
     return QueryPlan(
@@ -1061,26 +1079,20 @@ def _plan_word_contexts(e: Entities) -> QueryPlan:
     if not e.word:
         return _need_word(e)
     if e.author_regex:
-        # Sprint 17 (Round 7 Q8): «примеры ajar у Остин/Диккенса/Дойла»
-        # used to dispatch only to Austen. multi_author_regex was already
-        # captured by the extractor but the plan ignored it. Now we emit a
-        # word_contexts step per author (cap 4 total) and let the renderer
-        # merge by author.
+        # Phase 4 — fan-out invariant. Single primary step + marker;
+        # router clones for `multi_author_regex[:3]`. (E5 root cause:
+        # Sprint 17 Round 7 Q8 — «примеры ajar у Остин/Диккенса/Дойла»
+        # used to dispatch only to Austen because each builder re-
+        # implemented fan-out inline and forgot the secondaries.)
         steps = [PlanStep(
             tool="word_contexts",
             args={"author_regex": e.author_regex,
                   "word": e.word, "max_samples": 8},
+            fan_out="author_regex",
         )]
-        for extra in e.multi_author_regex[:3]:
-            steps.append(PlanStep(
-                tool="word_contexts",
-                args={"author_regex": extra,
-                      "word": e.word, "max_samples": 5},
-                optional=True,
-            ))
         explain = f"word_contexts({e.author_regex}, {e.word})"
         if e.multi_author_regex:
-            explain += f" + {len(e.multi_author_regex[:3])} more authors"
+            explain += f" + fan-out [{len(e.multi_author_regex[:3])} more]"
         return QueryPlan(
             intent="word_contexts", entities=e, steps=steps,
             expected_cost="cheap",
@@ -1135,30 +1147,25 @@ def _plan_word_collocates(e: Entities) -> QueryPlan:
     if isinstance(scope_or_plan, QueryPlan):
         return scope_or_plan
 
-    # E5 (R-22 P5): fan-out for multi-author queries like «что соседствует
-    # с fog у Лавкрафта и По одновременно». Per-author collocates, renderer
-    # aggregates.
-    if e.author_regex and e.multi_author_regex:
-        steps = _fan_out_authors_steps(
-            e, tool="word_collocates",
-            base_args={"word": e.word, "window": 4, "top": e.top_n or 20},
-            scope_field="scope", cap=3,
-        )
-        explain = (f"word_collocates fan-out: {e.author_regex} + "
-                   f"{len(e.multi_author_regex[:3])} more ({e.word})")
-        return QueryPlan(
-            intent="word_collocates", entities=e, steps=steps,
-            expected_cost="medium",
-            explain=explain,
-        )
-
+    # Phase 4 — fan-out invariant. Single primary step + marker; router
+    # clones per `multi_author_regex[:3]`. E5 root cause was builders
+    # re-implementing the fan-out branch separately and dropping it on
+    # «соседи fog у Лавкрафта и По одновременно».
+    fan_out_marker = (
+        "scope_author"
+        if e.author_regex and isinstance(scope_or_plan, dict)
+        else None
+    )
     return QueryPlan(
         intent="word_collocates", entities=e,
         steps=[PlanStep(tool="word_collocates",
                         args={"scope": scope_or_plan, "word": e.word,
-                              "window": 4, "top": e.top_n or 20})],
+                              "window": 4, "top": e.top_n or 20},
+                        fan_out=fan_out_marker)],
         expected_cost="medium",
-        explain=f"word_collocates({scope_or_plan}, {e.word})",
+        explain=f"word_collocates({scope_or_plan}, {e.word})"
+                + (f" + fan-out [{len(e.multi_author_regex[:3])} more]"
+                   if fan_out_marker and e.multi_author_regex else ""),
     )
 
 
@@ -1268,12 +1275,24 @@ def _plan_word_pos(e: Entities) -> QueryPlan:
     # books"; max_occurrences=200 caps runtime to first 200 matches.
     if scope == "all_corpus":
         scope = {"author": ".*"}
+    # Phase 4 — opt-in to the fan-out invariant when the user named a
+    # primary author. «POS для light у Wodehouse и Twain» now fans out
+    # at the router level, just like word_emotion / word_collocates do.
+    fan_out_marker = (
+        "scope_author"
+        if e.author_regex and isinstance(scope, dict)
+        and scope.get("author") == e.author_regex
+        else None
+    )
     return QueryPlan(
         intent="word_pos", entities=e,
         steps=[PlanStep(tool="word_pos_distribution",
-                        args={"scope": scope, "word": e.word or "light"})],
+                        args={"scope": scope, "word": e.word or "light"},
+                        fan_out=fan_out_marker)],
         expected_cost="cheap",
-        explain=f"word_pos_distribution({scope}, {e.word or 'light'})",
+        explain=f"word_pos_distribution({scope}, {e.word or 'light'})"
+                + (f" + fan-out [{len(e.multi_author_regex[:3])} more]"
+                   if fan_out_marker and e.multi_author_regex else ""),
     )
 
 
@@ -1284,14 +1303,19 @@ def _plan_word_etymology(e: Entities) -> QueryPlan:
         # Heavy tool — each candidate word triggers a Wiktionary HTTP call.
         # Cap top at 20 and bump min_corpus_count to 1000 so the candidate
         # pool stays small enough to finish under the 90s chat timeout.
+        # Phase 4 — opt-in to the fan-out invariant: «германские слова у
+        # Tolkien и Morris» now fans out at the router level uniformly.
         return QueryPlan(
             intent="word_etymology", entities=e,
             steps=[PlanStep(tool="find_words_by_etymology",
                             args={"scope": scope, "family": e.etymology_family,
                                   "top": min(e.top_n or 15, 20),
-                                  "min_corpus_count": 1000})],
+                                  "min_corpus_count": 1000},
+                            fan_out="scope_author")],
             expected_cost="heavy",
-            explain=f"find_words_by_etymology({scope}, family={e.etymology_family}, top≤20)",
+            explain=f"find_words_by_etymology({scope}, family={e.etymology_family}, top≤20)"
+                    + (f" + fan-out [{len(e.multi_author_regex[:3])} more]"
+                       if e.multi_author_regex else ""),
         )
     if e.word:
         # Sprint 21 B101: fan out word_contexts in parallel — when user
@@ -1334,32 +1358,26 @@ def _plan_word_emotion(e: Entities) -> QueryPlan:
         return scope_or_plan
     emotion = e.emotion or "fear"
 
-    # E5 (R-22 P5): fan-out for multi-author queries. «слова страха у
-    # По и Лавкрафта одновременно» must analyze BOTH authors. Helper
-    # builds primary + multi_authors[:3] steps; renderer aggregates.
-    if e.author_regex and e.multi_author_regex:
-        steps = _fan_out_authors_steps(
-            e, tool="emotion_collocates",
-            base_args={"emotion": emotion, "window": 4,
-                       "top": e.top_n or 25},
-            scope_field="scope", cap=3,
-        )
-        explain = (f"emotion_collocates fan-out: {e.author_regex} + "
-                   f"{len(e.multi_author_regex[:3])} more ({emotion})")
-        return QueryPlan(
-            intent="word_emotion", entities=e,
-            steps=steps,
-            expected_cost="medium",
-            explain=explain,
-        )
-
+    # Phase 4 — fan-out invariant. Single primary step + marker; the
+    # router clones per `multi_author_regex[:3]`. Closes E5 root cause
+    # («слова страха у По и Лавкрафта одновременно» used to drop the
+    # secondary author silently — builders re-implemented fan-out per-
+    # tool and missed cases).
+    fan_out_marker = (
+        "scope_author"
+        if e.author_regex and isinstance(scope_or_plan, dict)
+        else None
+    )
     return QueryPlan(
         intent="word_emotion", entities=e,
         steps=[PlanStep(tool="emotion_collocates",
                         args={"scope": scope_or_plan, "emotion": emotion,
-                              "window": 4, "top": e.top_n or 25})],
+                              "window": 4, "top": e.top_n or 25},
+                        fan_out=fan_out_marker)],
         expected_cost="medium",
-        explain=f"emotion_collocates({scope_or_plan}, {emotion})",
+        explain=f"emotion_collocates({scope_or_plan}, {emotion})"
+                + (f" + fan-out [{len(e.multi_author_regex[:3])} more]"
+                   if fan_out_marker and e.multi_author_regex else ""),
     )
 
 
@@ -2009,65 +2027,6 @@ def _plan_book_extremum(e: Entities) -> QueryPlan:
     )
 
 
-# ===== dispatch table =====
-
-
-PLAN_BUILDERS = {
-    "introduction":         _plan_introduction,
-    "corpus_meta":          _plan_corpus_meta,
-    "author_metadata":      _plan_author_metadata,
-    "author_vocab":         _plan_author_vocab,
-    "author_top_words":     _plan_author_top_words,
-    "author_compare":       _plan_author_compare,
-    "book_compare":         _plan_book_compare,
-    "author_attribution":   _plan_author_attribution,
-    "author_influences":    _plan_author_influences,
-    "author_closest":       _plan_author_closest,
-    "lexical_wealth":       _plan_lexical_wealth,
-    "book_vocab":           _plan_book_vocab,
-    "book_readability":     _plan_book_readability,
-    "book_archaic":         _plan_book_archaic,
-    "book_emotion":         _plan_book_emotion,
-    "book_recommendation":  _plan_book_recommendation,
-    "word_contexts":        _plan_word_contexts,
-    "word_collocates":      _plan_word_collocates,
-    "word_timeline":        _plan_word_timeline,
-    "word_pos":             _plan_word_pos,
-    "word_etymology":       _plan_word_etymology,
-    "word_emotion":         _plan_word_emotion,
-    "learning":             _plan_learning,
-    "top_authors_books":    _plan_top_authors,
-    "book_lookup":          _plan_book_lookup,
-    "country_compare":      _plan_country_compare,
-    "country_vocab":        _plan_country_vocab,
-    "composite_compare":    _plan_composite_compare,
-    "period_vocab":         _plan_period_vocab,
-    "genre_compare":        _plan_genre_compare,
-    "topic_words":          _plan_topic_words,
-    "translation_quality":  _plan_translation_quality,
-    "vocab_passport":       _plan_vocab_passport,
-    "word_dialogue":        _plan_word_dialogue,
-    "word_movement":        _plan_word_movement,
-    # Sprint 16 Phase E — meta-query intents
-    "author_lookup":        _plan_author_lookup,
-    "corpus_extremum":      _plan_corpus_extremum,
-    "book_extremum":        _plan_book_extremum,
-    # Sprint 16 Phase F — semantic find_book by topic
-    "topic_book_search":    _plan_topic_book_search,
-    # Sprint 16 Phase G — pub_year + RU genitive titles
-    "book_pub_year":        _plan_book_pub_year,
-    # Sprint 17 — readability comparison
-    "book_readability_compare": _plan_book_readability_compare,
-    # Sprint 17 — books similar to a reference book
-    "book_similar":         _plan_book_similar,
-    # Sprint 18 — ambiguous similarity router («в стиле X»)
-    "similar_to":           _plan_similar_to,
-    # Sprint 20 — translate-followup escape hatch (honest clarify)
-    # filled after function defined below
-    "out_of_scope":         _plan_out_of_scope,
-}
-
-
 def _plan_translate_word_list(e: Entities) -> QueryPlan:
     """Sprint 20 — translate-followup with prior-words handoff.
 
@@ -2135,10 +2094,6 @@ def _plan_translate_word_list(e: Entities) -> QueryPlan:
         expected_cost="heavy",
         explain=explain,
     )
-
-
-# Wire builder into the dispatch table now that the function exists.
-PLAN_BUILDERS["translate_word_list"] = _plan_translate_word_list
 
 
 def _plan_export_word_list(e: Entities) -> QueryPlan:
@@ -2246,7 +2201,65 @@ def _format_spec(fmt: str) -> str:
     return table.get(fmt, table["csv"])
 
 
-PLAN_BUILDERS["export_word_list"] = _plan_export_word_list
+# ===== dispatch table =====
+
+
+PLAN_BUILDERS = {
+    "introduction":         _plan_introduction,
+    "corpus_meta":          _plan_corpus_meta,
+    "author_metadata":      _plan_author_metadata,
+    "author_vocab":         _plan_author_vocab,
+    "author_top_words":     _plan_author_top_words,
+    "author_compare":       _plan_author_compare,
+    "book_compare":         _plan_book_compare,
+    "author_attribution":   _plan_author_attribution,
+    "author_influences":    _plan_author_influences,
+    "author_closest":       _plan_author_closest,
+    "lexical_wealth":       _plan_lexical_wealth,
+    "book_vocab":           _plan_book_vocab,
+    "book_readability":     _plan_book_readability,
+    "book_archaic":         _plan_book_archaic,
+    "book_emotion":         _plan_book_emotion,
+    "book_recommendation":  _plan_book_recommendation,
+    "word_contexts":        _plan_word_contexts,
+    "word_collocates":      _plan_word_collocates,
+    "word_timeline":        _plan_word_timeline,
+    "word_pos":             _plan_word_pos,
+    "word_etymology":       _plan_word_etymology,
+    "word_emotion":         _plan_word_emotion,
+    "learning":             _plan_learning,
+    "top_authors_books":    _plan_top_authors,
+    "book_lookup":          _plan_book_lookup,
+    "country_compare":      _plan_country_compare,
+    "country_vocab":        _plan_country_vocab,
+    "composite_compare":    _plan_composite_compare,
+    "period_vocab":         _plan_period_vocab,
+    "genre_compare":        _plan_genre_compare,
+    "topic_words":          _plan_topic_words,
+    "translation_quality":  _plan_translation_quality,
+    "vocab_passport":       _plan_vocab_passport,
+    "word_dialogue":        _plan_word_dialogue,
+    "word_movement":        _plan_word_movement,
+    # Sprint 16 Phase E — meta-query intents
+    "author_lookup":        _plan_author_lookup,
+    "corpus_extremum":      _plan_corpus_extremum,
+    "book_extremum":        _plan_book_extremum,
+    # Sprint 16 Phase F — semantic find_book by topic
+    "topic_book_search":    _plan_topic_book_search,
+    # Sprint 16 Phase G — pub_year + RU genitive titles
+    "book_pub_year":        _plan_book_pub_year,
+    # Sprint 17 — readability comparison
+    "book_readability_compare": _plan_book_readability_compare,
+    # Sprint 17 — books similar to a reference book
+    "book_similar":         _plan_book_similar,
+    # Sprint 18 — ambiguous similarity router («в стиле X»)
+    "similar_to":           _plan_similar_to,
+    # Sprint 20 — translate-followup with prior-words handoff
+    "translate_word_list":  _plan_translate_word_list,
+    # Sprint 20+ B3 — export-followup
+    "export_word_list":     _plan_export_word_list,
+    "out_of_scope":         _plan_out_of_scope,
+}
 
 
 def _regex_to_canonical(regex: str | None) -> str | None:
@@ -2435,4 +2448,11 @@ def build(intent: str, entities: Entities) -> QueryPlan:
             ),
             explain="не определил intent с достаточной уверенностью",
         )
-    return fn(entities)
+    plan = fn(entities)
+    # Phase 4 — apply plan-level invariants at the canonical entry
+    # point. Builders emit single-step plans with `fan_out` markers;
+    # the invariant expands them per `multi_author_regex`. Router
+    # re-applies invariants for defense in depth (idempotent) so direct
+    # `router.execute(QueryPlan(...))` callers also get the expansion.
+    from scripts.v2.planner.invariants import apply_invariants
+    return apply_invariants(plan)
