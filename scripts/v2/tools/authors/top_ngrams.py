@@ -49,7 +49,11 @@ from scripts.v2.contracts.schemas import (
     # min(DEFAULT_TOOL_TIMEOUT_S, request_budget.remaining) via chokepoint.
     # E18 (2026-05-22) — E15 now reads v1's «top» key first (was reading
     # phantom «top_ngrams» only → empty view). Bump to invalidate stale.
-    wrapper_version="v4-phase2-contract",
+    # Phase 3 W-9 (2026-05-22) — added direct-scan fallback for
+    # semantic_class=motion. Bump invalidates cache that returned
+    # empty for «глаголы движения у Диккенса» whenever the affinity-
+    # ranked top-N intersected MOTION_VERBS at 0.
+    wrapper_version="v5-phase3-motion-fallback",
 )
 @v1_contract(v1_fn="scripts.rag_tools.top_ngrams_by_author",
              schema=V1TopNgramsByAuthor)
@@ -79,31 +83,60 @@ def top_ngrams_by_author(author_regex: str, n: int = 2, top: int = 20,
     rows = (raw.get("top") if isinstance(raw, dict) else None) or []
 
     # E2: apply semantic-class lexicon filter
-    if semantic_class and rows:
-        if semantic_class.lower() == "motion":
-            from scripts.v2.tools.authors._motion_verbs import filter_motion_verbs
-            before = len(rows)
-            rows = filter_motion_verbs(rows, word_key="ngram")[:top]
-            if isinstance(raw, dict):
-                raw["top"] = rows
-                raw["_semantic_filter"] = {
-                    "class": "motion",
-                    "before": before,
-                    "after": len(rows),
-                }
-        # Other classes can be added later (emotion / cognition / speech)
+    semantic_fallback_used = False
+    if semantic_class and semantic_class.lower() == "motion":
+        from scripts.v2.tools.authors._motion_verbs import (
+            count_motion_verbs_in_author,
+            filter_motion_verbs,
+        )
+        before = len(rows)
+        rows = filter_motion_verbs(rows, word_key="ngram")[:top] if rows else []
+        # Phase 3 W-9 (Stan 2026-05-22) — when affinity-ranked top-N
+        # has zero motion-verb intersection (Dickens' top verbs are
+        # dialogue tags «said»/«replied», not motion), fall back to a
+        # direct corpus scan: count MOTION_VERBS occurrences in the
+        # author's books and rank by count. Guarantees a non-empty
+        # answer for «глаголы движения у X» whenever the author exists
+        # in the corpus.
+        if not rows and n == 1:
+            scan_rows = count_motion_verbs_in_author(
+                author_regex=author_regex,
+                year_from=year_from, year_to=year_to,
+                country=country, top=top,
+            )
+            if scan_rows:
+                rows = scan_rows
+                semantic_fallback_used = True
+        if isinstance(raw, dict):
+            raw["top"] = rows
+            raw["_semantic_filter"] = {
+                "class": "motion",
+                "before": before,
+                "after": len(rows),
+                "fallback_direct_scan": semantic_fallback_used,
+            }
+    # Other classes can be added later (emotion / cognition / speech)
 
     warnings = []
     if not rows:
         if semantic_class:
             warnings.append(ToolWarning(
                 "no_lexicon_matches",
-                f"no {semantic_class}-class words found in top "
-                f"{raw_top} ngrams for this author",
+                f"no {semantic_class}-class words found for this author — "
+                f"checked top-{raw_top} affinity + direct corpus scan",
             ))
         else:
             warnings.append(ToolWarning("empty_top",
                                          "no ngrams matched filters"))
+    elif semantic_fallback_used:
+        # W-9 disclosure: surface that we switched ranking strategy. The
+        # user asked for «глаголы движения у X»; we returned a list
+        # ranked by raw count over the author's books, not by affinity.
+        warnings.append(ToolWarning(
+            "semantic_fallback_used",
+            f"semantic_class={semantic_class!r}: ranking by raw count "
+            f"over author's books (no affinity intersect with lexicon)",
+        ))
 
     result = ToolResult.success(
         tool="top_ngrams_by_author", data=raw,

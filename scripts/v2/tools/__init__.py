@@ -5,6 +5,7 @@ from scripts.v2.tools.books import (  # noqa: F401
 )
 from scripts.v2.tools.authors import (  # noqa: F401
     author_metadata, top_authors, affinity, author_profile, top_ngrams,
+    lexical_richness,
 )
 from scripts.v2.tools.words import (  # noqa: F401
     contexts, collocates, timeline, emotion, pos, etymology, lemma_profile,

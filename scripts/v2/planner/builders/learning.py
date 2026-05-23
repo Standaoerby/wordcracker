@@ -52,22 +52,56 @@ def _plan_learning(e: Entities) -> QueryPlan:
     # changed — otherwise they assume the same 96 words were translated.
     if (e.raw_misc or {}).get("_translate_to") == "ru":
         args["_translate_followup_disclose"] = True
+    # Phase 3 W-9 (Stan 2026-05-22) — when user says «B2 без архаизмов»,
+    # learning_words doesn't currently filter by archaic_density (no per-
+    # word archaic tag at v1 level; only enrich_word LLM verdicts cached
+    # in word_dictionary). Surface the limitation as a render_note so
+    # the answer doesn't pretend to honor the filter while just returning
+    # top-by-downloads / band-pass CEFR words.
+    notes: list[str] = []
+    if e.exclude_archaic:
+        notes.append(
+            "ПОЛЬЗОВАТЕЛЬ просил «без архаизмов», но learning_words v1 "
+            "не имеет per-word archaic-density фильтра (только "
+            "post-hoc от enrich_word LLM-кэша). "
+            "DISCLOSE честно: «вернул CEFR-band пресет без отдельной "
+            "фильтрации архаизмов; если в списке встречаются thee/thou/"
+            "hath/ere/oft/yon — отметь явно». "
+            "НЕ замалчивай это ограничение, НЕ говори «отфильтровал "
+            "архаизмы»."
+        )
     return QueryPlan(
         intent="learning", entities=e,
         steps=[PlanStep(tool="learning_words", args=args)],
         expected_cost="medium",
         explain=(f"learning_words({scope}, level={e.level or 'intermediate'}, "
-                 f"top={eff_top}{f' [capped from {requested}]' if requested > 30 else ''})"),
+                 f"top={eff_top}{f' [capped from {requested}]' if requested > 30 else ''}"
+                 f"{' [exclude_archaic flagged → render disclose]' if e.exclude_archaic else ''})"),
+        render_notes=notes,
     )
 
 
 def _plan_lexical_wealth(e: Entities) -> QueryPlan:
+    """Phase 3 W-8 (Stan 2026-05-22) — switched the underlying tool from
+    `top_authors_by(metric=tokens)` to `lexical_richness_authors`.
+
+    Why: the old tool ranked by raw token VOLUME — that's «who has the
+    most text in the corpus», NOT «who has the richest vocabulary».
+    Wells/Various/CIA/Library of Congress all topped the charts simply
+    because they had a lot of indexed text. The new tool ranks by
+    Guiraud R = types / √tokens — length-normalised richness — and
+    secondary metrics hapax_ratio / Yule-K / TTR are exposed alongside.
+
+    W-4 is applied inside the wrapper (CIA / Warren Commission etc.
+    dropped) so the top of the list is real authors, not aggregates.
+    """
     return QueryPlan(
         intent="lexical_wealth", entities=e,
-        steps=[PlanStep(tool="top_authors_by",
-                        args={"metric": "tokens", "top": e.top_n or 20})],
+        steps=[PlanStep(tool="lexical_richness_authors",
+                        args={"top": e.top_n or 20})],
         expected_cost="heavy",
-        explain="top_authors_by(metric=tokens) — proxy для богатства словаря",
+        explain=("lexical_richness_authors(Guiraud R) — нормированное "
+                 "богатство словаря, не объём текста"),
     )
 
 

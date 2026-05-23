@@ -58,6 +58,53 @@ _CURATED_CHARACTER_SURNAMES: frozenset[str] = frozenset({
     "bounderby", "twist", "fagin", "sikes", "bumble", "havisham", "pip",
     "estella", "magwitch", "darnay", "manette", "defarge", "scrooge",
     "cratchit", "tiny tim", "marley", "skimpole", "jarndyce", "skewton",
+    # Phase 3 W-4 (2026-05-22) — characters that dominated «слова Диккенса»
+    # top-list, leaking through prior filters because the surname is
+    # uncommon enough that PG metadata doesn't carry it as a real author.
+    "wegg",      # Silas Wegg — Our Mutual Friend
+    "smike",     # Nicholas Nickleby
+    "toots",     # Mr Toots — Dombey and Son
+    "jip",       # Dora's dog — David Copperfield (yes, even pets bleed)
+    "barkis",    # Mr Barkis — David Copperfield
+    "trotwood",  # Betsey Trotwood — David Copperfield
+    "murdstone", # Edward Murdstone — David Copperfield
+    "creakle",   # Mr Creakle — David Copperfield
+    "dombey",    # Paul Dombey — Dombey and Son
+    "carker",    # Mr Carker — Dombey and Son
+    "boffin",    # Nicodemus Boffin — Our Mutual Friend
+    "wrayburn",  # Eugene Wrayburn — Our Mutual Friend
+    "hexam",     # Lizzie/Charley Hexam — Our Mutual Friend
+    "headstone", # Bradley Headstone — Our Mutual Friend
+    "venus",     # Mr Venus — Our Mutual Friend (taxidermist)
+    "podsnap",   # Mr Podsnap — Our Mutual Friend
+    "lammle",    # Lammle — Our Mutual Friend
+    "veneering", # Veneering — Our Mutual Friend
+    "twemlow",   # Twemlow — Our Mutual Friend
+    "rouncewell",# Rouncewell — Bleak House
+    "tulkinghorn",# Mr Tulkinghorn — Bleak House
+    "dedlock",   # Sir Leicester Dedlock — Bleak House
+    "snagsby",   # Mr Snagsby — Bleak House
+    "guppy",     # Mr Guppy — Bleak House
+    "krook",     # Mr Krook — Bleak House
+    "smallweed", # Smallweed — Bleak House
+    "bagnet",    # Bagnet — Bleak House
+    "skewton",
+    "edwin",     # Edwin Drood — The Mystery of Edwin Drood
+    "drood",
+    "jasper",    # John Jasper — Edwin Drood
+    "datchery",  # Dick Datchery — Edwin Drood
+    # Phase 3 W-4 reconciliation with tz_claude_code_fixes_2026-05-22 —
+    # additional Dickens characters Stan flagged in «характерные слова
+    # Диккенса»:
+    "cuttle",    # Captain Cuttle — Dombey and Son
+    "claypole",  # Noah Claypole — Oliver Twist
+    "bagstock",  # Major Bagstock — Dombey and Son
+    "blimber",   # Dr. Blimber — Dombey and Son
+    "skettles",  # Lady Skettles — Dombey and Son
+    "fledgeby",  # «Fascination» Fledgeby — Our Mutual Friend
+    "riderhood", # Roger Riderhood — Our Mutual Friend
+    "wilfer",    # Bella Wilfer — Our Mutual Friend
+    "noddy",     # Noddy Boffin — Our Mutual Friend
     # Austen
     "darcy", "bingley", "wickham", "collins", "bennet", "elliot",
     "wentworth", "knightley", "woodhouse", "fairfax", "churchill",

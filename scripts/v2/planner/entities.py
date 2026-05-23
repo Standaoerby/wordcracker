@@ -418,6 +418,15 @@ KNOWN_BOOKS: dict[str, tuple[str, str]] = {
     "alice's adventures in wonderland": ("PG11", "Alice's Adventures in Wonderland"),
     "alice in wonderland":        ("PG11",  "Alice's Adventures in Wonderland"),
     "frankenstein":               ("PG84",   "Frankenstein"),
+    # Phase 4 W-5 (2026-05-23) — Russian case forms of «Франкенштейн» so
+    # «что сложнее — Дракула или Франкенштейн» extracts both books, not
+    # just Dracula. Without these the compare plan only fanned out to one
+    # book and the renderer responded about a single title.
+    "франкенштейн":               ("PG84",   "Frankenstein"),
+    "франкенштейна":              ("PG84",   "Frankenstein"),  # gen / acc
+    "франкенштейну":              ("PG84",   "Frankenstein"),  # dat
+    "франкенштейне":              ("PG84",   "Frankenstein"),  # prep
+    "франкенштейном":             ("PG84",   "Frankenstein"),  # inst
     "treasure island":            ("PG120",  "Treasure Island"),
     "the hound of the baskervilles": ("PG2852", "The Hound of the Baskervilles"),
     "hound of the baskervilles":  ("PG2852", "The Hound of the Baskervilles"),
@@ -1028,6 +1037,12 @@ _WORD_AFTER_KEY = re.compile(
 # of X» — single bare ASCII/Cyrillic token directly after a word-anchor verb.
 # Distinct rule (not folded into _WORD_AFTER_KEY) so we can tighten the
 # trigger keywords without weakening the «слово X» case.
+#
+# Phase 4 W-10 (2026-05-23) — added «значит / значение / смысл / определение
+# / define / meaning of / what is» so «что значит ajar», «meaning of engine»,
+# «define ajar», «значение слова X» all extract the bare word. Without
+# these, the intent rule fired but `e.word` stayed None and the plan
+# bounced to clarify.
 _WORD_AFTER_VERB = re.compile(
     r"\b(?:этимолог\w*|происхожден\w*|соседств\w*|"
     # Sprint 20 — Stan 2026-05-19 «найди упоминания burger у Дойла»:
@@ -1036,8 +1051,11 @@ _WORD_AFTER_VERB = re.compile(
     # though the intent rule fired correctly.
     r"упоминан\w*|вхождени\w*|встречаемост\w*|"
     r"mentions?\s+of|occurrences?\s+of|"
-    r"collocates?\s+of|etymology\s+of|contexts?\s+of)\s+"
-    r"(?:слова\s+|word\s+)?"
+    r"collocates?\s+of|etymology\s+of|contexts?\s+of|"
+    # Phase 4 W-10 — meaning / definition triggers
+    r"значит|значени\w*|смысл|определени\w*|объясни|что\s+такое|"
+    r"meaning\s+of|definition\s+of|define|what\s+(?:is|does))\s+"
+    r"(?:слов(?:а|о)\s+|word\s+|the\s+word\s+)?"
     r"[\"'«“]?([a-zA-Zа-яё-]{3,30})[\"'»”]?",
     re.IGNORECASE,
 )
@@ -1073,6 +1091,16 @@ _WORD_STOPWORDS = {
     "много", "мало", "несколько", "разных", "примерно", "вдруг", "почти",
     # Russian pronouns / fillers
     "что", "это", "тот", "та", "те", "наш", "ваш", "ваши", "наши",
+    # Russian preterite verbs that get captured by «слова стали чаще» / «слова
+    # появились в…» / «слова вышли из…» — these are trend triggers, not word
+    # targets. W-12 (2026-05-23): without this filter, «какие слова стали
+    # чаще к концу XIX века» extracted word=«стали» and routed to
+    # word_freq_timeline(«стали») instead of the trending tool.
+    "стали", "стало", "стал", "стала",
+    "ставшие", "ставших",
+    "появились", "появилось",
+    "вышли", "вышло", "вышедшие",
+    "исчезли", "исчезло",
     # English fillers occasionally caught by the same regex
     "the", "and", "but", "with", "from", "than", "more", "less",
 }
@@ -1584,18 +1612,42 @@ _LANG_HINT_PATTERNS = (
     # alternation stems may end on a Cyrillic letter, so we can't use
     # trailing `\b` (Python \b between two Cyrillic word chars never
     # matches). Allow optional `\w*` to consume the inflection tail.
+    # Phase 3 W-9 — also catch «роман / поэт» surface forms.
     (re.compile(
-        r"\b(?:русск\w+\s+(?:литератур|классик|книг|автор|поэз)\w*|"
-        r"russian\s+(?:literature|classics?|books?)|"
+        r"\b(?:русск\w+\s+(?:литератур|классик|книг|автор|поэз|роман|поэт)\w*|"
+        r"russian\s+(?:literature|classics?|books?|novels?|authors?|poets?)|"
         r"на\s+русском(?:\s+языке)?)",
         re.IGNORECASE,
     ), "ru"),
-    # Add other languages as observed
+    # Add other languages as observed.
+    # Phase 3 W-9 (Stan 2026-05-22) — extended to «novel(s) / роман» and
+    # «author(s) / автор» variants so the lang_hint propagates stably
+    # across the common surface forms, not just the literal «literature
+    # / классика» phrasing. Without this, «French novel for B1» silently
+    # defaulted to lang='en'.
     (re.compile(
-        r"\b(?:французск\w+\s+(?:литератур|классик)\w*|"
-        r"french\s+(?:literature|classics?))",
+        r"\b(?:французск\w+\s+(?:литератур|классик|роман|автор|поэз|книг)\w*|"
+        r"french\s+(?:literature|classics?|novels?|authors?|poets?|books?))",
         re.IGNORECASE,
     ), "fr"),
+    # German (Goethe, Schiller, Hesse — common SPGC author block)
+    (re.compile(
+        r"\b(?:немецк\w+\s+(?:литератур|классик|роман|автор|поэз|книг)\w*|"
+        r"german\s+(?:literature|classics?|novels?|authors?|poets?|books?))",
+        re.IGNORECASE,
+    ), "de"),
+    # Spanish (Cervantes etc.)
+    (re.compile(
+        r"\b(?:испанск\w+\s+(?:литератур|классик|роман|автор|поэз|книг)\w*|"
+        r"spanish\s+(?:literature|classics?|novels?|authors?|books?))",
+        re.IGNORECASE,
+    ), "es"),
+    # Italian (Dante, Manzoni)
+    (re.compile(
+        r"\b(?:итальянск\w+\s+(?:литератур|классик|роман|автор|поэз|книг)\w*|"
+        r"italian\s+(?:literature|classics?|novels?|authors?|books?))",
+        re.IGNORECASE,
+    ), "it"),
 )
 
 

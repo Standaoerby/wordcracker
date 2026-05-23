@@ -131,8 +131,11 @@ class AffinityByAuthorIntegration(unittest.TestCase):
                  "corpus_count": 503,  "affinity": 104.84},
                 {"word": "blighter",   "author_count": 65,
                  "corpus_count": 1430, "affinity":  38.50},  # real word
+                # Phase 3 W-4 — was labeled «real (Boer)» but it's a Boer-
+                # war ethnic-toponym derivation («foreign workers in Boer
+                # republics»). Now correctly dropped by toponym filter.
                 {"word": "uitlanders", "author_count": 71,
-                 "corpus_count": 889,  "affinity":  56.92},  # real (Boer)
+                 "corpus_count": 889,  "affinity":  56.92},  # toponym → drop
             ],
             "cached": True,
             "proper_noun_filter": "corpus-diff heuristic dropped 0, "
@@ -151,11 +154,15 @@ class AffinityByAuthorIntegration(unittest.TestCase):
         for surname in ("challenger", "knolles", "barrymore", "holmes",
                           "flannigan"):
             self.assertNotIn(surname, words, surname)
-        # Real signature words must remain
+        # Real signature word must remain
         self.assertIn("blighter", words)
-        self.assertIn("uitlanders", words)
+        # Phase 3 W-4 acceptance — uitlanders is a Boer-war toponym
+        # derivation and MUST be filtered out.
+        self.assertNotIn("uitlanders", words,
+                          msg="W-4: Boer-war toponym must be dropped")
         # And the filter note is propagated
         self.assertIn("surname", r.data["proper_noun_filter"])
+        self.assertIn("toponym", r.data["proper_noun_filter"])
 
     def test_self_name_still_dropped(self):
         """Original Sprint-2 defence still works alongside the new filter."""

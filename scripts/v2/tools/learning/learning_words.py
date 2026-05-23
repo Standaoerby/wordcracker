@@ -12,6 +12,7 @@ from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
 from scripts.v2.tools.authors._surname_filter import filter_surnames
 from scripts.v2.tools.authors._corpus_artifacts import filter_corpus_artifacts
+from scripts.v2.tools.authors._toponym_filter import filter_toponyms
 from scripts.v2.contracts import v1_contract
 from scripts.v2.contracts.schemas import V1LearningWords
 
@@ -64,7 +65,10 @@ _LITERARY_LOCATION_BLACKLIST = frozenset({
     # 2026-05-21 (B-R14-7 root cause). The fix landed but cached results
     # from the broken period still poisoned downstream renders.
     # Bumping version busts the stale cache.
-    wrapper_version="v3-phase2-contract",
+    # Phase 3 W-4 (2026-05-22) — wired toponym filter (GPE/LOC) +
+    # extended character-surname blocklist. Bump invalidates cache that
+    # carried Lambton/Shire-class leakage at non-curated scopes.
+    wrapper_version="v4-phase3-toponym",
 )
 @v1_contract(v1_fn="scripts.learning_tools.learning_words",
              schema=V1LearningWords)
@@ -128,9 +132,20 @@ def learning_words(scope, level: str = "intermediate", top: int = 30,
         rows, artifact_dropped = filter_corpus_artifacts(
             rows, word_key="_word_for_filter",
         )
+        # Phase 3 W-4 — drop GPE/LOC toponyms after surname pass. Same
+        # leak vector at the learning-words level: Lambton/Shire were
+        # caught by hand-coded `_LITERARY_LOCATION_BLACKLIST`, but Boer-
+        # war places and London districts weren't. Curated toponym
+        # blocklist handles them uniformly.
+        for r in rows:
+            if "_word_for_filter" not in r:
+                r["_word_for_filter"] = r.get("word") or ""
+        rows, toponym_dropped = filter_toponyms(
+            rows, word_key="_word_for_filter",
+        )
         for r in rows:
             r.pop("_word_for_filter", None)
-        if (surname_dropped or artifact_dropped) and isinstance(raw, dict):
+        if (surname_dropped or artifact_dropped or toponym_dropped) and isinstance(raw, dict):
             raw["results"] = rows
             prev = raw.get("_render_note", "")
             notes = []
@@ -141,6 +156,9 @@ def learning_words(scope, level: str = "intermediate", top: int = 30,
                 notes.append(f"v2 corpus-artifact filter dropped "
                               f"{artifact_dropped} markup tokens (Roman "
                               f"numerals, single chars)")
+            if toponym_dropped:
+                notes.append(f"v2 toponym filter dropped {toponym_dropped} "
+                              f"GPE/LOC place names (cities, regions)")
             raw["_render_note"] = (prev + " " + "; ".join(notes)).strip()
     # Sprint 22+ Round 12 post-deploy: stamp count-honesty fields just
     # like affinity_by_author / affinity_by_book do. Stan prod 2026-05-20:

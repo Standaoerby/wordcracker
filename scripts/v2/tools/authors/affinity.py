@@ -15,6 +15,7 @@ from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
 from scripts.v2.tools.authors._surname_filter import filter_surnames
 from scripts.v2.tools.authors._corpus_artifacts import filter_corpus_artifacts
+from scripts.v2.tools.authors._toponym_filter import filter_toponyms
 from scripts.v2.contracts import v1_contract
 from scripts.v2.contracts.schemas import V1AffinityByAuthor, V1CompareAuthors
 
@@ -141,7 +142,11 @@ def _drop_author_self_name(author_regex: str, words: list[dict]) -> list[dict]:
     # is `top` / `top_words`). Bumping wrapper_version busts any cached
     # results from before the alias landed. Structural fix in Phase 2
     # via v1↔v2 contracts.
-    wrapper_version="v2-phase2-contract",
+    # Phase 3 W-4 (2026-05-22) — wired toponym filter + extended surname
+    # blocklist (wegg/smike/toots/jip/etc) and PROPN blacklist. Bumping
+    # wrapper_version invalidates cached results that still carry
+    # «burger»/«uitlanders»/Boer-war GPE leakage at Doyle.
+    wrapper_version="v3-phase3-toponym",
 )
 @v1_contract(v1_fn="scripts.rag_tools.affinity_by_author",
              schema=V1AffinityByAuthor)
@@ -197,11 +202,17 @@ def affinity_by_author(author_regex: str, top: int = 50,
         # Stan 2026-05-19: «xvth» = «XV-th век» from broken text
         # rendering — not vocabulary.
         rows, artifact_dropped = filter_corpus_artifacts(rows)
-        if lit_dropped or surname_dropped or artifact_dropped:
+        # Phase 3 W-4 — drop GPE/LOC toponyms (Boer-war places at Doyle,
+        # London districts, classical place names). spaCy POS on isolated
+        # lowercased tokens misses them; curated blocklist catches the
+        # 19th-c. literary toponym set deterministically.
+        rows, toponym_dropped = filter_toponyms(rows)
+        if lit_dropped or surname_dropped or artifact_dropped or toponym_dropped:
             note = (raw.get("proper_noun_filter") or "") if isinstance(raw, dict) else ""
             extra = (f"; v2 literary blacklist dropped {lit_dropped}, "
                       f"v2 surname blocklist dropped {surname_dropped}, "
-                      f"v2 corpus-artifact filter dropped {artifact_dropped}")
+                      f"v2 corpus-artifact filter dropped {artifact_dropped}, "
+                      f"v2 toponym filter dropped {toponym_dropped}")
             if isinstance(raw, dict):
                 raw["proper_noun_filter"] = (note + extra).lstrip("; ")
         # Propagate the filtered list back so the LLM renders only

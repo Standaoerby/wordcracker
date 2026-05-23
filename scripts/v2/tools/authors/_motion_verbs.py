@@ -167,3 +167,75 @@ def filter_motion_verbs(rows: list[dict], *, word_key: str = "ngram") -> list[di
         if tok.lower() in MOTION_VERBS:
             out.append(r)
     return out
+
+
+def count_motion_verbs_in_author(author_regex: str,
+                                  year_from: int | None = None,
+                                  year_to: int | None = None,
+                                  country: str | None = None,
+                                  top: int = 30) -> list[dict]:
+    """Direct corpus-scan fallback for `semantic_class=motion`.
+
+    Why this exists (Phase 3 W-9 — Stan 2026-05-22):
+        v1 `top_ngrams_by_author` ranks by author-affinity. For prolific
+        authors like Dickens, the top-N by affinity are dialogue tags
+        («said», «replied», «cried», «inquired») — those are author-
+        characteristic but NOT motion. Intersecting with MOTION_VERBS
+        gives an empty list. Stan saw «глаголы движения у Диккенса» →
+        «не нашлось униграммы при текущих фильтрах».
+
+    What this does:
+        Scan the author's per-book counts files, sum counts for tokens
+        in MOTION_VERBS, return top-N by raw count. We don't rank by
+        affinity — the LEXICON already constrains semantics; the
+        ranking just orders by usage.
+
+    Returns:
+        List of {"ngram": str, "count": int} sorted by count desc.
+        Empty list if no books match or the corpus paths aren't
+        available (dev workstations without /workspace/spgc/).
+    """
+    try:
+        import sys as _sys
+        from pathlib import Path as _Path
+        _REPO = _Path(__file__).resolve().parents[3]
+        if str(_REPO) not in _sys.path:
+            _sys.path.insert(0, str(_REPO))
+        from scripts.rag_tools import _select_books, _counts_path
+    except (ImportError, AttributeError):
+        return []
+
+    try:
+        sel = _select_books(author_regex, year_from=year_from,
+                            year_to=year_to, country=country)
+    except Exception:
+        return []
+    if sel is None or not len(sel):
+        return []
+
+    counts: dict[str, int] = {v: 0 for v in MOTION_VERBS}
+    used = 0
+    for pg in sel["id"]:
+        f = _counts_path(pg)
+        if not f.exists():
+            continue
+        used += 1
+        try:
+            with open(f, encoding="utf-8") as fh:
+                for line in fh:
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) != 2:
+                        continue
+                    tok = parts[0].lower()
+                    if tok in counts:
+                        try:
+                            counts[tok] += int(parts[1])
+                        except ValueError:
+                            continue
+        except OSError:
+            continue
+    if not used:
+        return []
+    ranked = sorted(((tok, c) for tok, c in counts.items() if c > 0),
+                    key=lambda x: x[1], reverse=True)
+    return [{"ngram": tok, "count": c} for tok, c in ranked[:top]]
