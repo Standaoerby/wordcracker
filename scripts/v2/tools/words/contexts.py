@@ -164,9 +164,10 @@ def _attach_word_contexts_view(result, samples, *, word: str,
             # view with empty/None snippets)
             if not snippet_text or not str(snippet_text).strip():
                 continue
+            from scripts.v2.tools._normalize import match_id
             contexts.append({
                 "snippet": str(snippet_text).strip(),
-                "pg_id": s.get("pg_id") or s.get("id"),
+                "pg_id": match_id(s),
                 "title": s.get("title") or "",
                 "author": s.get("author") or "",
             })

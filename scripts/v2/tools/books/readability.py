@@ -116,7 +116,12 @@ def book_readability(pg_id: str, sample_chars: int = 200_000) -> ToolResult:
         flesch = raw.get("flesch_reading_ease")
         fk = raw.get("flesch_kincaid_grade")
         cefr = raw.get("cefr_heuristic")
-        wc = raw.get("total_words_estimate") or raw.get("words")
+        # `total_words_estimate` is the v2-stamped full-book count
+        # (set above when counts file is readable). `words` is v1's
+        # raw sampled count. Prefer the corrected one when available.
+        wc = raw.get("total_words_estimate")
+        if wc is None:
+            wc = raw.get("words")
         if flesch is not None or fk is not None:
             view = vb.build_readability_summary(
                 book_title=title,

@@ -171,9 +171,10 @@ def word_collocates(scope, word: str, window: int = 4, top: int = 20,
         from scripts.v2.view_types import DataValidity
         rows_after_metric = (raw.get("top_collocates")
                               if isinstance(raw, dict) else None) or []
+        from scripts.v2.tools._normalize import scope_book_id
+        _book = scope_book_id(scope) if isinstance(scope, dict) else None
         scope_str = (str(scope) if not isinstance(scope, dict)
-                     else f"книга {scope.get('book') or scope.get('pg_id')}"
-                     if scope.get("book") or scope.get("pg_id")
+                     else f"книга {_book}" if _book
                      else f"автор {scope.get('author')}"
                      if scope.get("author") else "корпус")
         collocates = []
@@ -186,14 +187,19 @@ def word_collocates(scope, word: str, window: int = 4, top: int = 20,
         for c in rows_after_metric[:top]:
             if not isinstance(c, dict):
                 continue
+            # Reranked rows (line ~128 above) stamp the score under the
+            # active metric's name (`npmi`/`pmi`/`dice`/...). Read that
+            # one key — the pre-Phase-2 npmi/score fallback chain masked
+            # the case where metric != npmi.
             score_val = None
             if metric_lc != "count":
-                score_val = (c.get("npmi") or c.get(metric_lc)
-                             or c.get("score"))
+                score_val = c.get(metric_lc)
+            # Rerank builder stamps `count` (= c_pair) onto every row;
+            # raw v1 rows already carry `count`. One canonical key.
             collocates.append({
                 "token": c.get("word") or "—",
                 "npmi": score_val,
-                "count": c.get("count") or c.get("c_pair"),
+                "count": c.get("count"),
             })
         view = vb.build_collocates(
             word=word,

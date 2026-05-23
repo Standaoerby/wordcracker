@@ -20,6 +20,7 @@ from typing import Any
 from scripts.v2.legacy_dispatch import dispatch_any
 from scripts.v2.tool_registry import dispatch as v2_dispatch, tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
+from scripts.v2.tools._normalize import match_id, search_snippet
 
 log = logging.getLogger("wordcracker.v2.tools.search.hybrid")
 
@@ -30,7 +31,11 @@ def _rank_map(items: list[dict[str, Any]], key: str = "pg_id") -> dict[str, int]
     """Return {pg_id: rank (1-indexed)}. Dupes keep the best rank seen first."""
     out: dict[str, int] = {}
     for i, it in enumerate(items, 1):
-        pg = it.get(key) or it.get("id")
+        # `key` is the caller's preferred name (default "pg_id");
+        # match_id falls back through the historical `id` alias.
+        pg = it.get(key) if isinstance(it, dict) else None
+        if not pg:
+            pg = match_id(it)
         if not pg or pg in out:
             continue
         out[pg] = i
@@ -121,8 +126,8 @@ def hybrid_search(query: str, k: int = 12, per_retriever: int = 50,
     all_ids = set(lex_ranks) | set(sem_ranks)
 
     fused: list[tuple[str, float, dict, dict]] = []
-    by_id_lex = {m.get("pg_id") or m.get("id"): m for m in lex_matches if m}
-    by_id_sem = {m.get("pg_id") or m.get("id"): m for m in sem_matches if m}
+    by_id_lex = {match_id(m): m for m in lex_matches if m}
+    by_id_sem = {match_id(m): m for m in sem_matches if m}
     for pg in all_ids:
         score = (
             (1 / (K_RRF + lex_ranks[pg]) if pg in lex_ranks else 0.0)
@@ -186,7 +191,7 @@ def hybrid_search(query: str, k: int = 12, per_retriever: int = 50,
             "rrf_score": round(score, 6),
             "lexical_rank": lex_ranks.get(pg),
             "semantic_rank": sem_ranks.get(pg),
-            "snippet": lm.get("snippet") or sm.get("text") or sm.get("snippet"),
+            "snippet": search_snippet(lm, sm),
             "title": title,
             "author": author,
         })
@@ -321,7 +326,7 @@ def hybrid_search(query: str, k: int = 12, per_retriever: int = 50,
                 continue
             contexts.append({
                 "snippet": str(snip).strip(),
-                "pg_id": m.get("pg_id") or m.get("id"),
+                "pg_id": match_id(m),
                 "title": m.get("title") or "",
                 "author": m.get("author") or "",
             })

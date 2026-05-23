@@ -71,9 +71,10 @@ def emotion_collocates(scope, emotion: str, window: int = 4,
     try:
         from scripts.v2 import view_builders as vb
         from scripts.v2.view_types import DataValidity
+        from scripts.v2.tools._normalize import scope_book_id
+        _book = scope_book_id(scope) if isinstance(scope, dict) else None
         scope_str = (str(scope) if not isinstance(scope, dict)
-                     else f"книга {scope.get('book') or scope.get('pg_id')}"
-                     if scope.get("book") or scope.get("pg_id")
+                     else f"книга {_book}" if _book
                      else f"автор {scope.get('author')}"
                      if scope.get("author") else "корпус")
         collocates = []

@@ -125,8 +125,11 @@ class V1AffinityByAuthor(V1Schema):
 
 
 V1AffinityByAuthor.__required__ = frozenset({"author_regex", "top"})
+# T2 (Phase 2): row_keys mirror v1's actual emission (rag_tools.py:735).
+# `token` was a phantom alias the wrapper used to fall back to; v1
+# never sets it. Dropped together with the wrapper-side fallback chain.
 V1AffinityByAuthor.__row_keys__ = frozenset({
-    "word", "author_count", "corpus_count", "affinity", "token",
+    "word", "author_count", "corpus_count", "affinity",
 })
 V1AffinityByAuthor.__defaults__ = {
     "author_regex": "^Author,", "slug": "author", "top": [],
@@ -647,9 +650,12 @@ class V1EnrichWord(V1Schema):
     proper_noun: bool
     archaic: bool
     archaic_note: str
+    # Etymology lineage: canonical key is `family_chain` (the normalized
+    # family taxonomy from word_etymology composite). `etymology_chain`
+    # was a phantom alias the wrapper used to fall back to; dropped in
+    # T2 along with the `.get() or .get()` chain.
     primary_family: str
     family_chain: list[str]
-    etymology_chain: list[str]
     ipa: str
     related_forms: list
     cognates: list

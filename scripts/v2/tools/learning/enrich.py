@@ -60,8 +60,7 @@ def enrich_word(word: str, contexts=None, lemma_hint: str = "",
         from scripts.v2.tools._result_filters import (
             looks_like_iso_code,
         )
-        for related_key in ("related_forms", "etymology_chain",
-                              "cognates", "derived_from"):
+        for related_key in ("related_forms", "cognates", "derived_from"):
             forms = raw.get(related_key)
             if not isinstance(forms, list):
                 continue
@@ -93,11 +92,20 @@ def enrich_word(word: str, contexts=None, lemma_hint: str = "",
         from scripts.v2.view_types import DataValidity
         if not isinstance(raw, dict):
             return result
+        # V1EnrichWord canonical etymology key is `family_chain`
+        # (word_etymology composite path stamps it; rag_tools.py:2388).
+        # `etymology_chain` was a phantom alias — gone in T2. The LLM
+        # JSON-mode underneath enrich_word may emit `primary_family`
+        # without `family_chain`, so the presence test still admits
+        # both — but each is read exactly once into its own binding,
+        # not chained inline (T2 R3 / Phase 2 gate).
+        family_chain = raw.get("family_chain") or []
+        primary_family = raw.get("primary_family")
         etym = None
-        if raw.get("primary_family") or raw.get("family_chain"):
+        if family_chain or primary_family:
             etym = {
-                "primary_family": raw.get("primary_family"),
-                "family_chain": raw.get("family_chain") or raw.get("etymology_chain") or [],
+                "primary_family": primary_family,
+                "family_chain": family_chain,
             }
         # V1EnrichWord canonical: translation_ru / translation_<lang>, ipa,
         # pos, definition_en.

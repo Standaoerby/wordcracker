@@ -306,9 +306,11 @@ def affinity_by_author(author_regex: str, top: int = 50,
         for i, r in enumerate(rows[:top], start=1):
             if not isinstance(r, dict):
                 continue
+            # V1AffinityByAuthor canonical row key is `word` (rag_tools.py:735).
+            # The pre-Phase-2 fallback to `token` was phantom — v1 never sets it.
             view_rows.append({
                 "rank": i,
-                "word": r.get("word") or r.get("token") or "—",
+                "word": r.get("word") or "—",
                 "affinity": (f"{r.get('affinity'):.3f}"
                               if isinstance(r.get("affinity"), (int, float))
                               else "—"),

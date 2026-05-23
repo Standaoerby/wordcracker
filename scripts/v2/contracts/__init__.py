@@ -153,8 +153,9 @@ INTERNAL_V2_KEYS = frozenset({
     "scope_total_tokens", "scope_target_count", "scope_books_scanned",
     "min_cooccurrence",
     # legacy emotion/etymology phantom fallbacks moved to schema row_keys;
-    # any leftover transitional reads:
-    "translation", "etymology_chain", "pos_tag",
+    # any leftover transitional reads. (`etymology_chain` dropped in T2 —
+    # never emitted by v1, no longer read by any wrapper.)
+    "translation", "pos_tag",
     # timeline auto-fallback metadata stamped by the wrapper
     "basis_fallback_reason", "basis_originally_requested",
     # author_metadata bio-override flags stamped by the wrapper

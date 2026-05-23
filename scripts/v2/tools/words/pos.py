@@ -69,9 +69,10 @@ def word_pos_distribution(scope, word: str) -> ToolResult:
         # Phase 2 — V1WordPosDistribution declares `pos_distribution` as
         # the canonical list. Phantom `distribution`/`counts` removed.
         dist = raw.get("pos_distribution") or []
+        from scripts.v2.tools._normalize import scope_book_id
+        _book = scope_book_id(scope) if isinstance(scope, dict) else None
         scope_str = (str(scope) if not isinstance(scope, dict)
-                     else f"книга {scope.get('book') or scope.get('pg_id')}"
-                     if scope.get("book") or scope.get("pg_id")
+                     else f"книга {_book}" if _book
                      else f"автор {scope.get('author')}"
                      if scope.get("author") else "корпус")
         view_rows = []

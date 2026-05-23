@@ -203,10 +203,14 @@ _COLLECTION_BUCKETS = frozenset({
 def _is_collection_bucket(row) -> bool:
     """Multi-author aggregate placeholders that pollute «closest by
     style» rankings. They show up because they have thousands of books
-    pooled together with mean stylistic profile near everyone's center."""
+    pooled together with mean stylistic profile near everyone's center.
+
+    V1AuthorInfluences rows canonical key is `author` (rag_tools.py:1782);
+    the pre-Phase-2 `name` fallback was phantom.
+    """
     if not isinstance(row, dict):
         return False
-    name = (row.get("author") or row.get("name") or "").lower().strip()
+    name = (row.get("author") or "").lower().strip()
     if not name:
         return False
     return any(b in name for b in _COLLECTION_BUCKETS)

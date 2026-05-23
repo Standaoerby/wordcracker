@@ -96,8 +96,12 @@ def learning_words(scope, level: str = "intermediate", top: int = 30,
     # backstop keeps the user-facing study list clean.
     if rows:
         before = len(rows)
+        # V1LearningWords rows always carry both `word` and `lemma`
+        # (learning_tools.py:530/536 — `lemma` defaults to `word` when
+        # lemmatize=False). Filtering against a location blacklist is
+        # case-insensitive on the surface token, so read `word` directly.
         rows = [r for r in rows
-                if (r.get("lemma") or r.get("word") or "").lower()
+                if (r.get("word") or "").lower()
                 not in _LITERARY_LOCATION_BLACKLIST]
         if len(rows) < before and isinstance(raw, dict):
             raw["results"] = rows
@@ -109,23 +113,18 @@ def learning_words(scope, level: str = "intermediate", top: int = 30,
     # into a study list. filter_surnames uses curated literary character
     # set + PG-metadata author surnames.
     if rows:
-        # The `word_key` argument in filter_surnames defaults to "word",
-        # but learning_words rows use either "lemma" or "word" → use
-        # whichever is present per row by normalising before the filter.
+        # V1LearningWords always sets `word` per row (learning_tools.py:530/536)
+        # so the filter sees a deterministic surface token. The pre-Phase-2
+        # `word or lemma` fallback chain is gone — one canonical key.
         for r in rows:
-            if "word" not in r and "lemma" in r:
-                r["_word_for_filter"] = r["lemma"]
-            else:
-                r["_word_for_filter"] = r.get("word") or r.get("lemma") or ""
+            r["_word_for_filter"] = r.get("word") or ""
         rows, surname_dropped = filter_surnames(
             rows, word_key="_word_for_filter",
         )
         # Re-apply the marker since filter_surnames returns subset
         for r in rows:
             if "_word_for_filter" not in r:
-                r["_word_for_filter"] = (
-                    r.get("lemma") or r.get("word") or ""
-                )
+                r["_word_for_filter"] = r.get("word") or ""
         rows, artifact_dropped = filter_corpus_artifacts(
             rows, word_key="_word_for_filter",
         )
@@ -277,13 +276,15 @@ def learning_words(scope, level: str = "intermediate", top: int = 30,
 
 def _scope_label(scope) -> str:
     """Human-readable label for the scope arg. Used in view headlines."""
+    from scripts.v2.tools._normalize import scope_book_id
     if scope is None or scope == "" or scope == "all_corpus":
         return "весь корпус"
     if isinstance(scope, str):
         return scope
     if isinstance(scope, dict):
-        if scope.get("book") or scope.get("pg_id"):
-            return f"книга {scope.get('book') or scope.get('pg_id')}"
+        book = scope_book_id(scope)
+        if book:
+            return f"книга {book}"
         if scope.get("author"):
             return f"автор {scope['author']}"
         if scope.get("user_id"):

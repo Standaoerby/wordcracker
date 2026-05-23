@@ -223,14 +223,20 @@ def _attach_lexical_diversity_view(result, raw, scope) -> None:
         from scripts.v2.view_types import DataValidity, EmptyReason
         if not isinstance(raw, dict):
             return
-        # V1LexicalDiversity: book scope → `ttr`; author scope →
-        # `ttr_aggregate` + per-book lists `top_5_most_varied` /
-        # `bottom_5_least_varied`; all_corpus → `ttr`.
-        ttr = raw.get("ttr") or raw.get("ttr_aggregate")
+        # V1LexicalDiversity is scope-polymorphic (rag_tools.py:891/907/930):
+        #   * `{"book": pg}` / `"all_corpus"` → returns `ttr`
+        #   * `{"author": rx}`              → returns `ttr_aggregate`
+        # Pick by scope shape so the wrapper reads exactly one declared
+        # key per branch — R3 compliant, no .get()-or fallback.
+        is_author_scope = (isinstance(scope, dict)
+                           and bool(scope.get("author")))
+        ttr = (raw.get("ttr_aggregate") if is_author_scope
+               else raw.get("ttr"))
         per_book = raw.get("top_5_most_varied") or []
+        from scripts.v2.tools._normalize import scope_book_id
+        _book = scope_book_id(scope) if isinstance(scope, dict) else None
         scope_str = (str(scope) if not isinstance(scope, dict)
-                     else f"книга {scope.get('book') or scope.get('pg_id')}"
-                     if scope.get("book") or scope.get("pg_id")
+                     else f"книга {_book}" if _book
                      else f"автор {scope.get('author')}"
                      if scope.get("author") else "весь корпус")
         if not per_book and ttr is None:
