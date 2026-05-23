@@ -27,6 +27,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+import unittest.mock as mock
+
 from scripts.v2.tools._result_filters import (
     _normalize_book_title, dedup_book_editions,
 )
@@ -158,6 +160,88 @@ class W17CorpusMetaPeriod(unittest.TestCase):
         out = template_executor._render_corpus_meta_snapshot(view)
         self.assertIn("Авторов", out)
         self.assertIn("12", out)
+
+
+class W17FindBookEndToEndDedup(unittest.TestCase):
+    """W-17 acceptance — «найди Frankenstein» / «найди Hard Times»
+    no longer return 5/2 PG-ids respectively. The dedup must run on
+    the find_book wrapper itself, not only via _normalize_book_title
+    in isolation."""
+
+    def test_find_book_collapses_frankenstein_editions(self):
+        from scripts.v2.tools.books.find_book import find_book
+        v1_raw = {
+            "title_query": "Frankenstein",
+            "author_filter": None,
+            "total_matches": 5,
+            "matches": [
+                {"id": "PG84", "title": "Frankenstein",
+                 "author": "Shelley, Mary Wollstonecraft",
+                 "downloads": 30_000, "language": "en",
+                 "authoryearofbirth": 1797, "pub_year": 1818,
+                 "pg_id": "PG84"},
+                {"id": "PG41445",
+                 "title": "Frankenstein; Or, The Modern Prometheus",
+                 "author": "Shelley, Mary Wollstonecraft",
+                 "downloads": 5_000, "language": "en",
+                 "authoryearofbirth": 1797, "pub_year": 1818,
+                 "pg_id": "PG41445"},
+                {"id": "PG20000",
+                 "title": "Frankenstein (1818 edition)",
+                 "author": "Shelley, Mary Wollstonecraft",
+                 "downloads": 1_200, "language": "en",
+                 "authoryearofbirth": 1797, "pub_year": 1818,
+                 "pg_id": "PG20000"},
+                {"id": "PG30000",
+                 "title": "Frankenstein Or The Modern Prometheus",
+                 "author": "Shelley, Mary Wollstonecraft",
+                 "downloads": 800, "language": "en",
+                 "authoryearofbirth": 1797, "pub_year": 1818,
+                 "pg_id": "PG30000"},
+                {"id": "PG40000",
+                 "title": "Frankenstein (Illustrated)",
+                 "author": "Shelley, Mary Wollstonecraft",
+                 "downloads": 200, "language": "en",
+                 "authoryearofbirth": 1797, "pub_year": 1818,
+                 "pg_id": "PG40000"},
+            ],
+        }
+        with mock.patch("scripts.rag_tools.find_book", return_value=v1_raw):
+            r = find_book(title="Frankenstein", top=10)
+        self.assertTrue(r.ok)
+        ids = [m["id"] for m in r.data["matches"]]
+        self.assertEqual(ids, ["PG84"],
+                          f"W-17 acceptance: Frankenstein must collapse to "
+                          f"one PG id (highest downloads). Got {ids}")
+        # Warning surfaced so renderer can disclose
+        codes = [w.code for w in r.warnings]
+        self.assertIn("edition_dedup", codes)
+
+    def test_find_book_collapses_hard_times_editions(self):
+        from scripts.v2.tools.books.find_book import find_book
+        v1_raw = {
+            "title_query": "Hard Times",
+            "author_filter": None,
+            "total_matches": 2,
+            "matches": [
+                {"id": "PG786", "title": "Hard Times",
+                 "author": "Dickens, Charles",
+                 "downloads": 8_000, "language": "en",
+                 "authoryearofbirth": 1812, "pg_id": "PG786"},
+                {"id": "PG34989",
+                 "title": "Hard Times — For These Times",
+                 "author": "Dickens, Charles",
+                 "downloads": 1_500, "language": "en",
+                 "authoryearofbirth": 1812, "pg_id": "PG34989"},
+            ],
+        }
+        with mock.patch("scripts.rag_tools.find_book", return_value=v1_raw):
+            r = find_book(title="Hard Times", top=10)
+        self.assertTrue(r.ok)
+        ids = [m["id"] for m in r.data["matches"]]
+        self.assertEqual(ids, ["PG786"],
+                          f"W-17: Hard Times must collapse to one PG id. "
+                          f"Got {ids}")
 
 
 if __name__ == "__main__":

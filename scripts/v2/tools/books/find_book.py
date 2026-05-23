@@ -49,7 +49,12 @@ log = logging.getLogger("wordcracker.v2.tools.find_book")
     requires=["book"],
     cost="cheap",
     cacheable=True,
-    wrapper_version="v2-phase2-contract",
+    # W-17 (Phase 5 P2, 2026-05-23) — wire dedup_book_editions onto the
+    # find_book path. Without it «найди Frankenstein» returned 5 PG-ids
+    # (PG84, PG41445, …) and «найди Hard Times» 2; the W-17 acceptance
+    # required schлоп. Bump invalidates cache so existing «5 row»
+    # entries get recomputed.
+    wrapper_version="v3-w17-edition-dedup",
 )
 @v1_contract(v1_fn="scripts.rag_tools.find_book", schema=V1FindBook)
 def find_book(title: str, author: str = "", top: int = 5,
@@ -76,6 +81,25 @@ def find_book(title: str, author: str = "", top: int = 5,
     matches = raw.get("matches", []) if isinstance(raw, dict) else []
     total = int(raw.get("total_matches", len(matches))) if isinstance(raw, dict) else len(matches)
 
+    # W-17 (Phase 5 P2, 2026-05-23) — collapse edition duplicates.
+    # «Frankenstein» / «Frankenstein; Or, The Modern Prometheus» /
+    # «Frankenstein (1818 edition)» each had its own PG id in raw v1
+    # output; user got 5 rows for the same novel. dedup_book_editions
+    # groups by (author, normalized_title) and keeps the highest-
+    # downloads row per group. Done AFTER v1 returned so `total_matches`
+    # still reflects the underlying corpus count.
+    dedup_dropped = 0
+    if matches:
+        try:
+            from scripts.v2.tools._result_filters import (
+                apply_filters, dedup_book_editions,
+            )
+            matches, drops = apply_filters([dedup_book_editions], matches)
+            dedup_dropped = sum(drops.values()) if drops else 0
+        except Exception:
+            log.exception("dedup_book_editions on find_book failed; "
+                          "shipping raw matches")
+
     warnings: list[ToolWarning] = []
     if total == 0:
         # Planner will catch this and ask for clarification rather than letting
@@ -97,6 +121,12 @@ def find_book(title: str, author: str = "", top: int = 5,
             code="more_matches",
             message=f"{total} books matched, showing top {top}. Narrow with author=…",
             details={"total": total, "returned": len(matches)},
+        ))
+    if dedup_dropped:
+        warnings.append(ToolWarning(
+            code="edition_dedup",
+            message=f"свёрнуто {dedup_dropped} дублирующее(их) изданий — "
+                    f"одна и та же книга под разными PG id (W-17).",
         ))
 
     result = ToolResult.success(
