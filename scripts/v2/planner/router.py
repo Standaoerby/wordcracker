@@ -25,11 +25,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Literal, Union
 
-from scripts.v2.legacy_dispatch import dispatch_any
 from scripts.v2.planner.plan import PlanStep, QueryPlan
 from scripts.v2.planner import plan_spec as _spec_mod
 from scripts.v2.planner.invariants import apply_invariants
 from scripts.v2.planner.plan_spec import PlanSpec
+from scripts.v2.tool_registry import dispatch
 from scripts.v2._types import ToolResult
 
 
@@ -171,8 +171,10 @@ def _execute_query_plan(plan: QueryPlan, *, budget=None) -> RouterResult:
                                 tool=step.tool, args=args))
         # Phase 5 chokepoint: budget идёт ВНУТРЬ dispatch, где effective
         # timeout = min(spec.timeout_s, budget.remaining_s). Гарантирует,
-        # что ни один тул не переживёт request envelope.
-        result = dispatch_any(step.tool, args, budget=budget)
+        # что ни один тул не переживёт request envelope. T5 (2026-05-23) —
+        # legacy_dispatch удалён, `dispatch` сам идёт по v1-пути при промахе
+        # в v2 REGISTRY, без отдельной точки вызова.
+        result = dispatch(step.tool, args, budget=budget)
         results.append(result)
         if usage is not None:
             usage.tool_calls_used += 1
@@ -285,7 +287,7 @@ def _execute_spec(spec: PlanSpec, *, budget=None) -> RouterResult:
         events.append(StepEvent(kind="step_start", step_idx=idx,
                                  tool=step.tool, args=resolved_args))
         # Phase 5 chokepoint: см. execute() выше.
-        result = dispatch_any(step.tool, resolved_args, budget=budget)
+        result = dispatch(step.tool, resolved_args, budget=budget)
         if usage is not None:
             usage.tool_calls_used += 1
         results_ordered.append(result)
@@ -361,7 +363,7 @@ def _execute_query_plan_stream(plan: QueryPlan, *, budget=None) -> Iterator[dict
     """v3 streaming executor — `plan: QueryPlan`. SSE event shape:
     `intent` / `plan` / `tool_call` / `tool_result` / `done`.
 
-    Phase 5: `budget` proxied into `dispatch_any` like `execute()` so the
+    Phase 5: `budget` proxied into `dispatch` like `execute()` so the
     SSE path is timeout-bounded symmetrically with the blocking path.
     """
     yield {"event": "intent", "label": plan.intent,
@@ -385,7 +387,7 @@ def _execute_query_plan_stream(plan: QueryPlan, *, budget=None) -> Iterator[dict
     for idx, step in enumerate(plan.steps):
         args = _inject(step.args, results, step.depends_on, step.inject_result_as)
         yield {"event": "tool_call", "name": step.tool, "args": args, "step_idx": idx}
-        tr = dispatch_any(step.tool, args, budget=budget)
+        tr = dispatch(step.tool, args, budget=budget)
         results.append(tr)
         yield {"event": "tool_result", "name": step.tool,
                "ok": tr.ok, "ms": tr.runtime_ms,
@@ -403,7 +405,7 @@ def _execute_spec_stream(spec: PlanSpec, *, budget=None) -> Iterator[dict]:
     shape as `_execute_query_plan_stream` so chat_server's SSE handler
     can pipe v4 plans without forking the protocol.
 
-    Phase 5: `budget` proxied into `dispatch_any` for timeout enforcement.
+    Phase 5: `budget` proxied into `dispatch` for timeout enforcement.
 
     T1 / D-P1-8 (2026-05-23) — renamed from `execute_spec_stream`.
     """
@@ -447,7 +449,7 @@ def _execute_spec_stream(spec: PlanSpec, *, budget=None) -> Iterator[dict]:
             resolved_args = {}
         yield {"event": "tool_call", "name": step.tool, "args": resolved_args,
                "step_idx": idx, "step_id": step.id}
-        tr = dispatch_any(step.tool, resolved_args, budget=budget)
+        tr = dispatch(step.tool, resolved_args, budget=budget)
         results_by_id[step.id] = (
             tr.data if (tr and tr.data is not None) else None
         )

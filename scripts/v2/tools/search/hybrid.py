@@ -17,8 +17,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from scripts.v2.legacy_dispatch import dispatch_any
-from scripts.v2.tool_registry import dispatch as v2_dispatch, tool
+from scripts.v2.tool_registry import dispatch, tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
 from scripts.v2.tools._normalize import match_id, search_snippet
 
@@ -78,8 +77,10 @@ def hybrid_search(query: str, k: int = 12, per_retriever: int = 50,
                   lang: str | None = None) -> ToolResult:
     warnings: list[ToolWarning] = []
 
-    # Lexical via v2 lexical_search
-    lex = v2_dispatch("lexical_search", {"query": query, "k": per_retriever})
+    # Lexical via v2 lexical_search. T5 (2026-05-23): unified `dispatch`
+    # chokepoint — same call shape as the semantic_search hop below, no
+    # second alias for the legacy path.
+    lex = dispatch("lexical_search", {"query": query, "k": per_retriever})
     if not lex.ok:
         warnings.append(ToolWarning(
             code="lexical_failed",
@@ -93,10 +94,12 @@ def hybrid_search(query: str, k: int = 12, per_retriever: int = 50,
             warnings.append(w)
 
     # Semantic via legacy semantic_search (still v1-routed for now).
+    # T5: `dispatch` falls through to scripts.rag_query.TOOL_DISPATCH when
+    # the name is not in v2 REGISTRY, with the same timeout/budget guard.
     sem_args = {"query": query, "k": per_retriever}
     if author_filter:
         sem_args["author_filter"] = author_filter
-    sem = dispatch_any("semantic_search", sem_args)
+    sem = dispatch("semantic_search", sem_args)
     if not sem.ok:
         warnings.append(ToolWarning(
             code="semantic_failed",

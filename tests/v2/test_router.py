@@ -60,7 +60,7 @@ def _stub_affinity_book(**kw):
 
 
 def _fake_v1_query():
-    """Stub of scripts.rag_query — provides TOOL_DISPATCH for legacy_dispatch."""
+    """Stub of scripts.rag_query — provides TOOL_DISPATCH for dispatch()'s v1 fallback."""
     m = types.ModuleType("scripts.rag_query")
     m.TOOL_DISPATCH = {
         "affinity_by_author": lambda **kw: mock_from_schema(
@@ -307,9 +307,8 @@ class RouterExecutesSteps(unittest.TestCase):
         _stub_learning = _fake_v1_learning()
         sys.modules["scripts.rag_tools"] = _stub_rag_tools
         sys.modules["scripts.learning_tools"] = _stub_learning
-        from scripts.v2 import legacy_dispatch
-        legacy_dispatch._LEGACY_DISPATCH_CACHE.clear()
-        legacy_dispatch._LEGACY_DISPATCH_CACHE.update({"dispatch": None, "loaded": False})
+        from scripts.v2 import tool_registry
+        tool_registry._reset_legacy_cache_for_tests()
         # Snapshot + rebuild v2 registry so find_book wrapper resolves the stub.
         from scripts.v2.tool_registry import REGISTRY
         self._snap = dict(REGISTRY); REGISTRY.clear()
@@ -466,9 +465,8 @@ class RouterStreamEvents(unittest.TestCase):
         _stub_learning = _fake_v1_learning()
         sys.modules["scripts.rag_tools"] = _stub_rag_tools
         sys.modules["scripts.learning_tools"] = _stub_learning
-        from scripts.v2 import legacy_dispatch
-        legacy_dispatch._LEGACY_DISPATCH_CACHE.clear()
-        legacy_dispatch._LEGACY_DISPATCH_CACHE.update({"dispatch": None, "loaded": False})
+        from scripts.v2 import tool_registry
+        tool_registry._reset_legacy_cache_for_tests()
 
     def tearDown(self):
         sys.modules.pop("scripts.rag_query", None)

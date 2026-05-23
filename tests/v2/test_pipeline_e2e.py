@@ -63,9 +63,8 @@ def _install_stubs():
 
 
 def _reset_legacy_cache():
-    from scripts.v2 import legacy_dispatch
-    legacy_dispatch._LEGACY_DISPATCH_CACHE.clear()
-    legacy_dispatch._LEGACY_DISPATCH_CACHE.update({"dispatch": None, "loaded": False})
+    from scripts.v2 import tool_registry
+    tool_registry._reset_legacy_cache_for_tests()
 
 
 def _reset_v2_registry():

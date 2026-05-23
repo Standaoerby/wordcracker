@@ -71,8 +71,7 @@ PROBES = [
 
 
 def run() -> int:
-    from scripts.v2 import legacy_dispatch
-    from scripts.v2.legacy_dispatch import dispatch_any
+    from scripts.v2.tool_registry import dispatch
     # Force v2 tools to load so they shadow the v1 path where migrated.
     from scripts.v2 import tools  # noqa: F401
 
@@ -81,7 +80,7 @@ def run() -> int:
     for tool_name, args in PROBES:
         t0 = time.perf_counter()
         try:
-            r = dispatch_any(tool_name, args)
+            r = dispatch(tool_name, args)
         except Exception as e:
             elapsed = time.perf_counter() - t0
             rows.append((tool_name, "CRASH", elapsed, str(e)[:120], 0, []))

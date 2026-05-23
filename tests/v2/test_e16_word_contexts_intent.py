@@ -53,12 +53,13 @@ class HybridSearchEmitsView(unittest.TestCase):
             query={"query": "ajar", "k": 50},
         )
 
-        with mock.patch("scripts.v2.tools.search.hybrid.v2_dispatch",
-                         return_value=lex_result), \
-             mock.patch("scripts.v2.tools.search.hybrid.dispatch_any",
-                         return_value=TR.fail(tool="semantic_search",
-                                              err_type="internal",
-                                              message="mocked off")):
+        def _dispatch(name, args, **_kw):
+            if name == "lexical_search":
+                return lex_result
+            return TR.fail(tool="semantic_search", err_type="internal",
+                           message="mocked off")
+        with mock.patch("scripts.v2.tools.search.hybrid.dispatch",
+                         side_effect=_dispatch):
             r = hybrid_search(query="ajar", k=12)
 
         self.assertTrue(r.ok)

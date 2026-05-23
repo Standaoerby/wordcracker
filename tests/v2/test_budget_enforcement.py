@@ -65,7 +65,7 @@ def _fake_step(tool: str, args: dict | None = None, optional: bool = False) -> P
 
 
 def _stub_dispatch_factory(per_call_delay: float = 0.0):
-    """Returns a dispatch_any-shaped stub that sleeps + returns success.
+    """Returns a dispatch-shaped stub that sleeps + returns success.
 
     Accepts and ignores `budget=` kwarg (Phase 5 added it to the dispatch
     signature so the chokepoint can compute effective tool timeout)."""
@@ -86,7 +86,7 @@ class ExecuteV3Backwards(unittest.TestCase):
             intent="dummy", entities=None,
             steps=[_fake_step("tool_a"), _fake_step("tool_b")],
         )
-        with mock.patch.object(router_mod, "dispatch_any",
+        with mock.patch.object(router_mod, "dispatch",
                                  _stub_dispatch_factory()):
             rr = router_mod.execute(plan)
         self.assertEqual(rr.kind, "results")
@@ -103,7 +103,7 @@ class ExecuteV3Budget(unittest.TestCase):
             steps=[_fake_step(f"tool_{i}") for i in range(5)],
         )
         budget = b.RequestBudget(wall_clock_s=0.05)
-        with mock.patch.object(router_mod, "dispatch_any",
+        with mock.patch.object(router_mod, "dispatch",
                                  _stub_dispatch_factory(per_call_delay=0.030)):
             rr = router_mod.execute(plan, budget=budget)
         self.assertTrue(rr.budget_exceeded)
@@ -120,7 +120,7 @@ class ExecuteV3Budget(unittest.TestCase):
             steps=[_fake_step(f"tool_{i}") for i in range(3)],
         )
         budget = b.RequestBudget(wall_clock_s=5.0)
-        with mock.patch.object(router_mod, "dispatch_any",
+        with mock.patch.object(router_mod, "dispatch",
                                  _stub_dispatch_factory()):
             rr = router_mod.execute(plan, budget=budget)
         self.assertFalse(rr.budget_exceeded)
@@ -141,7 +141,7 @@ class ExecuteSpecBackwards(unittest.TestCase):
                 SpecStep(id="s2", tool="tool_b", args={}),
             ],
         )
-        with mock.patch.object(router_mod, "dispatch_any",
+        with mock.patch.object(router_mod, "dispatch",
                                  _stub_dispatch_factory()):
             rr = router_mod.execute(spec)
         self.assertEqual(rr.kind, "results")
@@ -157,7 +157,7 @@ class ExecuteSpecBudget(unittest.TestCase):
                    for i in range(5)],
         )
         budget = b.RequestBudget(wall_clock_s=0.05)
-        with mock.patch.object(router_mod, "dispatch_any",
+        with mock.patch.object(router_mod, "dispatch",
                                  _stub_dispatch_factory(per_call_delay=0.030)):
             rr = router_mod.execute(spec, budget=budget)
         self.assertTrue(rr.budget_exceeded)

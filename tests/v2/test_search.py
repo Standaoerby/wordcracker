@@ -169,7 +169,7 @@ class HybridIntegration(unittest.TestCase):
 
     def setUp(self):
         import types
-        from scripts.v2 import legacy_dispatch
+        from scripts.v2 import tool_registry
         from scripts.v2.tool_registry import REGISTRY, ToolSpec
         from scripts.v2._types import Coverage, ToolResult
 
@@ -203,9 +203,8 @@ class HybridIntegration(unittest.TestCase):
         )
 
         # Mock semantic_search too. After native migration semantic_search is
-        # in REGISTRY (not legacy_dispatch), so we replace its ToolSpec here
-        # and the rag_query stub is kept as a backstop in case any old
-        # legacy_dispatch call sneaks through.
+        # in REGISTRY, so we replace its ToolSpec here; the rag_query stub
+        # is kept as a backstop in case dispatch()'s v1 fallback path fires.
         def _mock_sem(query, k=8, author_filter=None):
             return ToolResult.success(
                 tool="semantic_search",
@@ -227,7 +226,7 @@ class HybridIntegration(unittest.TestCase):
             cacheable=False,
         )
 
-        # Backstop for legacy_dispatch (unlikely to fire now, but defensive).
+        # Backstop for dispatch()'s v1 fallback (unlikely to fire now, but defensive).
         m = types.ModuleType("scripts.rag_query")
         m.TOOL_DISPATCH = {
             "semantic_search": lambda **kw: {
@@ -238,8 +237,7 @@ class HybridIntegration(unittest.TestCase):
             }
         }
         sys.modules["scripts.rag_query"] = m
-        legacy_dispatch._LEGACY_DISPATCH_CACHE.clear()
-        legacy_dispatch._LEGACY_DISPATCH_CACHE.update({"dispatch": None, "loaded": False})
+        tool_registry._reset_legacy_cache_for_tests()
 
     def tearDown(self):
         from scripts.v2.tool_registry import REGISTRY

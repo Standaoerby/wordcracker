@@ -1610,8 +1610,8 @@ def ask_stream(
             args = router_mod._inject(step.args, results, step.depends_on,
                                       step.inject_result_as)
             yield {"event": "tool_call", "name": step.tool, "args": args}
-            from scripts.v2.legacy_dispatch import dispatch_any
-            tr = dispatch_any(step.tool, args, budget=_v5_stream_budget)
+            from scripts.v2.tool_registry import dispatch
+            tr = dispatch(step.tool, args, budget=_v5_stream_budget)
             results.append(tr)
             yield {"event": "tool_result", "name": step.tool,
                    "ms": tr.runtime_ms, "ok": tr.ok,

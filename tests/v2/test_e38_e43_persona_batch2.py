@@ -161,14 +161,13 @@ class E42ScopeLabelUserFacing(unittest.TestCase):
             coverage=Coverage(books_matched=1, books_total=-1),
             query={"query": "x"},
         )
-        with mock.patch("scripts.v2.tools.search.hybrid.v2_dispatch",
-                         return_value=lex_result), \
-             mock.patch("scripts.v2.tools.search.hybrid.dispatch_any",
-                         return_value=ToolResult.fail(
-                             tool="semantic_search",
-                             err_type="internal",
-                             message="off",
-                         )):
+        def _dispatch(name, args, **_kw):
+            if name == "lexical_search":
+                return lex_result
+            return ToolResult.fail(tool="semantic_search",
+                                   err_type="internal", message="off")
+        with mock.patch("scripts.v2.tools.search.hybrid.dispatch",
+                         side_effect=_dispatch):
             r = hybrid_search(query="x", k=12)
         scope_label = (r.view.payload or {}).get("scope_label") or ""
         self.assertNotIn("FTS5", scope_label,

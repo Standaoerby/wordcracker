@@ -7,7 +7,7 @@ render call). When the flag is off, behavior matches v3 exactly.
 
 We mock three things:
     1. `_call_ollama` inside llm_planner (controls plan JSON)
-    2. `dispatch_any` inside router (controls tool results)
+    2. `dispatch` inside router (controls tool results)
     3. `_llm_render` inside rag_v2 (controls final text)
     4. critic / numeric_audit / observability — let them run as-is so
        the integration is exercised end-to-end
@@ -103,7 +103,7 @@ class FlagOnEndToEnd(unittest.TestCase):
         with mock.patch.object(llm_planner, "LLM_PLANNER_ENABLED", True), \
              mock.patch.object(llm_planner, "_call_ollama",
                                  return_value=plan_json), \
-             mock.patch("scripts.v2.planner.router.dispatch_any",
+             mock.patch("scripts.v2.planner.router.dispatch",
                           side_effect=fake_dispatch), \
              mock.patch("scripts.v2.rag_v2._llm_render",
                           side_effect=fake_render), \

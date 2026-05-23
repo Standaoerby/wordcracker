@@ -84,14 +84,13 @@ class LangFilterSubstring(unittest.TestCase):
                     return meta_by_pg.get(pid, default)
             return _T()
 
-        with mock.patch("scripts.v2.tools.search.hybrid.v2_dispatch",
-                         return_value=lex_result), \
-             mock.patch("scripts.v2.tools.search.hybrid.dispatch_any",
-                         return_value=ToolResult.fail(
-                             tool="semantic_search",
-                             err_type="internal",
-                             message="off",
-                         )), \
+        def _dispatch(name, args, **_kw):
+            if name == "lexical_search":
+                return lex_result
+            return ToolResult.fail(tool="semantic_search",
+                                   err_type="internal", message="off")
+        with mock.patch("scripts.v2.tools.search.hybrid.dispatch",
+                         side_effect=_dispatch), \
              mock.patch("scripts.v2.tools.search.lexical._title_lookup",
                          side_effect=fake_meta_lookup_loader):
             r = hybrid_search(query="ajar", k=12, lang="en")
@@ -131,14 +130,13 @@ class LangFilterSubstring(unittest.TestCase):
                     return meta_by_pg.get(pid, default)
             return _T()
 
-        with mock.patch("scripts.v2.tools.search.hybrid.v2_dispatch",
-                         return_value=lex_result), \
-             mock.patch("scripts.v2.tools.search.hybrid.dispatch_any",
-                         return_value=ToolResult.fail(
-                             tool="semantic_search",
-                             err_type="internal",
-                             message="off",
-                         )), \
+        def _dispatch(name, args, **_kw):
+            if name == "lexical_search":
+                return lex_result
+            return ToolResult.fail(tool="semantic_search",
+                                   err_type="internal", message="off")
+        with mock.patch("scripts.v2.tools.search.hybrid.dispatch",
+                         side_effect=_dispatch), \
              mock.patch("scripts.v2.tools.search.lexical._title_lookup",
                          side_effect=fake_meta_lookup_loader):
             r = hybrid_search(query="ajar", k=12, lang="en")
@@ -169,14 +167,13 @@ class LangFilterSubstring(unittest.TestCase):
                     return meta_by_pg.get(pid, default)
             return _T()
 
-        with mock.patch("scripts.v2.tools.search.hybrid.v2_dispatch",
-                         return_value=lex_result), \
-             mock.patch("scripts.v2.tools.search.hybrid.dispatch_any",
-                         return_value=ToolResult.fail(
-                             tool="semantic_search",
-                             err_type="internal",
-                             message="off",
-                         )), \
+        def _dispatch(name, args, **_kw):
+            if name == "lexical_search":
+                return lex_result
+            return ToolResult.fail(tool="semantic_search",
+                                   err_type="internal", message="off")
+        with mock.patch("scripts.v2.tools.search.hybrid.dispatch",
+                         side_effect=_dispatch), \
              mock.patch("scripts.v2.tools.search.lexical._title_lookup",
                          side_effect=fake_meta_lookup_loader):
             r = hybrid_search(query="ajar", k=12, lang="en")
@@ -206,14 +203,13 @@ class LangFilterSubstring(unittest.TestCase):
                     return meta_by_pg.get(pid, default)
             return _T()
 
-        with mock.patch("scripts.v2.tools.search.hybrid.v2_dispatch",
-                         return_value=lex_result), \
-             mock.patch("scripts.v2.tools.search.hybrid.dispatch_any",
-                         return_value=ToolResult.fail(
-                             tool="semantic_search",
-                             err_type="internal",
-                             message="off",
-                         )), \
+        def _dispatch(name, args, **_kw):
+            if name == "lexical_search":
+                return lex_result
+            return ToolResult.fail(tool="semantic_search",
+                                   err_type="internal", message="off")
+        with mock.patch("scripts.v2.tools.search.hybrid.dispatch",
+                         side_effect=_dispatch), \
              mock.patch("scripts.v2.tools.search.lexical._title_lookup",
                          side_effect=fake_meta_lookup_loader):
             r = hybrid_search(query="ajar", k=12, lang="en")

@@ -87,7 +87,7 @@ class V4FollowupRoutesToLLM(unittest.TestCase):
         with mock.patch.object(llm_planner, "LLM_PLANNER_ENABLED", True), \
              mock.patch.object(llm_planner, "_call_ollama",
                                  return_value=plan_json), \
-             mock.patch("scripts.v2.planner.router.dispatch_any",
+             mock.patch("scripts.v2.planner.router.dispatch",
                           side_effect=fake_dispatch), \
              mock.patch("scripts.v2.rag_v2._llm_render",
                           side_effect=fake_render), \
@@ -123,7 +123,7 @@ class V4FollowupRoutesToLLM(unittest.TestCase):
             return _ok(name, {})
 
         with mock.patch.object(llm_planner, "LLM_PLANNER_ENABLED", False), \
-             mock.patch("scripts.v2.planner.router.dispatch_any",
+             mock.patch("scripts.v2.planner.router.dispatch",
                           side_effect=fake_dispatch):
             # Run with a query that would hit followup rules path
             out = rag_v2.ask(

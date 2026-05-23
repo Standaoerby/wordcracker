@@ -119,16 +119,13 @@ class B100_HybridSearchMergesTitleFromLexical(unittest.TestCase):
             coverage=Coverage(books_matched=0, books_total=-1),
         )
         # Dispatch shim — return appropriate fake per name.
-        def fake_v2_dispatch(name, args):
+        def fake_dispatch(name, args, **_kw):
             if name == "lexical_search":
                 return lex_result
-            raise AssertionError(f"unexpected v2_dispatch({name})")
-        def fake_dispatch_any(name, args):
             if name == "semantic_search":
                 return sem_result
-            raise AssertionError(f"unexpected dispatch_any({name})")
-        with mock.patch.object(hybrid, "v2_dispatch", side_effect=fake_v2_dispatch), \
-             mock.patch.object(hybrid, "dispatch_any", side_effect=fake_dispatch_any):
+            raise AssertionError(f"unexpected dispatch({name})")
+        with mock.patch.object(hybrid, "dispatch", side_effect=fake_dispatch):
             r = hybrid.hybrid_search("ajar", k=5)
         matches = r.data["matches"]
         self.assertEqual(len(matches), 1)
@@ -163,14 +160,13 @@ class B100_HybridSearchMergesTitleFromLexical(unittest.TestCase):
             ]},
             coverage=Coverage(books_matched=1, books_total=-1),
         )
-        def fake_v2_dispatch(name, args):
+        def fake_dispatch(name, args, **_kw):
             if name == "lexical_search":
                 return lex_result
-        def fake_dispatch_any(name, args):
             if name == "semantic_search":
                 return sem_result
-        with mock.patch.object(hybrid, "v2_dispatch", side_effect=fake_v2_dispatch), \
-             mock.patch.object(hybrid, "dispatch_any", side_effect=fake_dispatch_any):
+            raise AssertionError(f"unexpected dispatch({name})")
+        with mock.patch.object(hybrid, "dispatch", side_effect=fake_dispatch):
             r = hybrid.hybrid_search("axe", k=3)
         m = r.data["matches"][0]
         # Semantic wins
@@ -202,14 +198,13 @@ class B100_HybridSearchMergesTitleFromLexical(unittest.TestCase):
             ]},
             coverage=Coverage(books_matched=1, books_total=-1),
         )
-        def fake_v2_dispatch(name, args):
+        def fake_dispatch(name, args, **_kw):
             if name == "lexical_search":
                 return lex_result
-        def fake_dispatch_any(name, args):
             if name == "semantic_search":
                 return sem_result
-        with mock.patch.object(hybrid, "v2_dispatch", side_effect=fake_v2_dispatch), \
-             mock.patch.object(hybrid, "dispatch_any", side_effect=fake_dispatch_any):
+            raise AssertionError(f"unexpected dispatch({name})")
+        with mock.patch.object(hybrid, "dispatch", side_effect=fake_dispatch):
             r = hybrid.hybrid_search("ajar", k=3)
         m = r.data["matches"][0]
         self.assertEqual(m["pg_id"], "PG13304")
@@ -238,14 +233,13 @@ class B100_HybridSearchMergesTitleFromLexical(unittest.TestCase):
         # Stub the v1 metadata lookup at the import boundary.
         fake_lookup = {"PG13304": {"title": "The Gates Ajar",
                                     "author": "Phelps, Elizabeth Stuart"}}
-        def fake_v2_dispatch(name, args):
+        def fake_dispatch(name, args, **_kw):
             if name == "lexical_search":
                 return lex_result
-        def fake_dispatch_any(name, args):
             if name == "semantic_search":
                 return sem_result
-        with mock.patch.object(hybrid, "v2_dispatch", side_effect=fake_v2_dispatch), \
-             mock.patch.object(hybrid, "dispatch_any", side_effect=fake_dispatch_any), \
+            raise AssertionError(f"unexpected dispatch({name})")
+        with mock.patch.object(hybrid, "dispatch", side_effect=fake_dispatch), \
              mock.patch.object(lexical, "_title_lookup", return_value=fake_lookup):
             r = hybrid.hybrid_search("ajar", k=3)
         m = r.data["matches"][0]

@@ -50,7 +50,7 @@ class ExecuteSpecBasic(unittest.TestCase):
             ps.PlanStepSpec(id="s1", tool="x_tool",
                               args={"q": "Beowulf"}),
         ])
-        with mock.patch("scripts.v2.planner.router.dispatch_any",
+        with mock.patch("scripts.v2.planner.router.dispatch",
                           return_value=_fake_tool_result("x_tool",
                                                           {"pg_id": "PG1"})):
             rr = router_mod.execute(spec)
@@ -72,7 +72,7 @@ class ExecuteSpecBasic(unittest.TestCase):
             if name == "resolver":
                 return _fake_tool_result(name, {"pg_id": "PG16328"})
             return _fake_tool_result(name, {"flesch": 60})
-        with mock.patch("scripts.v2.planner.router.dispatch_any",
+        with mock.patch("scripts.v2.planner.router.dispatch",
                           side_effect=fake_dispatch):
             rr = router_mod.execute(spec)
         self.assertEqual(rr.kind, "results")
@@ -94,7 +94,7 @@ class ExecuteSpecBasic(unittest.TestCase):
                 name,
                 {"pg_id": "PG16328"} if name == "resolver" else {"x": 1},
             )
-        with mock.patch("scripts.v2.planner.router.dispatch_any",
+        with mock.patch("scripts.v2.planner.router.dispatch",
                           side_effect=fake_dispatch):
             router_mod.execute(spec)
         self.assertEqual(captured[1][1], {"scope": {"book": "PG16328"}})
@@ -106,7 +106,7 @@ class ExecuteSpecBasic(unittest.TestCase):
         ])
         def fake_dispatch(name, _args, **_kw):
             return _fake_tool_result(name, {}, ok=(name != "a"))
-        with mock.patch("scripts.v2.planner.router.dispatch_any",
+        with mock.patch("scripts.v2.planner.router.dispatch",
                           side_effect=fake_dispatch):
             rr = router_mod.execute(spec)
         self.assertEqual(rr.kind, "results")
@@ -121,7 +121,7 @@ class ExecuteSpecBasic(unittest.TestCase):
         ])
         def fake_dispatch(name, _args, **_kw):
             return _fake_tool_result(name, {}, ok=(name != "a"))
-        with mock.patch("scripts.v2.planner.router.dispatch_any",
+        with mock.patch("scripts.v2.planner.router.dispatch",
                           side_effect=fake_dispatch):
             rr = router_mod.execute(spec)
         self.assertEqual(rr.kind, "results")
@@ -144,7 +144,7 @@ class ExecuteSpecBasic(unittest.TestCase):
             # First call fails, others succeed
             ok = args.get("word") != "telephone"
             return _fake_tool_result(name, {"freq": 5}, ok=ok)
-        with mock.patch("scripts.v2.planner.router.dispatch_any",
+        with mock.patch("scripts.v2.planner.router.dispatch",
                           side_effect=fake_dispatch):
             rr = router_mod.execute(spec)
         self.assertEqual(rr.kind, "results")
@@ -171,7 +171,7 @@ class ExecuteSpecBasic(unittest.TestCase):
         def fake_dispatch(name, _args, **_kw):
             called.append(name)
             return _fake_tool_result(name, {}, ok=(name != "resolver"))
-        with mock.patch("scripts.v2.planner.router.dispatch_any",
+        with mock.patch("scripts.v2.planner.router.dispatch",
                           side_effect=fake_dispatch):
             rr = router_mod.execute(spec)
         # s1 failed and has dependent s2 → abort, s2 not dispatched
@@ -189,7 +189,7 @@ class ExecuteSpecDAGOrdering(unittest.TestCase):
             ps.PlanStepSpec(id="s2", tool="b", args={"q": "y"}),
         ])
         order: list[str] = []
-        with mock.patch("scripts.v2.planner.router.dispatch_any",
+        with mock.patch("scripts.v2.planner.router.dispatch",
                           side_effect=lambda name, _args, **_kw: (
                               order.append(name) or
                               _fake_tool_result(name, {}))):
@@ -224,7 +224,7 @@ class ExecuteSpecDAGOrdering(unittest.TestCase):
                 pg = "PG16328" if args["query"] == "Beowulf" else "PG26"
                 return _fake_tool_result(name, {"pg_id": pg})
             return _fake_tool_result(name, {"top": [{"word": "x"}]})
-        with mock.patch("scripts.v2.planner.router.dispatch_any",
+        with mock.patch("scripts.v2.planner.router.dispatch",
                           side_effect=fake_dispatch):
             rr = router_mod.execute(spec)
         self.assertEqual(rr.kind, "results")
@@ -250,7 +250,7 @@ class StreamingVariant(unittest.TestCase):
                 {"pg_id": "PG16328"} if name == "resolve_book_title"
                 else {"flesch": 60},
             )
-        with mock.patch("scripts.v2.planner.router.dispatch_any",
+        with mock.patch("scripts.v2.planner.router.dispatch",
                           side_effect=fake_dispatch):
             events = list(router_mod.execute_stream(spec))
 

@@ -38,8 +38,9 @@ log = logging.getLogger("wordcracker.v2.registry")
 # Phase 5 chokepoint — единый механизм тайм-аута для v1 и v2 тулзов.
 # Изначально dispatch() игнорировал spec.timeout_s; v3.3.1 повесил
 # SIGALRM-обёртку, но только на v2-путь, и без связи с request budget.
-# Теперь обе ветки (v2 REGISTRY и legacy TOOL_DISPATCH) проходят через
-# `_signal_timeout(effective_timeout_s(spec, budget))`.
+# T5 (2026-05-23) — `legacy_dispatch.py` удалён, обе ветки (v2 REGISTRY
+# и legacy TOOL_DISPATCH из scripts.rag_query) проходят через ОДИН
+# `dispatch()` ниже и единый `_signal_timeout(effective_timeout_s(...))`.
 @contextlib.contextmanager
 def _signal_timeout(seconds: int) -> Iterator[None]:
     """Raise TimeoutError if block doesn't finish within `seconds`.
@@ -128,6 +129,52 @@ class ToolSpec:
 REGISTRY: dict[str, ToolSpec] = {}
 
 
+# T5 (2026-05-23) — lazy v1 TOOL_DISPATCH loader, ранее жил в
+# legacy_dispatch._LEGACY_DISPATCH_CACHE. После удаления legacy_dispatch.py
+# обе ветки (v2 REGISTRY и v1 TOOL_DISPATCH) идут через `dispatch()`.
+# Тестам, которые подменяют sys.modules["scripts.rag_query"], нужен
+# сброс через `_reset_legacy_cache_for_tests()`.
+_LEGACY_DISPATCH_CACHE: dict[str, Any] = {"dispatch": None, "loaded": False}
+
+
+def _load_legacy_dispatch() -> dict | None:
+    """Lazy import scripts.rag_query.TOOL_DISPATCH (merge of rag_tools +
+    learning_tools v1 functions). Cached so cold import cost is paid once.
+    Returns None if import fails (unit-test env w/o rag_query).
+    """
+    if _LEGACY_DISPATCH_CACHE["loaded"]:
+        return _LEGACY_DISPATCH_CACHE["dispatch"]
+    _LEGACY_DISPATCH_CACHE["loaded"] = True
+    try:
+        from scripts.rag_query import TOOL_DISPATCH
+        _LEGACY_DISPATCH_CACHE["dispatch"] = TOOL_DISPATCH
+    except ImportError as e:
+        log.warning("v1 dispatch unavailable: %s", e)
+        _LEGACY_DISPATCH_CACHE["dispatch"] = None
+    return _LEGACY_DISPATCH_CACHE["dispatch"]
+
+
+def _reset_legacy_cache_for_tests() -> None:
+    """Test helper: force re-import on next dispatch() call.
+
+    Tests that swap `sys.modules["scripts.rag_query"]` with a stub must
+    call this so the cached reference doesn't shadow the new module.
+    """
+    _LEGACY_DISPATCH_CACHE["dispatch"] = None
+    _LEGACY_DISPATCH_CACHE["loaded"] = False
+
+
+def all_tool_names() -> set[str]:
+    """All tool names callable via dispatch() — v2 REGISTRY ∪ v1 TOOL_DISPATCH.
+
+    v1 dispatch is loaded lazily (same as dispatch() itself). T5 (2026-05-23)
+    — moved here from legacy_dispatch so dispatch() and its name-enumeration
+    helper live in the same module.
+    """
+    legacy = _load_legacy_dispatch() or {}
+    return set(REGISTRY) | set(legacy)
+
+
 def tool(
     *,
     name: str,
@@ -190,9 +237,13 @@ def dispatch(name: str, args: dict | None = None, *, budget=None) -> ToolResult:
     """Invoke a registered tool by name with `args`. Always returns a ToolResult.
 
     `budget` — optional `RequestBudget`. When provided, the effective tool
-    timeout is `min(spec.timeout_s, budget.remaining_s)`. Phase 5: this is
-    THE chokepoint — `legacy_dispatch.dispatch_any` routes both v1 and v2
-    through here so neither path can exceed the per-request envelope.
+    timeout is `min(spec.timeout_s, budget.remaining_s)`.
+
+    T5 (2026-05-23) — единственная точка вызова тула. После удаления
+    `legacy_dispatch.py` `dispatch()` сам маршрутизирует: сначала v2
+    REGISTRY, при промахе — v1 TOOL_DISPATCH из scripts.rag_query. Обе
+    ветки проходят через тот же `_signal_timeout(effective_timeout_s(...))`,
+    так что request budget держится симметрично.
 
     Cache: when spec.cacheable is True, we look up (name, args) in the disk +
     in-process LRU before running the tool. Stale (older corpus_version) hits
@@ -201,15 +252,15 @@ def dispatch(name: str, args: dict | None = None, *, budget=None) -> ToolResult:
 
     Cache lookups/writes are best-effort: any cache layer error logs and falls
     through to executing the tool, so we never crash on a corrupt cache file.
+
+    Legacy (v1) tools are not cached here — they self-cache inside their
+    own implementations and have no `wrapper_version` to invalidate against.
     """
+    args = args or {}
     spec = REGISTRY.get(name)
     if spec is None:
-        return ToolResult.fail(
-            tool=name, err_type="not_found",
-            message=f"unknown tool '{name}'",
-            details={"available": sorted(REGISTRY)},
-        )
-    args = _coerce_args(spec, args or {})
+        return _dispatch_legacy(name, args, budget=budget)
+    args = _coerce_args(spec, args)
 
     if spec.cacheable:
         try:
@@ -271,6 +322,61 @@ def dispatch(name: str, args: dict | None = None, *, budget=None) -> ToolResult:
         except Exception as e:
             log.warning("cache_put failed for %s: %s", name, e)
     return result
+
+
+def _dispatch_legacy(name: str, args: dict, *, budget=None) -> ToolResult:
+    """Run a v1 (pre-@tool) tool through the same timeout/budget chokepoint.
+
+    Called by `dispatch()` when `name` is not in v2 REGISTRY. Effective
+    timeout = `min(DEFAULT_TOOL_TIMEOUT_S, budget.remaining_s)` — v1 tools
+    have no per-tool spec, so they use the default ceiling. The
+    `_signal_timeout` wrapper enforces it on Linux (SIGALRM); on Windows
+    it's a no-op and we rely on the wall-clock budget check in the router.
+    """
+    legacy = _load_legacy_dispatch()
+    if legacy is None or name not in legacy:
+        return ToolResult.fail(
+            tool=name, err_type="not_found",
+            message=f"unknown tool '{name}' (not in v2 registry, v1 not loaded)"
+                    if legacy is None
+                    else f"unknown tool '{name}'",
+            details={"v2_available": sorted(REGISTRY),
+                     "v1_loaded": legacy is not None},
+        )
+
+    fn = legacy[name]
+    eff_timeout = effective_timeout_s(DEFAULT_TOOL_TIMEOUT_S, budget)
+    t0 = time.perf_counter()
+    try:
+        with _signal_timeout(eff_timeout):
+            raw = fn(**args)
+    except TimeoutError as e:
+        log.warning("legacy tool %s timed out after %ds (budget=%s)",
+                    name, eff_timeout,
+                    f"{budget.remaining_s():.1f}s" if budget is not None else "none")
+        return ToolResult.fail(
+            tool=name, err_type="timeout", message=str(e),
+            details={"timeout_s": eff_timeout,
+                     "budget_bound": budget is not None,
+                     "wall_clock_ms": now_ms_since(t0)},
+            retryable=True, query=args,
+        )
+    except TypeError as e:
+        return ToolResult.fail(
+            tool=name, err_type="invalid_args", message=str(e), query=args,
+        )
+    except Exception as e:
+        log.exception("legacy tool %s crashed", name)
+        return ToolResult.fail(
+            tool=name, err_type="internal", message=str(e), query=args,
+        )
+
+    return ToolResult.from_legacy(
+        tool=name, raw=raw,
+        runtime_ms=now_ms_since(t0),
+        source_info=current_source_info(),
+        query=args,
+    )
 
 
 def _coerce_args(spec: ToolSpec, args: dict) -> dict:

@@ -78,14 +78,13 @@ class B4_LangHintActuallyFilters(unittest.TestCase):
             "PG_FI1": {"language": "fi", "title": "Annan unelmavuodet"},
             "PG_HU1": {"language": "hu", "title": "A rablólovag"},
         }
-        def fake_v2_dispatch(name, args):
+        def fake_dispatch(name, args, **_kw):
             if name == "lexical_search":
                 return lex_result
-        def fake_dispatch_any(name, args):
             if name == "semantic_search":
                 return sem_result
-        with mock.patch.object(hybrid, "v2_dispatch", side_effect=fake_v2_dispatch), \
-             mock.patch.object(hybrid, "dispatch_any", side_effect=fake_dispatch_any), \
+            raise AssertionError(f"unexpected dispatch({name!r})")
+        with mock.patch.object(hybrid, "dispatch", side_effect=fake_dispatch), \
              mock.patch.object(lexical, "_title_lookup", return_value=fake_lookup):
             r = hybrid.hybrid_search("anna", k=10, lang="en")
         # Only EN survives
@@ -117,12 +116,13 @@ class B4_LangHintActuallyFilters(unittest.TestCase):
             "PG_EN1": {"language": "en"},
             "PG_FI1": {"language": "fi"},
         }
-        def fake_v2_dispatch(name, args):
-            return lex_result
-        def fake_dispatch_any(name, args):
-            return sem_result
-        with mock.patch.object(hybrid, "v2_dispatch", side_effect=fake_v2_dispatch), \
-             mock.patch.object(hybrid, "dispatch_any", side_effect=fake_dispatch_any), \
+        def fake_dispatch(name, args, **_kw):
+            if name == "lexical_search":
+                return lex_result
+            if name == "semantic_search":
+                return sem_result
+            raise AssertionError(f"unexpected dispatch({name!r})")
+        with mock.patch.object(hybrid, "dispatch", side_effect=fake_dispatch), \
              mock.patch.object(lexical, "_title_lookup", return_value=fake_lookup):
             r = hybrid.hybrid_search("anna", k=10)  # NO lang
         self.assertEqual(len(r.data["matches"]), 2)
@@ -148,12 +148,13 @@ class B4_LangHintActuallyFilters(unittest.TestCase):
             "PG_EN1": {"language": "en"},
             # PG_NOMETA missing — no metadata
         }
-        def fake_v2_dispatch(name, args):
-            return lex_result
-        def fake_dispatch_any(name, args):
-            return sem_result
-        with mock.patch.object(hybrid, "v2_dispatch", side_effect=fake_v2_dispatch), \
-             mock.patch.object(hybrid, "dispatch_any", side_effect=fake_dispatch_any), \
+        def fake_dispatch(name, args, **_kw):
+            if name == "lexical_search":
+                return lex_result
+            if name == "semantic_search":
+                return sem_result
+            raise AssertionError(f"unexpected dispatch({name!r})")
+        with mock.patch.object(hybrid, "dispatch", side_effect=fake_dispatch), \
              mock.patch.object(lexical, "_title_lookup", return_value=fake_lookup):
             r = hybrid.hybrid_search("x", k=10, lang="en")
         # Both kept — PG_NOMETA isn't dropped because we can't prove it's non-EN
