@@ -862,7 +862,7 @@ def ask(
             if pres is not None and pres.ok and pres.plan and pres.plan.steps:
                 v4_followup_used = True
                 v4_followup_report = pres
-                rr_v4 = router_mod.execute_spec(
+                rr_v4 = router_mod.execute(
                     pres.plan,
                     budget=_v5_budget_from_envelope(
                         _v5_env, intent_label=pres.plan.intent_hint),
@@ -1024,7 +1024,7 @@ def ask(
             if pres is not None and pres.ok and pres.plan and pres.plan.steps:
                 v4_planner_used = True
                 v4_planner_report = pres
-                rr_v4 = router_mod.execute_spec(
+                rr_v4 = router_mod.execute(
                     pres.plan,
                     budget=_v5_budget_from_envelope(
                         _v5_env, intent_label=pres.plan.intent_hint),
@@ -1339,7 +1339,7 @@ def ask_stream(
             if pres is not None and pres.ok and pres.plan and pres.plan.steps:
                 v4_followup_used = True
                 v4_followup_report = pres
-                rr_v4 = router_mod.execute_spec(
+                rr_v4 = router_mod.execute(
                     pres.plan,
                     budget=_v5_budget_from_envelope(
                         _v5_env, intent_label=pres.plan.intent_hint),
@@ -1500,8 +1500,8 @@ def ask_stream(
                 v4_planner_report = pres
                 # Execute the DAG once: stream events + collect results
                 # for renderer / critic in a single pass (don't double-
-                # dispatch via execute_spec_stream + execute_spec).
-                rr = router_mod.execute_spec(
+                # dispatch via the polymorphic execute_stream + execute).
+                rr = router_mod.execute(
                     pres.plan,
                     budget=_v5_budget_from_envelope(
                         _v5_env, intent_label=pres.plan.intent_hint),

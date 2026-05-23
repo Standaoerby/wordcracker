@@ -143,7 +143,7 @@ class ExecuteSpecBackwards(unittest.TestCase):
         )
         with mock.patch.object(router_mod, "dispatch_any",
                                  _stub_dispatch_factory()):
-            rr = router_mod.execute_spec(spec)
+            rr = router_mod.execute(spec)
         self.assertEqual(rr.kind, "results")
         self.assertEqual(len(rr.results), 2)
         self.assertFalse(rr.budget_exceeded)
@@ -159,7 +159,7 @@ class ExecuteSpecBudget(unittest.TestCase):
         budget = b.RequestBudget(wall_clock_s=0.05)
         with mock.patch.object(router_mod, "dispatch_any",
                                  _stub_dispatch_factory(per_call_delay=0.030)):
-            rr = router_mod.execute_spec(spec, budget=budget)
+            rr = router_mod.execute(spec, budget=budget)
         self.assertTrue(rr.budget_exceeded)
         self.assertLess(len(rr.results), 5)
         # The budget_exceeded event is emitted

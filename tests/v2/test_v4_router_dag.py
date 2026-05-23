@@ -36,13 +36,13 @@ class ExecuteSpecBasic(unittest.TestCase):
 
     def test_clarify_only_spec(self):
         spec = ps.PlanSpec(clarify="which book?")
-        rr = router_mod.execute_spec(spec)
+        rr = router_mod.execute(spec)
         self.assertEqual(rr.kind, "clarify")
         self.assertEqual(rr.message, "which book?")
 
     def test_no_steps_no_clarify(self):
         spec = ps.PlanSpec()
-        rr = router_mod.execute_spec(spec)
+        rr = router_mod.execute(spec)
         self.assertEqual(rr.kind, "no_steps")
 
     def test_single_step_runs(self):
@@ -53,7 +53,7 @@ class ExecuteSpecBasic(unittest.TestCase):
         with mock.patch("scripts.v2.planner.router.dispatch_any",
                           return_value=_fake_tool_result("x_tool",
                                                           {"pg_id": "PG1"})):
-            rr = router_mod.execute_spec(spec)
+            rr = router_mod.execute(spec)
         self.assertEqual(rr.kind, "results")
         self.assertEqual(len(rr.results), 1)
         self.assertEqual(rr.results[0].data["pg_id"], "PG1")
@@ -74,7 +74,7 @@ class ExecuteSpecBasic(unittest.TestCase):
             return _fake_tool_result(name, {"flesch": 60})
         with mock.patch("scripts.v2.planner.router.dispatch_any",
                           side_effect=fake_dispatch):
-            rr = router_mod.execute_spec(spec)
+            rr = router_mod.execute(spec)
         self.assertEqual(rr.kind, "results")
         # s2 should have received the resolved pg_id
         self.assertEqual(captured_args[1][1]["pg_id"], "PG16328")
@@ -96,7 +96,7 @@ class ExecuteSpecBasic(unittest.TestCase):
             )
         with mock.patch("scripts.v2.planner.router.dispatch_any",
                           side_effect=fake_dispatch):
-            router_mod.execute_spec(spec)
+            router_mod.execute(spec)
         self.assertEqual(captured[1][1], {"scope": {"book": "PG16328"}})
 
     def test_failure_aborts_unless_optional(self):
@@ -108,7 +108,7 @@ class ExecuteSpecBasic(unittest.TestCase):
             return _fake_tool_result(name, {}, ok=(name != "a"))
         with mock.patch("scripts.v2.planner.router.dispatch_any",
                           side_effect=fake_dispatch):
-            rr = router_mod.execute_spec(spec)
+            rr = router_mod.execute(spec)
         self.assertEqual(rr.kind, "results")
         # s1 failed (not ok) and not optional → s2 not executed
         self.assertEqual(len(rr.results), 1)
@@ -123,7 +123,7 @@ class ExecuteSpecBasic(unittest.TestCase):
             return _fake_tool_result(name, {}, ok=(name != "a"))
         with mock.patch("scripts.v2.planner.router.dispatch_any",
                           side_effect=fake_dispatch):
-            rr = router_mod.execute_spec(spec)
+            rr = router_mod.execute(spec)
         self.assertEqual(rr.kind, "results")
         # s1 failed optional + s2 ran
         self.assertEqual(len(rr.results), 2)
@@ -146,7 +146,7 @@ class ExecuteSpecBasic(unittest.TestCase):
             return _fake_tool_result(name, {"freq": 5}, ok=ok)
         with mock.patch("scripts.v2.planner.router.dispatch_any",
                           side_effect=fake_dispatch):
-            rr = router_mod.execute_spec(spec)
+            rr = router_mod.execute(spec)
         self.assertEqual(rr.kind, "results")
         # All 3 dispatched (leaf failure did NOT abort)
         self.assertEqual(len(rr.results), 3)
@@ -173,7 +173,7 @@ class ExecuteSpecBasic(unittest.TestCase):
             return _fake_tool_result(name, {}, ok=(name != "resolver"))
         with mock.patch("scripts.v2.planner.router.dispatch_any",
                           side_effect=fake_dispatch):
-            rr = router_mod.execute_spec(spec)
+            rr = router_mod.execute(spec)
         # s1 failed and has dependent s2 → abort, s2 not dispatched
         self.assertEqual(called, ["resolver"])
         self.assertEqual(len(rr.results), 1)
@@ -193,7 +193,7 @@ class ExecuteSpecDAGOrdering(unittest.TestCase):
                           side_effect=lambda name, _args, **_kw: (
                               order.append(name) or
                               _fake_tool_result(name, {}))):
-            rr = router_mod.execute_spec(spec)
+            rr = router_mod.execute(spec)
         self.assertEqual(rr.kind, "results")
         self.assertEqual(sorted(order), ["a", "b"])
 
@@ -226,7 +226,7 @@ class ExecuteSpecDAGOrdering(unittest.TestCase):
             return _fake_tool_result(name, {"top": [{"word": "x"}]})
         with mock.patch("scripts.v2.planner.router.dispatch_any",
                           side_effect=fake_dispatch):
-            rr = router_mod.execute_spec(spec)
+            rr = router_mod.execute(spec)
         self.assertEqual(rr.kind, "results")
         self.assertEqual(len(rr.results), 6)
 
@@ -252,7 +252,7 @@ class StreamingVariant(unittest.TestCase):
             )
         with mock.patch("scripts.v2.planner.router.dispatch_any",
                           side_effect=fake_dispatch):
-            events = list(router_mod.execute_spec_stream(spec))
+            events = list(router_mod.execute_stream(spec))
 
         kinds = [e.get("event") for e in events]
         self.assertEqual(kinds[0], "intent")
@@ -263,7 +263,7 @@ class StreamingVariant(unittest.TestCase):
 
     def test_stream_clarify_short_circuits(self):
         spec = ps.PlanSpec(clarify="what?")
-        events = list(router_mod.execute_spec_stream(spec))
+        events = list(router_mod.execute_stream(spec))
         self.assertEqual(events[0]["event"], "intent")
         self.assertEqual(events[1]["event"], "clarify")
         self.assertEqual(events[-1]["event"], "done")

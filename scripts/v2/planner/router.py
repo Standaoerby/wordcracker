@@ -7,18 +7,23 @@ prior `ToolResult.data` into later args, and stops on hard failures (unless
 the step is `optional`). This is what kills the "narrates plan, never calls
 tool" failure mode from v1.1.7 — there's no LLM in the loop here.
 
-Two entry points:
-    `execute(plan)`        — v3 path. `plan: QueryPlan` from `plan.py`.
-    `execute_spec(spec)`   — v4 path. `spec: PlanSpec` from `plan_spec.py`.
+Two public entry points (T1 / D-P1-8, 2026-05-23):
+    `execute(plan_or_spec)`        — polymorphic; QueryPlan → v3 linear
+                                     executor, PlanSpec → v4 DAG executor.
+    `execute_stream(plan_or_spec)` — same dispatch, SSE-friendly generator.
 
 Both produce a `RouterResult`. v4 plans support a DAG (not just a linear
 chain) via `$sN.field` references in args + explicit `needs` lists. The
 DAG is topologically ordered and resolved before each step dispatches.
+
+Full v3/v4 plan-shape unification is deferred to T4 (plan.py decomposition):
+the per-shape executors live as private helpers below — same v3 / v4
+logic, no behaviour change. See D-P1-8 in docs/v2/decisions.md.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Literal
+from typing import Any, Iterator, Literal, Union
 
 from scripts.v2.legacy_dispatch import dispatch_any
 from scripts.v2.planner.plan import PlanStep, QueryPlan
@@ -26,6 +31,9 @@ from scripts.v2.planner import plan_spec as _spec_mod
 from scripts.v2.planner.invariants import apply_invariants
 from scripts.v2.planner.plan_spec import PlanSpec
 from scripts.v2._types import ToolResult
+
+
+PlanOrSpec = Union[QueryPlan, PlanSpec]
 
 
 @dataclass
@@ -94,14 +102,29 @@ def _inject(args: dict, prior_results: list[ToolResult],
     return out
 
 
-def execute(plan: QueryPlan, *, budget=None) -> RouterResult:
+def execute(plan_or_spec: PlanOrSpec, *, budget=None) -> RouterResult:
     """Run a plan to completion. Always returns a RouterResult.
+
+    T1 / D-P1-8 (2026-05-23) — polymorphic dispatch over QueryPlan vs
+    PlanSpec; v3 and v4 share this entry point. Internal split lives
+    in `_execute_query_plan` / `_execute_spec`.
 
     v5 Phase 5 — `budget` is an optional `RequestBudget`. After each
     step, router checks `budget.exceeded()` and aborts the remaining
     steps if true, returning what's already done plus a
     `budget_exceeded` StepEvent. Closes B-R14-10/Q114 (310s runaway)
     structurally — no plan can exceed the request envelope."""
+    if isinstance(plan_or_spec, PlanSpec):
+        return _execute_spec(plan_or_spec, budget=budget)
+    return _execute_query_plan(plan_or_spec, budget=budget)
+
+
+def _execute_query_plan(plan: QueryPlan, *, budget=None) -> RouterResult:
+    """v3 linear executor — `plan: QueryPlan` from `plan.py`.
+
+    Implementation moved here from the old `execute()` entry point under
+    D-P1-8. Same logic, just renamed.
+    """
     if plan.needs_clarify:
         return RouterResult(kind="clarify", plan=plan,
                             message=plan.clarify_question or "")
@@ -164,8 +187,8 @@ def execute(plan: QueryPlan, *, budget=None) -> RouterResult:
                         results=results, events=events)
 
 
-def execute_spec(spec: PlanSpec, *, budget=None) -> RouterResult:
-    """Execute a v4 PlanSpec (DAG with `$sN.field` references).
+def _execute_spec(spec: PlanSpec, *, budget=None) -> RouterResult:
+    """v4 DAG executor — `spec: PlanSpec` from `plan_spec.py`.
 
     Steps run in topological order. Before dispatch each step's args
     are resolved against the result map (`step_id → ToolResult.data`).
@@ -181,6 +204,9 @@ def execute_spec(spec: PlanSpec, *, budget=None) -> RouterResult:
     order. The `plan` field is set to a stub QueryPlan with the same
     intent_hint / clarify so existing callers that read `result.plan`
     still get something usable.
+
+    T1 / D-P1-8 (2026-05-23) — renamed from `execute_spec` to make the
+    polymorphic `execute()` the single public entry point.
     """
     # Clarify-only plan → emit clarify directly.
     if spec.clarify and not spec.steps:
@@ -318,11 +344,22 @@ def _spec_stub_query_plan(spec: PlanSpec) -> QueryPlan:
     return qp
 
 
-def execute_stream(plan: QueryPlan, *, budget=None) -> Iterator[dict]:
+def execute_stream(plan_or_spec: PlanOrSpec, *, budget=None) -> Iterator[dict]:
     """Generator variant for SSE wiring in chat_server.
 
-    Yields dicts with the same shape v1 emits, plus the v2-specific
-    `intent`/`plan` events at the start.
+    T1 / D-P1-8 (2026-05-23) — polymorphic over QueryPlan vs PlanSpec
+    like `execute()`. Internal split lives in
+    `_execute_query_plan_stream` / `_execute_spec_stream`.
+    """
+    if isinstance(plan_or_spec, PlanSpec):
+        yield from _execute_spec_stream(plan_or_spec, budget=budget)
+        return
+    yield from _execute_query_plan_stream(plan_or_spec, budget=budget)
+
+
+def _execute_query_plan_stream(plan: QueryPlan, *, budget=None) -> Iterator[dict]:
+    """v3 streaming executor — `plan: QueryPlan`. SSE event shape:
+    `intent` / `plan` / `tool_call` / `tool_result` / `done`.
 
     Phase 5: `budget` proxied into `dispatch_any` like `execute()` so the
     SSE path is timeout-bounded symmetrically with the blocking path.
@@ -361,13 +398,14 @@ def execute_stream(plan: QueryPlan, *, budget=None) -> Iterator[dict]:
     yield {"event": "done", "kind": "results"}
 
 
-def execute_spec_stream(spec: PlanSpec, *, budget=None) -> Iterator[dict]:
-    """SSE-friendly streaming variant of `execute_spec`.
-
-    Emits the same event shape as `execute_stream` so chat_server's SSE
-    handler can pipe v4 plans without forking the protocol.
+def _execute_spec_stream(spec: PlanSpec, *, budget=None) -> Iterator[dict]:
+    """v4 streaming DAG executor — `spec: PlanSpec`. Emits the same event
+    shape as `_execute_query_plan_stream` so chat_server's SSE handler
+    can pipe v4 plans without forking the protocol.
 
     Phase 5: `budget` proxied into `dispatch_any` for timeout enforcement.
+
+    T1 / D-P1-8 (2026-05-23) — renamed from `execute_spec_stream`.
     """
     yield {"event": "intent", "label": spec.intent_hint or "v4_llm_plan",
            "explain": spec.rationale,

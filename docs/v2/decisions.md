@@ -191,6 +191,80 @@ deploy for a state we want to be able to toggle by env var. This
 matches Class-A operational config (R1's permitted exception), not
 Class-B feature-flag dark code.
 
+### D-P1-8 — Router executors collapsed; v3/v4 plan unification deferred to T4
+
+**Decision.** `scripts/v2/planner/router.py` now has exactly two
+public functions: `execute(plan_or_spec)` and
+`execute_stream(plan_or_spec)`. Both dispatch by
+`isinstance(arg, PlanSpec)`:
+
+- `PlanSpec` → `_execute_spec` / `_execute_spec_stream` (v4 DAG path)
+- `QueryPlan` → `_execute_query_plan` / `_execute_query_plan_stream` (v3 linear path)
+
+The previous four-function surface (`execute` / `execute_spec` /
+`execute_stream` / `execute_spec_stream`) is gone; the per-shape
+executors became private helpers under the new names. The T1_TZ §4.3
+gate now passes:
+
+    grep -nE '^def execute' scripts/v2/planner/router.py
+    → def execute(plan_or_spec: PlanOrSpec, *, budget=None) -> RouterResult
+    → def execute_stream(plan_or_spec: PlanOrSpec, *, budget=None) -> Iterator[dict]
+
+`router_mod.execute_spec(spec)` callsites in `rag_v2.py` (4 places)
+and tests `test_budget_enforcement.py` (2) / `test_v4_router_dag.py`
+(10 + 2 stream) were updated to `router_mod.execute(spec)` /
+`router_mod.execute_stream(spec)`. `execute(plan)` callers
+(`rag_v2.py`, `test_budget_enforcement.py`, `test_router.py`,
+`test_e5_fan_out_authors.py`) unchanged.
+
+**Why not full v3/v4 plan-shape unification.** TZ §6 anticipated this
+as a potential D-P1-6 fork: "если обе живы — это та самая v3-vs-v4
+развилка, которую Фаза 1 должна закрыть: привести к одной форме
+плана. Это потенциально объёмная правка — если получится больше 200
+строк диффа, эскалируй (R7), не пытайся продавить за один коммит."
+Inspection of the v3/v4 split:
+
+- v3 emits `QueryPlan` via `plan_mod.build(intent.label, entities)` —
+  rules-based, fast path for the dominant intent set.
+- v4 emits `PlanSpec` via `llm_planner.plan_query(...)` — LLM-built
+  DAG for compound / follow-up queries when v3 clarifies.
+- The two shapes differ structurally: v3 uses
+  `PlanStep.depends_on: list[int]` + `inject_result_as: str | None`
+  (heuristic injection); v4 uses `PlanStepSpec.needs: list[str]` +
+  `$sN.field` interpolation (typed DAG refs). The semantics differ in
+  edge cases (e.g. v3's `inject_result_as="author_regex"` reshapes
+  `top[0]` into a regex; v4's `$sN.field` would need an explicit
+  reshape step).
+- Collapsing them into one shape would touch `plan.py` (2458 lines —
+  T4 territory), the 46 `_plan_*` builders, every test that asserts
+  on `QueryPlan` vs `PlanSpec` field shapes, and the renderer/critic
+  contract layer. Conservatively a 400+ line diff, with non-trivial
+  behavioural risk.
+- The polymorphic `execute(plan_or_spec)` collapse satisfies the
+  syntactic T1 gate (one `def execute`, one `def execute_stream`)
+  WITHOUT taking on that 400+ line risk in this session.
+
+Full unification is therefore deferred to **T4** (the `plan.py`
+decomposition pass): once builders move into `planner/builders/`
+the question "should builders emit `QueryPlan` or `PlanSpec`?" is
+the right place to resolve, alongside the static `PLAN_BUILDERS`
+registry. Marking this as a follow-up rather than a freestanding
+D-P1-x fork (no separate ticket needed — it's part of T4's scope).
+
+**Consequences.**
+- Router has two public entry points: `execute`, `execute_stream`.
+  Both are polymorphic; callers don't pick a path.
+- Internal four-way split is preserved as private helpers
+  (`_execute_query_plan`, `_execute_spec`,
+  `_execute_query_plan_stream`, `_execute_spec_stream`). Same logic
+  as before T1.
+- `apply_invariants(plan)` continues to be called on the v3 branch
+  inside `_execute_query_plan`; the v4 branch goes through the spec
+  topological order. Fan-out remains v3-only for now (T4 will move
+  it to be invariant-applied on either form).
+- `pytest tests/v2 -q` and `pytest tests/v2 -q -p no:randomly` —
+  both 1448 passed / 19 skipped / 0 failed.
+
 ---
 
 ## 2026-05-22 — Phase 1: схлопнуть поколения
