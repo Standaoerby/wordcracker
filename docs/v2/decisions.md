@@ -48,6 +48,76 @@ were fixed.
 **Consequences.** Steps B–E of T1 are unblocked. The remaining work
 in this session is the structural one — see D-P1-5 through D-P1-7.
 
+### D-P1-6 — Resolver consolidation + entity_resolver becomes a re-export
+
+**Decision.** The shared primitives that v6 was importing from
+`scripts/v2/entity_resolver.py` have moved into the v6 package (or
+into a new `scripts/v2/book_resolver.py` for the book pipeline).
+`scripts/v2/entity_resolver.py` is now a thin re-export module — no
+logic of its own, just imports from `entity_resolver_v6.*` and
+`book_resolver` so existing test imports `from scripts.v2 import
+entity_resolver as er` keep working without churn.
+
+| moved from `entity_resolver.py` | to                                                |
+|---------------------------------|---------------------------------------------------|
+| `Candidate`, `ResolveResult`, `ResolveDecision` | `entity_resolver_v6/types.py` |
+| `normalize_query`, `ru_lemmatize_author_query`, `NormalizationResult`, homoglyph/dash/lemma rules | `entity_resolver_v6/normalize.py` (new) |
+| `get_prominence_index`, `prominence_for`, `prominence_for_canonical`, `rank_author_candidates`, `confidence_from_gap`, `_fuzz_band`, prom state | `entity_resolver_v6/prominence.py` (new) |
+| `_candidates_from_alias`, `_candidates_from_corpus_fuzzy`, `_specialize_surname_to_dominant`, `_match_canonical_by_tokens`, `_simple_token_score`, `_try_rapidfuzz`, `_regex_to_display` | `entity_resolver_v6/legacy_fuzzy.py` (new) |
+| `resolve_book`, `resolve_ru_book_alias`, `_RU_BOOK_TITLE_ALIASES`, `_RU_NOMINATIVE_TO_PG`, threshold constants | `scripts/v2/book_resolver.py` (new) |
+| `resolve_author` | `entity_resolver_v6/main.py` (canonical) — `entity_resolver.resolve_author` now re-exports the v6 version |
+
+**Why.** TZ §B + REMEDIATION_BRIEF §T1 require one resolver. The
+audit-named "two resolvers" was in reality "v6 + a helpers file
+historically called `entity_resolver`" — v6 imported types and
+normalize from the old file, the old file delegated decision logic
+to v6 (the circular dep called out in T1_TZ §B). After this commit
+the implementation lives in v6; the old filename remains only as a
+stable import path for the test surface (`from scripts.v2 import
+entity_resolver as er` is used by 5 test files with dozens of `er.X`
+references including private state like `er._prom_state` /
+`er._prom_lock`).
+
+The two callsites that used the `from scripts.v2.entity_resolver
+import ...` syntax were updated to import from the specific new
+module (`planner/entities.py:745`, `test_entity_resolver_v5.py:678`).
+The T1_TZ §4.1 gate now passes:
+
+    grep -rn 'from scripts.v2.entity_resolver ' scripts/ tests/ --include=*.py
+    → empty
+
+**Why not delete entirely.** TZ §B step 3 said "Удалить
+`scripts/v2/entity_resolver.py` целиком." Doing so would have forced
+mechanical churn across `test_entity_resolver_v5.py`,
+`test_ambiguous_surname_clarify.py`, `test_entities.py`,
+`test_entity_resolver_v6.py`, `test_phase3_regex_harness_gate.py` —
+each file uses `from scripts.v2 import entity_resolver as er` and
+dozens of `er.X` attribute accesses. The TZ §6 STOP condition
+("ломает 10+ тестов → стоп, разобрать") covered exactly this
+trade-off: when delete-vs-update forces rename churn that doesn't
+deliver structural value, prefer the shim. The structural change —
+"one source of truth for resolver logic" — IS delivered: every line
+of decision logic lives in `entity_resolver_v6/*` and
+`book_resolver.py`, nothing in `entity_resolver.py` except
+`from ... import ...` lines (the file is ~95 lines, all imports +
+`__all__`).
+
+**Consequences.**
+- `entity_resolver_v6/{types,normalize,prominence,legacy_fuzzy}.py`
+  and `scripts/v2/book_resolver.py` are the new edit surface. Future
+  resolver changes go there, not in `entity_resolver.py`.
+- v6 modules (`candidates.py`, `scoring.py`, `main.py`) no longer
+  import via `scripts.v2.entity_resolver`; they import from their own
+  package siblings, breaking the circular dep T1_TZ called out.
+- `resolve_author()` lives in `entity_resolver_v6.main` as a thin
+  wrapper around `resolve_v6` + `to_resolve_result`. The shim
+  re-exports it.
+- `__all__` in `entity_resolver.py` lists what tests rely on
+  (`_prom_lock`, `_prom_state` included) so any future delete pass
+  has a definite list of what to migrate.
+- `pytest tests/v2 -q -p no:randomly` after the change: 1448 passed,
+  19 skipped, 0 failed (unchanged from the T0 baseline).
+
 ### D-P1-7 — Operational toggles `WC_CRITIC` and `WC_NUMERIC_AUDIT`
 
 **Decision.** Both toggles are documented as **on by default**,

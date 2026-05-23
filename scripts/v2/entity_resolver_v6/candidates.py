@@ -17,26 +17,17 @@ them, Stage 4 thresholds.
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
 
-from scripts.v2.entity_resolver_v6.types import Mention, MentionType
-
-if TYPE_CHECKING:
-    from scripts.v2.entity_resolver import Candidate
+from scripts.v2.entity_resolver_v6.prominence import get_prominence_index
+from scripts.v2.entity_resolver_v6.types import Candidate, Mention, MentionType
 
 
-def generate_candidates(mention: Mention, *, limit: int = 20) -> list["Candidate"]:
+def generate_candidates(mention: Mention, *, limit: int = 20) -> list[Candidate]:
     """Return KB candidates matching this mention.
 
     Defensive: returns empty list if prominence index unavailable
     (CI / dev environments).
     """
-    try:
-        from scripts.v2.entity_resolver import (
-            Candidate, get_prominence_index,
-        )
-    except ImportError:
-        return []
     try:
         idx = get_prominence_index()
     except Exception:

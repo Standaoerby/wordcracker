@@ -29,16 +29,13 @@ Combined score is the weighted sum, in [0, 1].
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
 
 from scripts.v2.entity_resolver_v6.types import (
+    Candidate,
     CandidateScore,
     Mention,
     MentionType,
 )
-
-if TYPE_CHECKING:
-    from scripts.v2.entity_resolver import Candidate
 
 
 # Weights table: (token_overlap_w, string_sim_w, prominence_w)
@@ -114,7 +111,7 @@ def _transliterate_ru_token(t: str) -> str:
 
 def score_candidates(
     mention: Mention,
-    candidates: list["Candidate"],
+    candidates: list[Candidate],
 ) -> list[CandidateScore]:
     """Score each candidate; return sorted descending by combined.
 

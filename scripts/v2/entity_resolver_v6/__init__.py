@@ -10,36 +10,49 @@ in Obsidian vault.
   4. Decision Threshold — resolve / clarify_needed / not_found
   5. Session Memory — boost prior user choices (Phase 2)
 
-Main entry: `resolve_v6(query: str, ...) -> ResolverDecision`.
+Main entries:
+  - `resolve_v6(query)` → ResolverDecision (typed)
+  - `to_resolve_result(decision, query)` → ResolveResult (v5-style adapter)
+  - `resolve_author(query)` → ResolveResult (convenience: both calls)
 
-Backwards-compat: v5 `resolve_author(query)` delegates to v6 as the
-default path (Phase 0, 2026-05-22 — gate flag `WC_V6_RESOLVER` removed).
-v6 returns the same `ResolveResult` shape via `to_resolve_result()`
-adapter so downstream code (rag_v2, plan, view) doesn't see the new
-typed objects. v5 stays as a fall-through if the v6 adapter returns
-None or raises.
-
-Triggered by R-22 probe suite — E13 (over-eager disambiguation) +
-E1 baseline preservation. See SESSION_2026-05-22_systematic_analysis.
+T1 (D-P1-6, 2026-05-23) — shared primitives (Candidate, ResolveResult,
+normalize_query, prominence helpers, v5 fuzzy helpers) moved into this
+package. The old `scripts.v2.entity_resolver` module is now a thin
+re-export shim.
 """
 from __future__ import annotations
 
-from scripts.v2.entity_resolver_v6.types import (
-    Mention,
-    MentionType,
-    CandidateScore,
-    Decision,
-    ResolverDecision,
+from scripts.v2.entity_resolver_v6.candidates import generate_candidates
+from scripts.v2.entity_resolver_v6.decision import decide
+from scripts.v2.entity_resolver_v6.main import (
+    resolve_author,
+    resolve_v6,
+    to_resolve_result,
 )
 from scripts.v2.entity_resolver_v6.mentions import detect_mentions
-from scripts.v2.entity_resolver_v6.candidates import generate_candidates
 from scripts.v2.entity_resolver_v6.scoring import score_candidates
-from scripts.v2.entity_resolver_v6.decision import decide
-from scripts.v2.entity_resolver_v6.main import resolve_v6
+from scripts.v2.entity_resolver_v6.types import (
+    Candidate,
+    CandidateScore,
+    Decision,
+    Mention,
+    MentionType,
+    ResolveDecision,
+    ResolveResult,
+    ResolverDecision,
+)
 
 __all__ = [
-    "Mention", "MentionType", "CandidateScore",
-    "Decision", "ResolverDecision",
-    "detect_mentions", "generate_candidates",
-    "score_candidates", "decide", "resolve_v6",
+    # Mention detection
+    "Mention", "MentionType", "detect_mentions",
+    # Candidates
+    "Candidate", "generate_candidates",
+    # Scoring
+    "CandidateScore", "score_candidates",
+    # Decision
+    "Decision", "ResolverDecision", "decide",
+    # v5-style adapter shape
+    "ResolveDecision", "ResolveResult",
+    # Entry points
+    "resolve_v6", "to_resolve_result", "resolve_author",
 ]

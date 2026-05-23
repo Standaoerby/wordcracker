@@ -675,7 +675,7 @@ class PerCanonicalProminence(unittest.TestCase):
         self.assertEqual(hg.prominence, 50000)
         self.assertEqual(basil.prominence, 0)
         # And ranker should put H.G. first
-        from scripts.v2.entity_resolver import rank_author_candidates
+        from scripts.v2.entity_resolver_v6.prominence import rank_author_candidates
         ranked = rank_author_candidates(cands)
         self.assertEqual(ranked[0].display, "Wells, H. G.")
 

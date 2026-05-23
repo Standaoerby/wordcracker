@@ -742,7 +742,7 @@ def _collect_surname_candidates(regex: str, *, limit: int = 5) -> list[dict]:
         return []
     surname = m.group(1)
     try:
-        from scripts.v2.entity_resolver import get_prominence_index
+        from scripts.v2.entity_resolver_v6.prominence import get_prominence_index
     except Exception:
         return []
     try:

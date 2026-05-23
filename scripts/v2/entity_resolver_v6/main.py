@@ -1,7 +1,8 @@
 """v6 main entry — `resolve_v6(query) → ResolverDecision`.
 
-Plus `to_resolve_result(decision)` adapter so v5 callers get the same
-`ResolveResult` shape they expect (backwards-compat).
+Plus `to_resolve_result(decision, query)` adapter so v5 callers get the
+same `ResolveResult` shape they expect (backwards-compat) and the
+top-level `resolve_author(query)` convenience that wraps both calls.
 
 Pipeline:
   query → normalize → ru_lemmatize → detect_mentions → for primary
@@ -10,21 +11,22 @@ Pipeline:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
 
 from scripts.v2.entity_resolver_v6.candidates import generate_candidates
 from scripts.v2.entity_resolver_v6.decision import decide
 from scripts.v2.entity_resolver_v6.mentions import detect_mentions
+from scripts.v2.entity_resolver_v6.normalize import (
+    normalize_query,
+    ru_lemmatize_author_query,
+)
 from scripts.v2.entity_resolver_v6.scoring import score_candidates
 from scripts.v2.entity_resolver_v6.types import (
     Decision,
     Mention,
+    ResolveResult,
     ResolverDecision,
 )
 from scripts.v2.patterns import NON_FIRST_NAME_TOKENS as _NON_FIRST_NAME_TOKENS
-
-if TYPE_CHECKING:
-    from scripts.v2.entity_resolver import ResolveResult
 
 log = logging.getLogger("wordcracker.v2.entity_resolver_v6")
 
@@ -33,27 +35,14 @@ def resolve_v6(query: str) -> ResolverDecision:
     """Top-level v6 resolver entry.
 
     Returns a ResolverDecision (typed). For v5-compatible output, wrap
-    with `to_resolve_result(decision)`.
+    with `to_resolve_result(decision, query)` or call the convenience
+    function `resolve_author(query)` which does both.
     """
     if not query or not query.strip():
         return ResolverDecision(
             decision=Decision.NOT_FOUND,
             resolved=None,
             reason="empty query",
-        )
-
-    # Reuse v5 normalization (NFKC + lowercase + RU lemmatize)
-    try:
-        from scripts.v2.entity_resolver import (
-            normalize_query,
-            ru_lemmatize_author_query,
-        )
-    except ImportError as e:
-        log.warning("v6 cannot import v5 normalization: %s", e)
-        return ResolverDecision(
-            decision=Decision.NOT_FOUND,
-            resolved=None,
-            reason=f"v5 import failed: {e}",
         )
 
     norm = normalize_query(query)
@@ -111,18 +100,6 @@ def resolve_v6_for_alias(
             decision=Decision.NOT_FOUND,
             resolved=None,
             reason="empty input",
-        )
-
-    try:
-        from scripts.v2.entity_resolver import (
-            normalize_query,
-            ru_lemmatize_author_query,
-        )
-    except ImportError:
-        return ResolverDecision(
-            decision=Decision.NOT_FOUND,
-            resolved=None,
-            reason="v5 import failed",
         )
 
     norm = normalize_query(query)
@@ -265,7 +242,7 @@ def _extract_extra_tokens(q_lc: str, alias_key: str) -> tuple[str, ...]:
 # in the registry so the two consumers cannot drift.
 
 
-def to_resolve_result(d: ResolverDecision, raw_query: str) -> "ResolveResult":
+def to_resolve_result(d: ResolverDecision, raw_query: str) -> ResolveResult:
     """Adapt v6 ResolverDecision → v5 ResolveResult for backwards-compat.
 
     v5 contract (used by rag_v2, plan builders, tool wrappers):
@@ -274,13 +251,6 @@ def to_resolve_result(d: ResolverDecision, raw_query: str) -> "ResolveResult":
                       query_raw: str, query_normalized: str,
                       confidence_reason: str)
     """
-    try:
-        from scripts.v2.entity_resolver import (
-            normalize_query, ru_lemmatize_author_query, ResolveResult,
-        )
-    except ImportError:
-        return None  # type: ignore
-
     norm = normalize_query(raw_query)
     q_lc = norm.output
     q_lem, ru_trace = ru_lemmatize_author_query(q_lc)
@@ -318,4 +288,32 @@ def to_resolve_result(d: ResolverDecision, raw_query: str) -> "ResolveResult":
         query_raw=raw_query,
         query_normalized=q_lem,
         confidence_reason=d.reason,
+    )
+
+
+def resolve_author(query: str) -> ResolveResult:
+    """Single path for author resolution — v6 is the only path.
+
+    T1 (D-P1-6, 2026-05-23) — moved here from `scripts.v2.entity_resolver`.
+    Pure delegate: run `resolve_v6` and adapt to `ResolveResult`. On v6
+    adapter failure (None or exception), return a `not_found`
+    ResolveResult so callers don't see exceptions in normal flow.
+    """
+    raw = query or ""
+    try:
+        decision = resolve_v6(query)
+        adapted = to_resolve_result(decision, query)
+        if adapted is not None:
+            return adapted
+        reason = "v6 adapter returned None"
+    except Exception as e:
+        log.warning("v6 resolver failed for %r: %s", query, e)
+        reason = f"v6 resolver raised: {e}"
+
+    norm = normalize_query(raw)
+    return ResolveResult(
+        decision="not_found", resolved=None, confidence=0.0,
+        candidates=[], normalization_trace=list(norm.steps),
+        query_raw=raw, query_normalized=norm.output,
+        confidence_reason=reason,
     )
