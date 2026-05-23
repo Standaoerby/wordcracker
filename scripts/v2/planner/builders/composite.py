@@ -20,10 +20,32 @@ def _plan_country_compare(e: Entities) -> QueryPlan:
 
     Phase 4 W-5 (2026-05-23): both halves were already in the plan, but
     the renderer routinely surfaced only one side («односторонний список»).
-    Add an explicit composite-view render note so the renderer MUST show
-    GB and US side-by-side (two equal-weight tables, not «here's GB; ask
-    about US separately»).
+    Now:
+      (1) explicit composite-view render note so the renderer MUST show
+          GB and US side-by-side;
+      (2) when the query asks specifically about LEXICON («лексик» /
+          «vocabulary» / «слов»), also fan out affinity_by_author for
+          the leader of each country — the renderer then has real word-
+          level contrast data, not just author lists. Mirrors what
+          composite_compare does, but keeps the country_compare intent
+          label (Q23 spec invariant).
     """
+    raw_lc = ((e.raw_misc or {}).get("raw_text") or "").lower()
+    # Explicit lexicon-contrast triggers only — «слово / слова» alone is
+    # too broad (existing test_plan.test_country_compare uses «найди
+    # слова в американской/британской» which is a different shape and
+    # must keep the 2-step plan).
+    _lexicon_markers = ("лексик", "vocabulary", "vocab", "signature",
+                         "сигнатур", "перекос")
+    lexicon_query = any(m in raw_lc for m in _lexicon_markers)
+
+    steps: list[PlanStep] = [
+        PlanStep(tool="top_authors_by_country",
+                 args={"country": "GB", "metric": "books", "top": 10}),
+        PlanStep(tool="top_authors_by_country",
+                 args={"country": "US", "metric": "books", "top": 10},
+                 optional=True),
+    ]
     notes = [
         "Это country_compare — у пользователя в вопросе сравнение двух "
         "стран (typically GB vs US). В ответе ОБЯЗАТЕЛЬНО покажи "
@@ -32,17 +54,38 @@ def _plan_country_compare(e: Entities) -> QueryPlan:
         "не предлагай пользователю «уточнить про вторую» — данные уже "
         "получены для обеих.",
     ]
+    if lexicon_query:
+        # Affinity for the LEADER of each country list — chains via
+        # inject_result_as on the corresponding top_authors_by_country
+        # step. Both optional: lexicon contrast is bonus on top of the
+        # author lists, the answer still lands if affinity steps fail.
+        steps.append(PlanStep(
+            tool="affinity_by_author",
+            args={"top": 30, "min_corpus_count": 500,
+                  "pos_filter": e.pos_filter},
+            depends_on=[0], inject_result_as="author_regex",
+            optional=True,
+        ))
+        steps.append(PlanStep(
+            tool="affinity_by_author",
+            args={"top": 30, "min_corpus_count": 500,
+                  "pos_filter": e.pos_filter},
+            depends_on=[1], inject_result_as="author_regex",
+            optional=True,
+        ))
+        notes.append(
+            "Запрос специально про ЛЕКСИКУ — план добавил affinity_by_author "
+            "для leader каждой страны. В ответе покажи сигнатурные слова "
+            "лидера GB и лидера US side-by-side (две колонки или таблица "
+            "со страной/автором как ключом), не только списки авторов."
+        )
     return QueryPlan(
         intent="country_compare", entities=e,
-        steps=[
-            PlanStep(tool="top_authors_by_country",
-                     args={"country": "GB", "metric": "books", "top": 10}),
-            PlanStep(tool="top_authors_by_country",
-                     args={"country": "US", "metric": "books", "top": 10},
-                     optional=True),
-        ],
+        steps=steps,
         expected_cost="medium",
-        explain="top_authors_by_country GB + US — composite side-by-side",
+        explain=("top_authors_by_country GB + US — composite side-by-side"
+                  + (" + affinity for leaders (lexicon contrast)"
+                     if lexicon_query else "")),
         render_notes=notes,
     )
 
