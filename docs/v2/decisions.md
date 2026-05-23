@@ -48,6 +48,47 @@ were fixed.
 **Consequences.** Steps B–E of T1 are unblocked. The remaining work
 in this session is the structural one — see D-P1-5 through D-P1-7.
 
+### D-P1-5 — Engine-selection flag removed from chat_server
+
+**Decision.** `_pick_engine`, the `engine="v1"` defaults on
+`chat_server.ask` / `ask_stream`, the v1-fallback inside those shims,
+and the two env reads `WC_DEFAULT_ENGINE` / `WC_ALLOW_ENGINE_OVERRIDE`
+have been deleted. `chat_server.ask` / `ask_stream` now call
+`scripts.v2.rag_v2.ask` / `ask_stream` unconditionally; if v2 import
+fails, the shim raises `RuntimeError` (the original lazy loader's
+silent v1 fallback is gone — there is no v1 fallback any more).
+
+**Why.** Per R1 + REMEDIATION_BRIEF Часть 3: an env var that selects
+between code generations is exactly the gate R1 forbids. v2 is the
+only engine in prod (D-P1-4). The override path
+(`?engine=v1` / `X-WC-Engine: v1` / `payload['engine']` honored when
+`WC_ALLOW_ENGINE_OVERRIDE=1`) was a documented security footgun: it
+let anyone with the chat URL skip the v2 planner's input caps and
+prompt-injection guards. "Locked by default" is not "removed" — the
+toggle was still present in code; deleting it removes the bypass
+entirely.
+
+**Consequences.**
+- `from rag_query import ask as ask_v1, ask_stream as ask_stream_v1`
+  removed; `SYSTEM_PROMPT` (unused) removed. `ASSISTANT_NAME` and
+  `TOOLS_SPEC` imports kept (used in HTML template + tool catalog).
+- `engine = _pick_engine(...)` callsites at `do_POST` (chat) and SSE
+  reduced to direct `ask`/`ask_stream` calls without an engine arg.
+- `[chat:{engine}] ...` log lines collapsed to `[chat:v2] ...`.
+- `/api/stats` fallback dict no longer emits `{"engine": "v1"}` (was
+  misleading — meant "v2 observability not imported", not "running v1").
+- `import os` moved to the top alongside other stdlib imports (the
+  noqa comment that explained why it was below the imports block is no
+  longer needed since `_pick_engine` is gone).
+- Operator action: the systemd drop-in
+  `systemd/wordcracker-chat.service.d/v2-engine.conf` can be removed
+  on the next deploy. Leaving it in place is harmless — `chat_server`
+  ignores the env var now — but pruning it removes dead config.
+- A/B testing of a future v3 engine, if needed, goes behind a git
+  branch (R1), not a runtime env flag.
+- `pytest tests/v2 -q -p no:randomly` after the change: 1448 passed,
+  19 skipped, 0 failed (unchanged from the T0 baseline).
+
 ### D-P1-6 — Resolver consolidation + entity_resolver becomes a re-export
 
 **Decision.** The shared primitives that v6 was importing from

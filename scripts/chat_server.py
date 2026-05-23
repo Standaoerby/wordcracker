@@ -17,6 +17,7 @@ Run inside the container (via docker compose):
 """
 import argparse
 import json
+import os
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,12 +25,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root for scripts.v2.*
-from rag_query import ask as ask_v1, ask_stream as ask_stream_v1, SYSTEM_PROMPT, ASSISTANT_NAME
+from rag_query import ASSISTANT_NAME
 from rag_query import TOOLS_SPEC  # combined rag_tools + learning_tools
 
-# v2 engine — lazy-imported on first request that asks for it. Avoids slow
-# import cost for users on the v1 path and keeps v1 deployable even if v2 has
-# a bug.
+# v2 engine — lazy-imported on first request. Lazy because import cost
+# is non-trivial (ChromaDB + SentenceTransformer pull in) and we don't
+# want it on the `/health` and `/api/tools` paths.
+#
+# T1 (D-P1-5, 2026-05-23) — the v1 engine branch and the WC_DEFAULT_ENGINE
+# / WC_ALLOW_ENGINE_OVERRIDE selection were removed. v2 is the only path.
+# If the lazy import fails, chat requests surface a 500 — same behaviour
+# the original `_v2_engine` had on import error, only without the silent
+# v1 fallback.
 _V2_ENGINE = {"ask": None, "ask_stream": None, "loaded": False}
 
 
@@ -48,50 +55,18 @@ def _v2_engine():
     return _V2_ENGINE
 
 
-def _pick_engine(path: str, headers, payload: dict) -> str:
-    """Return 'v1' or 'v2'.
-
-    By default the engine is locked to `WC_DEFAULT_ENGINE` (= v2 in prod).
-    Client-supplied hints (`?engine=v1`, `X-WC-Engine` header,
-    `payload['engine']`) are IGNORED unless `WC_ALLOW_ENGINE_OVERRIDE=1`
-    is set — they used to be honored, which gave anyone with the chat URL
-    a free path around the v2 planner's input caps + prompt-injection
-    guards by appending `?engine=v1`. Strict locking is the safer default.
-
-    Set `WC_ALLOW_ENGINE_OVERRIDE=1` to bring back the legacy behavior
-    (useful for A/B testing or for the v1 fallback flag the runner uses).
-    """
-    default = (os.environ.get("WC_DEFAULT_ENGINE", "v1")).lower()
-    if os.environ.get("WC_ALLOW_ENGINE_OVERRIDE", "0") != "1":
-        return "v2" if default == "v2" else "v1"
-    import urllib.parse as up
-    qs = up.urlparse(path).query
-    q = up.parse_qs(qs)
-    eng = (q.get("engine", [None])[0]
-           or headers.get("X-WC-Engine")
-           or payload.get("engine")
-           or default).lower()
-    return "v2" if eng == "v2" else "v1"
+def ask(question, history=None, **kw):
+    v2 = _v2_engine()
+    if v2["ask"] is None:
+        raise RuntimeError("v2 engine failed to load; see startup logs")
+    return v2["ask"](question, history=history, **kw)
 
 
-def ask(question, history=None, *, engine="v1", **kw):
-    if engine == "v2":
-        v2 = _v2_engine()
-        if v2["ask"] is not None:
-            return v2["ask"](question, history=history, **kw)
-    return ask_v1(question, history=history, **kw)
-
-
-def ask_stream(question, history=None, *, engine="v1", **kw):
-    if engine == "v2":
-        v2 = _v2_engine()
-        if v2["ask_stream"] is not None:
-            yield from v2["ask_stream"](question, history=history, **kw)
-            return
-    yield from ask_stream_v1(question, history=history, **kw)
-
-
-import os  # noqa: E402 — must follow the import block above
+def ask_stream(question, history=None, **kw):
+    v2 = _v2_engine()
+    if v2["ask_stream"] is None:
+        raise RuntimeError("v2 engine failed to load; see startup logs")
+    yield from v2["ask_stream"](question, history=history, **kw)
 
 # Adversarial-input caps. Normal chat traffic doesn't come anywhere near
 # these — they exist to bound damage from malicious / mistaken clients
@@ -912,7 +887,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/stats":
             # Sprint 11.5: stats footer polls this every 30s. Aggregates the
             # in-process ring buffer of the last 256 v2 requests. Empty when
-            # the engine is v1 or the ring buffer is fresh after restart.
+            # the ring buffer is fresh after restart.
             #
             # Hardening (v2.3.2): emit ONLY the counters the footer needs.
             # `aggregate_recent()` also returns an `intents` histogram and a
@@ -932,7 +907,7 @@ class Handler(BaseHTTPRequestHandler):
                     "critic_flagged":  full.get("critic_flagged", 0),
                 }
             except ImportError:
-                payload = {"total": 0, "engine": "v1"}
+                payload = {"total": 0}
             return self._send(200, json.dumps(payload, ensure_ascii=False, default=str),
                               "application/json; charset=utf-8")
         # Sprint 22+ — admin: list flagged bad answers as JSON.
@@ -1006,7 +981,6 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 pass
             return
-        engine = _pick_engine(self.path, self.headers, payload)
         # Sprint 22+ alpha6 (Round 13 B1) — SSE keep-alive heartbeat.
         # Long tool calls (~60-120s for heavy queries) used to silently
         # drop the connection because no event fired during the wait,
@@ -1020,7 +994,7 @@ class Handler(BaseHTTPRequestHandler):
 
         def _producer():
             try:
-                for ev in ask_stream(question, history=history, engine=engine):
+                for ev in ask_stream(question, history=history):
                     ev_q.put(ev)
             except Exception as e:
                 ev_q.put({"_producer_error": e})
@@ -1214,14 +1188,13 @@ class Handler(BaseHTTPRequestHandler):
         if err:
             return self._send(400, json.dumps({"error": err}).encode("utf-8"),
                               "application/json")
-        engine = _pick_engine(self.path, self.headers, payload)
         t0 = time.time()
         try:
-            res = ask(question, history=history, engine=engine)
+            res = ask(question, history=history)
         except Exception as e:
             return self._send(500, json.dumps({"error": f"ask() raised: {e}"}),
                               "application/json")
-        print(f"[chat:{engine}] {question[:60]!r} → {res['iterations']} iter, "
+        print(f"[chat:v2] {question[:60]!r} → {res['iterations']} iter, "
               f"{len(res['tool_calls'])} call(s), {res['elapsed_sec']}s "
               f"(wall {time.time()-t0:.1f}s)", file=sys.stderr)
         return self._send(200, json.dumps(res, ensure_ascii=False, default=str),
@@ -1250,8 +1223,8 @@ def _warmup():
         print(f"[chat] warmup failed (non-fatal): {type(e).__name__}: {e}",
               file=_sys.stderr, flush=True)
     # v2.5 demo polish: pre-run the cheap meta queries so the first user
-    # query that hits them isn't paying cold-cache latency. These all use
-    # WC_DEFAULT_ENGINE=v2 path and warm the dispatch + cache layers.
+    # query that hits them isn't paying cold-cache latency. These warm
+    # the v2 dispatch + cache layers (v2 is the only engine path).
     try:
         from scripts.v2.tool_registry import dispatch
         t = _time.perf_counter()
