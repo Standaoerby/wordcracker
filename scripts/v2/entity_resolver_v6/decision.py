@@ -44,6 +44,20 @@ CLARIFY_FLOOR = 0.20
 # How many candidates to show in clarify list
 CLARIFY_LIST_SIZE = 5
 
+# Dominant-homonym (W-1): when one canonical accounts for ≥ this share
+# of total prominence (or books), it's the obvious referent. Resolves
+# «Конан Дойл» → Doyle, Arthur Conan even when cross-alphabet string_sim
+# is zero. Bare SURNAME_ONLY without first-name context still clarifies
+# below this threshold (Wells at 87% → clarify, Doyle at 99% → resolve).
+DOMINANCE_SHARE = 0.90
+
+# Top-1 / runner-up prominence ratio above which we also call it
+# dominant — guards against the case where total prominence is small
+# and percentages flatten out (e.g. {12000, 50, 20} → top share 99%
+# anyway, but {100, 5, 5} → top share 91% with a 20x runner gap; both
+# resolve).
+DOMINANCE_RATIO = 10.0
+
 
 def decide(
     mention: Mention,
@@ -109,6 +123,45 @@ def decide(
             all_scores=scored,
         )
 
+    # Rule 4.45 — Dominant homonym (W-1, 2026-05-23).
+    # When user provided a real first-name signal that scored a partial
+    # token match (0 < top.token_overlap < TOKEN_BYPASS) AND one
+    # canonical overwhelmingly dominates (≥90% of total prominence OR
+    # ≥10× the runner-up), resolve. Fires only when:
+    #   1. mention type is not SURNAME_ONLY (R-22 UX: ask on bare),
+    #   2. top.token_overlap > 0 (user's hint actually matched something
+    #      — guards against noise tokens like "биография"/"writings of"
+    #      being mis-classified as FULL_NAME first-name context),
+    #   3. one canonical dominates the group.
+    #
+    # RU_STEM is also excluded — it has its own 5× ratio rule (4.6)
+    # below and partial-translit matches can stick on the wrong
+    # canonical without enough corroborating signal.
+    if (len(scored) >= 2
+            and mention.type not in (MentionType.SURNAME_ONLY,
+                                      MentionType.RU_STEM)
+            and top.token_overlap > 0):
+        total_prom = sum(max(s.candidate.prominence, 0) for s in scored)
+        top_prom = max(top.candidate.prominence, 0)
+        runner_prom = max(runner_up.candidate.prominence, 0)
+        top_share = top_prom / total_prom if total_prom > 0 else 0.0
+        prom_ratio = (top_prom / runner_prom) if runner_prom > 0 else (
+            999.0 if top_prom > 0 else 0.0
+        )
+        if (top_share >= DOMINANCE_SHARE
+                or prom_ratio >= DOMINANCE_RATIO) and top_prom > 0:
+            return ResolverDecision(
+                decision=Decision.RESOLVED,
+                resolved=top.candidate,
+                confidence=top.combined,
+                reason=(
+                    f"dominant homonym share={top_share:.2f} "
+                    f"ratio={prom_ratio:.1f}x"
+                ),
+                mention=mention,
+                all_scores=scored,
+            )
+
     # Rule 4.5 — UX preference: bare SURNAME_ONLY with multiple
     # candidates → CLARIFY, regardless of prominence dominance.
     # User typed only a surname — give them the choice.
@@ -126,18 +179,30 @@ def decide(
         )
 
     # Rule 4.6 — RU_STEM with dominant prominence: resolve to dominant.
-    # User wrote «Уэллса» (RU genitive of Wells) which refers to the
-    # canonical Russian referent (H.G. Wells), not the obscure ones.
-    # Use raw prominence ratio (not log-normalized) — 5× threshold.
+    # User wrote «Толстого» (RU genitive of Tolstoy) — refers to the
+    # canonical Russian referent (Leo Tolstoy at 70× over runners-up).
+    # Threshold aligned with W-1 spec (≥10× ratio or ≥90% share) — 5×
+    # was too eager and made «у Уэллса» (Wells H.G. 9.4× over Basil)
+    # resolve instead of clarify, contradicting the spec acceptance
+    # «имя не задано → корректно дизамбигуирует».
     if mention.type == MentionType.RU_STEM and len(scored) >= 2:
-        top_raw = top.candidate.prominence or 0
-        runner_raw = runner_up.candidate.prominence or 0
-        if runner_raw == 0 or (top_raw / max(runner_raw, 1)) >= 5.0:
+        total_raw = sum(max(s.candidate.prominence, 0) for s in scored)
+        top_raw = max(top.candidate.prominence, 0)
+        runner_raw = max(runner_up.candidate.prominence, 0)
+        top_share = top_raw / total_raw if total_raw > 0 else 0.0
+        prom_ratio = (top_raw / runner_raw) if runner_raw > 0 else (
+            999.0 if top_raw > 0 else 0.0
+        )
+        if (top_share >= DOMINANCE_SHARE
+                or prom_ratio >= DOMINANCE_RATIO) and top_raw > 0:
             return ResolverDecision(
                 decision=Decision.RESOLVED,
                 resolved=top.candidate,
                 confidence=top.combined,
-                reason=f"ru_stem dominant prominence {top_raw}/{runner_raw}",
+                reason=(
+                    f"ru_stem dominant prominence share={top_share:.2f} "
+                    f"ratio={prom_ratio:.1f}x ({top_raw}/{runner_raw})"
+                ),
                 mention=mention,
                 all_scores=scored,
             )

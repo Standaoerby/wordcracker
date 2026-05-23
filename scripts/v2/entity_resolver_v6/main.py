@@ -173,15 +173,23 @@ def _classify_mention(
 
 
 def _extract_extra_tokens(q_lc: str, alias_key: str) -> tuple[str, ...]:
-    """Find tokens in q_lc that look like first-name context for alias_key.
+    """Find tokens that disambiguate `alias_key` to a specific canonical.
 
-    Looks BOTH preceding AND following the alias_key:
-      - preceding tokens (full_name pattern): «Christopher Marlowe»
-      - following tokens after comma (canonical-format pattern):
-        «Doyle, Arthur Conan»
+    Three sources, in order:
+      1. The alias_key itself when it is multi-word ("конан дойл",
+         "christopher marlowe", "h. g. wells") — the non-surname
+         tokens ARE the user's disambiguating hint, encoded into the
+         alias. Without this, multi-word aliases that map to a bare
+         surname regex («^Doyle,», «^Wells,») lose the first-name
+         signal and the resolver falls back to ambiguous clarify
+         (W-1 / E13 over-eager disambiguation).
+      2. Preceding tokens in the query (full_name pattern):
+         «Christopher Marlowe» / «Чарльза Диккенса».
+      3. Following tokens after a comma (canonical-format pattern):
+         «Doyle, Arthur Conan».
 
     Returns lowercase tokens (max 3) excluding:
-      - the alias_key itself
+      - the alias_key itself / its surname token
       - other known aliases (avoid picking secondary authors as
         first-name context)
       - common stopwords / prepositions / verbs
@@ -191,13 +199,38 @@ def _extract_extra_tokens(q_lc: str, alias_key: str) -> tuple[str, ...]:
     except ImportError:
         return ()
 
-    idx = q_lc.find(alias_key)
-    if idx < 0:
-        return ()
-
     extras: list[str] = []
 
+    # Source 0 — multi-word alias_key carries the first-name itself.
+    # «конан дойл» → ("конан",); «christopher marlowe» → ("christopher",);
+    # «h. g. wells» → ("h.", "g."). Pick whichever token in the alias is
+    # ALSO a single-word alias pointing to the same surname — that's the
+    # surname; the rest are first-name / initials.
+    if " " in alias_key:
+        alias_tokens = [t for t in alias_key.split() if t]
+        single_word_aliases = {k for k in AUTHOR_ALIASES if " " not in k}
+        target_regex = AUTHOR_ALIASES.get(alias_key)
+        surname_token = None
+        if target_regex:
+            for tok in reversed(alias_tokens):
+                if (tok in single_word_aliases
+                        and AUTHOR_ALIASES.get(tok) == target_regex):
+                    surname_token = tok
+                    break
+        for tok in alias_tokens:
+            if tok == surname_token:
+                continue
+            clean = tok.strip(",.;:!?'\"").lower()
+            if not clean:
+                continue
+            extras.append(clean)
+
+    idx = q_lc.find(alias_key)
+    if idx < 0:
+        return tuple(extras[:3])
+
     # Side A — preceding tokens (full_name pattern)
+    side_a: list[str] = []
     prefix = q_lc[:idx].rstrip()
     if prefix:
         raw_tokens = prefix.split()
@@ -211,8 +244,11 @@ def _extract_extra_tokens(q_lc: str, alias_key: str) -> tuple[str, ...]:
                 break
             if not all(c.isalpha() or c in ".'" for c in clean):
                 break
-            extras.append(clean)
-        extras.reverse()
+            side_a.append(clean)
+        side_a.reverse()
+    for t in side_a:
+        if t not in extras:
+            extras.append(t)
 
     # Side B — following tokens after comma (canonical-format pattern)
     # Look for «{alias_key}, FirstName Middle...»

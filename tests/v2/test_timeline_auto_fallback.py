@@ -172,5 +172,177 @@ class CatalogDescription(unittest.TestCase):
         self.assertIn("auto", basis_schema["description"])
 
 
+# =====================================================================
+# W-2 (2026-05-23) — bucketizer + renderer schema regression suite.
+#
+# The reported prod failure: timeline table for "railway"/"telegraph"/
+# "steam" showed Period = "None–None" in every row and an empty
+# per-million column, with only raw occurrences filled. The wrapper's
+# bucket parser handles two failure modes here:
+#   1. period strings that fail strict shape — boundaries land as
+#      None instead of being half-assigned ("1825–?")
+#   2. ascending order is asserted at the wrapper, so v1 returning
+#      out-of-order rows doesn't poison the axis
+# Renderer never produces the literal "None" string (Phase 6 safe_str
+# guarantee, pinned with a value-level assertion here).
+# =====================================================================
+
+
+def _v1_railway_realistic():
+    """The expected v1 shape — what rag_tools.word_freq_timeline:1248
+    actually returns from a healthy corpus path."""
+    return {
+        "word": "railway",
+        "bucket_years": 25,
+        "basis": "auto",
+        "axis_basis": "pub_year when known, otherwise birth+30",
+        "timeline": [
+            {"period": "1825-1849", "books": 50, "total_tokens": 1_000_000,
+             "occurrences": 20, "per_million": 20.0},
+            {"period": "1850-1874", "books": 100, "total_tokens": 2_000_000,
+             "occurrences": 80, "per_million": 40.0},
+            {"period": "1875-1899", "books": 200, "total_tokens": 4_000_000,
+             "occurrences": 320, "per_million": 80.0},
+        ],
+    }
+
+
+class W2TimelineBucketShape(unittest.TestCase):
+    """Bucketizer — wrapper's `period` string parse and series shape."""
+
+    def test_buckets_have_int_boundaries(self):
+        from scripts.v2.tools.words.timeline import word_freq_timeline
+        with mock.patch("scripts.rag_tools.word_freq_timeline",
+                          return_value=_v1_railway_realistic()):
+            r = word_freq_timeline("railway", bucket_years=25, basis="auto")
+        self.assertTrue(r.ok)
+        self.assertIsNotNone(r.view)
+        series = r.view.payload["series"]
+        self.assertEqual(len(series), 3)
+        for s in series:
+            self.assertIsInstance(s["bucket_start"], int)
+            self.assertIsInstance(s["bucket_end"], int)
+            self.assertGreaterEqual(s["bucket_end"], s["bucket_start"])
+
+    def test_per_million_is_numeric_not_none(self):
+        from scripts.v2.tools.words.timeline import word_freq_timeline
+        with mock.patch("scripts.rag_tools.word_freq_timeline",
+                          return_value=_v1_railway_realistic()):
+            r = word_freq_timeline("railway", bucket_years=25, basis="auto")
+        series = r.view.payload["series"]
+        for s in series:
+            self.assertIsNotNone(
+                s["freq_per_million"],
+                msg=f"per-million missing in {s!r}",
+            )
+            self.assertIsInstance(s["freq_per_million"], (int, float))
+
+    def test_count_is_present(self):
+        from scripts.v2.tools.words.timeline import word_freq_timeline
+        with mock.patch("scripts.rag_tools.word_freq_timeline",
+                          return_value=_v1_railway_realistic()):
+            r = word_freq_timeline("railway", bucket_years=25, basis="auto")
+        series = r.view.payload["series"]
+        for s in series:
+            self.assertIsNotNone(s["count"])
+            self.assertIsInstance(s["count"], int)
+
+    def test_buckets_ascending(self):
+        # Even if v1 returns them out-of-order, the wrapper must sort.
+        from scripts.v2.tools.words.timeline import word_freq_timeline
+        out_of_order = dict(_v1_railway_realistic())
+        out_of_order["timeline"] = list(reversed(out_of_order["timeline"]))
+        with mock.patch("scripts.rag_tools.word_freq_timeline",
+                          return_value=out_of_order):
+            r = word_freq_timeline("railway", bucket_years=25, basis="auto")
+        series = r.view.payload["series"]
+        starts = [s["bucket_start"] for s in series]
+        self.assertEqual(starts, sorted(starts))
+
+
+class W2TimelineRendererIntegration(unittest.TestCase):
+    """End-to-end: wrapper → renderer never produces "None–None" rows
+    and the period labels are concrete year ranges."""
+
+    def test_rendered_table_has_concrete_periods(self):
+        from scripts.v2.tools.words.timeline import word_freq_timeline
+        from scripts.v2 import template_executor
+
+        with mock.patch("scripts.rag_tools.word_freq_timeline",
+                          return_value=_v1_railway_realistic()):
+            r = word_freq_timeline("railway", bucket_years=25, basis="auto")
+
+        rendered = template_executor._render_timeline_chart(r.view)
+        # Concrete period labels (en-dash separator from renderer)
+        self.assertIn("1825–1849", rendered)
+        self.assertIn("1850–1874", rendered)
+        self.assertIn("1875–1899", rendered)
+        # The "growth toward end of 19th century" signal — the spec
+        # acceptance criterion. 80.00 > 20.00.
+        self.assertIn("20.00", rendered)
+        self.assertIn("80.00", rendered)
+        # And the literal "None" must never appear in renderer output.
+        self.assertNotIn("None", rendered,
+                          msg=f"renderer leaked 'None' into output:\n{rendered}")
+        self.assertNotIn("None–None", rendered)
+
+    def test_malformed_v1_period_does_not_leak_none(self):
+        # Defensive: even if v1 returns a row with a missing/garbled
+        # period, the rendered cell is "?–?", never "None–None".
+        from scripts.v2.tools.words.timeline import word_freq_timeline
+        from scripts.v2 import template_executor
+
+        garbled = {
+            "word": "railway",
+            "bucket_years": 25,
+            "basis": "auto",
+            "axis_basis": "",
+            "timeline": [
+                {"period": None, "books": 5, "total_tokens": 100,
+                 "occurrences": 1, "per_million": 0.5},
+                {"period": "bad-shape-foo", "books": 5, "total_tokens": 100,
+                 "occurrences": 1, "per_million": 0.5},
+            ],
+        }
+        with mock.patch("scripts.rag_tools.word_freq_timeline",
+                          return_value=garbled):
+            r = word_freq_timeline("railway", bucket_years=25, basis="auto")
+
+        rendered = template_executor._render_timeline_chart(r.view)
+        self.assertNotIn("None", rendered)
+        # Wrapper must surface the period-shape failure as a warning so
+        # the prod path doesn't quietly swallow it.
+        codes = [w.code for w in r.warnings]
+        self.assertIn("period_unparseable", codes)
+
+
+class W2ParsePeriod(unittest.TestCase):
+    """Unit-level: `_parse_period` strictness — half-parses are out."""
+
+    def test_well_formed_period(self):
+        from scripts.v2.tools.words.timeline import _parse_period
+        self.assertEqual(_parse_period("1825-1849"), (1825, 1849))
+
+    def test_none_period(self):
+        from scripts.v2.tools.words.timeline import _parse_period
+        self.assertEqual(_parse_period(None), (None, None))
+
+    def test_missing_high_year(self):
+        from scripts.v2.tools.words.timeline import _parse_period
+        # Strict — "1825-" doesn't half-assign
+        self.assertEqual(_parse_period("1825-"), (None, None))
+
+    def test_multi_hyphen(self):
+        from scripts.v2.tools.words.timeline import _parse_period
+        # "1825-1849-1900" must not silently produce (1825, None)
+        self.assertEqual(_parse_period("1825-1849-1900"), (None, None))
+
+    def test_garbage(self):
+        from scripts.v2.tools.words.timeline import _parse_period
+        self.assertEqual(_parse_period("foo"), (None, None))
+        self.assertEqual(_parse_period(""), (None, None))
+        self.assertEqual(_parse_period(123), (None, None))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

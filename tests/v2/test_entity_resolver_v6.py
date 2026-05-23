@@ -346,5 +346,170 @@ class V5BackwardsCompat(_ResolverTestBase):
         self.assertGreaterEqual(len(rr.candidates), 2)
 
 
+# =====================================================================
+# W-1 (2026-05-23) — over-eager disambiguation regression suite.
+#
+# These exercise the path entities.extract() actually uses
+# (resolve_v6_for_alias), not just the top-level resolve_v6(). The W-1
+# bug was that resolve_v6_for_alias didn't extract first-name tokens
+# from a multi-word alias_key — so «конан дойл» (ALIAS_HIT to bare
+# «^Doyle,» regex) lost the "конан" signal and fell through to
+# CLARIFY despite Arthur Conan being 99% dominant.
+# =====================================================================
+
+
+class W1ResolveViaForAliasEntryPoint(_ResolverTestBase):
+    """resolve_v6_for_alias — the path entities.extract() actually uses
+    when v5 _find_authors has already matched a multi-word curated alias.
+    """
+
+    def test_konan_doyl_alias_key_resolves(self):
+        from scripts.v2.entity_resolver_v6.main import resolve_v6_for_alias
+        d = resolve_v6_for_alias("Конан Дойл", "конан дойл", "^Doyle,")
+        self.assertEqual(d.decision, Decision.RESOLVED)
+        self.assertIn("Arthur Conan", d.resolved.display)
+
+    def test_konan_doyla_in_sentence_via_alias(self):
+        from scripts.v2.entity_resolver_v6.main import resolve_v6_for_alias
+        d = resolve_v6_for_alias(
+            "фирменные слова Конан Дойла",
+            "конан дойл",
+            "^Doyle,",
+        )
+        self.assertEqual(d.decision, Decision.RESOLVED)
+        self.assertIn("Arthur Conan", d.resolved.display)
+
+    def test_christopher_marlowe_via_alias_with_verb(self):
+        # Original W-1 reproducer: "сколько книг написал Christopher
+        # Marlowe" — verb "написал" is in NON_FIRST_NAME_TOKENS so
+        # query-context extraction yielded no extras. The first-name
+        # token must come from the alias_key itself.
+        from scripts.v2.entity_resolver_v6.main import resolve_v6_for_alias
+        d = resolve_v6_for_alias(
+            "сколько книг написал Christopher Marlowe",
+            "christopher marlowe",
+            "^Marlowe,",
+        )
+        self.assertEqual(d.decision, Decision.RESOLVED)
+        self.assertIn("Christopher", d.resolved.display)
+
+    def test_canonical_format_suggested_back_resolves_first_try(self):
+        # The clarify-loop case from the W-1 spec: after a clarify,
+        # the user picks «Doyle, Arthur Conan» (the canonical form
+        # the service suggested). It MUST resolve on the first try,
+        # not bounce back to clarify.
+        from scripts.v2.entity_resolver_v6.main import resolve_v6_for_alias
+        d = resolve_v6_for_alias("Doyle, Arthur Conan", "doyle", "^Doyle,")
+        self.assertEqual(d.decision, Decision.RESOLVED)
+        self.assertEqual(d.resolved.display, "Doyle, Arthur Conan")
+
+    def test_bare_wells_still_clarifies(self):
+        # Acceptance from spec: «какие книги у Wells» (no first name,
+        # H.G. share <90%) MUST still clarify so user can pick.
+        from scripts.v2.entity_resolver_v6.main import resolve_v6_for_alias
+        d = resolve_v6_for_alias("какие книги у Wells", "wells", "^Wells,")
+        self.assertEqual(d.decision, Decision.CLARIFY_NEEDED)
+
+
+class W1ExtractExtraTokensFromAliasKey(unittest.TestCase):
+    """Unit-level: multi-word alias_key carries first-name as an
+    extra_token even when the surrounding query context provides none.
+    """
+
+    def test_konan_dojl_alias_yields_konan(self):
+        from scripts.v2.entity_resolver_v6.main import _extract_extra_tokens
+        extras = _extract_extra_tokens("конан дойл", "конан дойл")
+        self.assertIn("конан", extras)
+
+    def test_christopher_marlowe_alias_yields_christopher(self):
+        from scripts.v2.entity_resolver_v6.main import _extract_extra_tokens
+        extras = _extract_extra_tokens(
+            "christopher marlowe", "christopher marlowe",
+        )
+        self.assertIn("christopher", extras)
+
+    def test_hg_wells_alias_yields_initials(self):
+        from scripts.v2.entity_resolver_v6.main import _extract_extra_tokens
+        extras = _extract_extra_tokens("h. g. wells", "h. g. wells")
+        # Both initials should land in extras (after dot-stripping)
+        self.assertIn("h", extras)
+        self.assertIn("g", extras)
+
+    def test_single_word_alias_yields_nothing_when_isolated(self):
+        from scripts.v2.entity_resolver_v6.main import _extract_extra_tokens
+        # Plain "wells" — no surrounding context, no comma — empty.
+        self.assertEqual(_extract_extra_tokens("wells", "wells"), ())
+
+    def test_canonical_format_query_yields_following_tokens(self):
+        # After-comma path still works alongside the alias-key path
+        from scripts.v2.entity_resolver_v6.main import _extract_extra_tokens
+        extras = _extract_extra_tokens("doyle, arthur conan", "doyle")
+        self.assertIn("arthur", extras)
+        self.assertIn("conan", extras)
+
+
+class W1DominantHomonymRule(_ResolverTestBase):
+    """Rule 4.45 — when one canonical accounts for ≥90% of total
+    prominence (or ≥10× the runner-up), resolve to it regardless of
+    mention type. Fixture: Doyle Arthur Conan = 65k vs Charles = 200
+    vs William = 50 → 99.6% share, 325× ratio.
+    """
+
+    def test_dominant_doyle_resolves_for_alias_hit(self):
+        from scripts.v2.entity_resolver_v6.main import resolve_v6_for_alias
+        d = resolve_v6_for_alias("Конан Дойл", "конан дойл", "^Doyle,")
+        self.assertEqual(d.decision, Decision.RESOLVED)
+        # Either Rule 2 (token bypass) or Rule 4.45 (dominance) is fine
+        self.assertIn("Arthur Conan", d.resolved.display)
+
+    def test_non_dominant_wells_still_clarifies(self):
+        # Wells fixture is by design 88.93% (just under 90%) and 9.4×
+        # (just under 10×) — neither dominance threshold trips.
+        d = resolve_v6("Wells")
+        self.assertEqual(d.decision, Decision.CLARIFY_NEEDED)
+
+
+class W1TZAcceptance(_ResolverTestBase):
+    """TZ tz_claude_code_fixes_2026-05-22.md §W-1 acceptance pins.
+
+    Lines 49-52 of the TZ:
+      - «сколько книг написал Christopher Marlowe» → direct
+      - «фирменные слова Конан Дойла» → without clarify
+      - «какие книги у Уэллса» → CLARIFY (имя не задано — сохранить)
+      - suggested format «Doyle, Arthur Conan» → first-try resolve
+    """
+
+    def test_tz_marlowe_direct_in_sentence(self):
+        d = resolve_v6("сколько книг написал Christopher Marlowe")
+        self.assertEqual(d.decision, Decision.RESOLVED)
+        self.assertIn("Christopher", d.resolved.display)
+
+    def test_tz_konan_dojla_resolves_for_arthur_conan(self):
+        d = resolve_v6("фирменные слова Конан Дойла")
+        self.assertEqual(d.decision, Decision.RESOLVED)
+        self.assertIn("Arthur Conan", d.resolved.display)
+
+    def test_tz_uelsa_no_first_name_clarifies(self):
+        # Critical regression: Wells H.G. dominance is 88.93% / 9.4×
+        # — BELOW the new dominance thresholds (90% / 10×). When the
+        # user typed only the Russian declension «Уэллса» with no
+        # first name, the resolver MUST clarify per TZ acceptance.
+        d = resolve_v6("какие книги у Уэллса")
+        self.assertEqual(d.decision, Decision.CLARIFY_NEEDED,
+                          msg="W-1 TZ line 51: name not given → clarify")
+
+    def test_tz_canonical_format_suggested_resolves_first_try(self):
+        d = resolve_v6("фирменные слова Doyle, Arthur Conan")
+        self.assertEqual(d.decision, Decision.RESOLVED)
+        self.assertEqual(d.resolved.display, "Doyle, Arthur Conan")
+
+    def test_tz_tolstoy_ru_stem_still_resolves_when_truly_dominant(self):
+        # Sanity: tightening Rule 4.6 from 5× to 10× must not break
+        # «у Толстого» (Leo at 70× over runners-up) — still resolves.
+        d = resolve_v6("какие книги у Толстого")
+        self.assertEqual(d.decision, Decision.RESOLVED)
+        self.assertIn("Leo", d.resolved.display)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
