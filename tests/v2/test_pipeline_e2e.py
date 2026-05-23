@@ -77,6 +77,27 @@ def _reset_v2_registry():
     import scripts.v2.tools  # noqa: F401
 
 
+def _managed_module_keys():
+    """sys.modules keys that _install_stubs() overwrites and
+    _reset_v2_registry() deletes.
+
+    Snapshotted in setUpClass, restored verbatim in tearDownClass so this
+    e2e test leaves sys.modules identical to its pre-test state. The old
+    teardown only popped scripts.rag_tools / scripts.rag_query (leaving
+    them absent) and never touched scripts.learning_tools at all (leaving
+    a fake ModuleType resident forever). That desynced mock.patch -- which
+    resolves the v1 module via the `scripts` package attribute -- from
+    wrapper `from scripts.rag_tools import ...` calls -- which resolve via
+    sys.modules -- and silently corrupted unrelated tests run afterwards
+    (T0 / REMEDIATION_BRIEF).
+    """
+    return [n for n in list(sys.modules)
+            if n in ("scripts.rag_query", "scripts.rag_tools",
+                     "scripts.learning_tools")
+            or n == "scripts.v2.tools"
+            or n.startswith("scripts.v2.tools.")]
+
+
 # ---- the 40 questions from Obsidian vault ----
 
 
@@ -129,6 +150,10 @@ QUESTIONS_40 = [
 class V2PipelineE2E(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        # Snapshot sys.modules BEFORE installing stubs so tearDownClass
+        # can restore it exactly -- see _managed_module_keys() for why a
+        # pop is not a restore.
+        cls._mod_snapshot = {n: sys.modules[n] for n in _managed_module_keys()}
         _install_stubs()
         _reset_legacy_cache()
         cls._snap_registry = None
@@ -141,8 +166,12 @@ class V2PipelineE2E(unittest.TestCase):
         from scripts.v2.tool_registry import REGISTRY
         REGISTRY.clear()
         REGISTRY.update(cls._snap_registry or {})
-        sys.modules.pop("scripts.rag_query", None)
-        sys.modules.pop("scripts.rag_tools", None)
+        # Restore sys.modules to its exact pre-test state: drop every
+        # managed key resident now (installed stubs + transient
+        # re-imports), then reinstate the snapshot verbatim.
+        for n in _managed_module_keys():
+            del sys.modules[n]
+        sys.modules.update(cls._mod_snapshot)
         _reset_legacy_cache()
 
     def test_no_crashes_on_all_40(self):

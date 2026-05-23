@@ -47,3 +47,44 @@ def _reset_v2_lru_cache():
 
 def pytest_sessionfinish(session, exitstatus):
     shutil.rmtree(_TMP_CACHE_DIR, ignore_errors=True)
+
+
+# --- T0 / REMEDIATION_BRIEF: v1-layer module-swap isolation -----------------
+#
+# test_router, test_search, test_tool_contract and test_tool_migration install
+# fake ModuleType stubs for scripts.rag_tools / scripts.rag_query /
+# scripts.learning_tools in their per-test setUp, but their tearDown only pops
+# rag_tools/rag_query — it leaks a fake scripts.learning_tools and never
+# restores the real modules. A downstream test then desyncs: mock.patch
+# resolves the v1 module via the `scripts` package attribute while wrapper
+# bodies do `from scripts.rag_tools import ...` via sys.modules, so the test
+# silently runs real v1 instead of its mock (the order-dependent failures
+# catalogued in REMEDIATION_BRIEF / T0).
+#
+# The fixture below pins all three back to their canonical real module after
+# every test. It is a strict no-op for tests that never swap the v1 layer
+# (sys.modules entry already IS the canonical object). test_pipeline_e2e is
+# exempt: it swaps the v1 layer in setUpClass and restores it in
+# tearDownClass itself, and a function-scoped fixture must not fight that
+# class-scoped lifecycle.
+
+_REAL_V1_MODULES: dict = {}
+
+
+@pytest.fixture(autouse=True)
+def _isolate_v1_module_swaps(request):
+    _names = ("scripts.rag_query", "scripts.rag_tools", "scripts.learning_tools")
+    for n in _names:
+        m = sys.modules.get(n)
+        if n not in _REAL_V1_MODULES and m is not None and getattr(m, "__file__", None):
+            _REAL_V1_MODULES[n] = m
+    yield
+    if request.module.__name__.rsplit(".", 1)[-1] == "test_pipeline_e2e":
+        return
+    pkg = sys.modules.get("scripts")
+    for n, real in _REAL_V1_MODULES.items():
+        if sys.modules.get(n) is not real:
+            sys.modules[n] = real
+        attr = n.split(".", 1)[1]
+        if pkg is not None and getattr(pkg, attr, None) is not real:
+            setattr(pkg, attr, real)
