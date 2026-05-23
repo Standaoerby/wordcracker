@@ -190,21 +190,36 @@ def _plan_word_timeline(e: Entities) -> QueryPlan:
     # raw query.
     raw_lc = ((e.raw_misc or {}).get("raw_text") or "").lower()
     rise_markers = (
-        "ставш", "ставшие", "ставших", "появивш", "появились",
+        "ставш", "ставшие", "ставших", "стали чаще", "стало чаще",
+        "появивш", "появились", "появилось",
         "новые слова", "новых слов",
-        "чаще", "выросл", "рост", "усилил",
+        "к концу", "стали распространенн",
         "emerging", "rising", "trending", "appeared", "appearing",
         "more frequent", "increasing", "became common",
     )
     drop_markers = (
-        "исчез", "вышедш", "вышли из", "ушл", "редк",
+        "исчез", "вышедш", "вышли из", "ушл", "редк", "перестали",
         "disappear", "vanish", "obsolete", "less frequent",
+        "fell out of",
     )
     rising = any(m in raw_lc for m in rise_markers)
     dropping = any(m in raw_lc for m in drop_markers)
     # If both surface, drop wins — historically users phrase the «исчезли»
     # case more clearly; the «ставшие чаще» case is the new path.
     rise_direction = rising and not dropping
+    trend_query = rising or dropping
+
+    # W-12 (2026-05-23): if direction is clear AND `e.word` wasn't
+    # explicitly quoted (i.e. it's a noisy preterite-verb capture like
+    # «стали»), prefer the trending tool over per-word timeline. The
+    # quote check leans on `raw_misc.raw_text` for the lexical context;
+    # an explicitly-quoted word always wins.
+    word_in_quotes = bool(e.word and any(
+        f"{q}{e.word}{q2}" in raw_lc
+        for q, q2 in (('"', '"'), ('«', '»'), ('"', '"'),
+                       ("'", "'"), ("'", "'"))
+    ))
+    use_trend_default = trend_query and not word_in_quotes
 
     if e.year_from and not e.year_to:
         tool_name = ("words_appearing_after" if rise_direction
@@ -216,6 +231,23 @@ def _plan_word_timeline(e: Entities) -> QueryPlan:
             expected_cost="medium",
             explain=f"{tool_name}({e.year_from - 1}) — "
                     f"direction={'rise' if rise_direction else 'drop'}",
+        )
+
+    # W-12 — trend query with a closed year range («XIX век» → 1800-1899
+    # set by the extractor) should also hit the trend tool, not the
+    # single-word freq path. Use the high-end year as the cutoff.
+    if use_trend_default and e.year_to:
+        tool_name = ("words_appearing_after" if rise_direction
+                      else "words_disappearing_after")
+        cutoff = e.year_to
+        return QueryPlan(
+            intent="word_timeline", entities=e,
+            steps=[PlanStep(tool=tool_name,
+                            args={"year": cutoff, "top": e.top_n or 25})],
+            expected_cost="medium",
+            explain=f"{tool_name}({cutoff}) — trend query "
+                    f"direction={'rise' if rise_direction else 'drop'} "
+                    f"(year_to inferred as cutoff)",
         )
     # Sprint 18 — multi-word timeline (Round 8 C5). Emit N parallel
     # word_freq_timeline calls; renderer plots them side by side.

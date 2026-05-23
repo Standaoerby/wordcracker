@@ -1385,6 +1385,124 @@ def words_disappearing_after(year: int = 1920, top: int = 25,
         return {"error": "words_disappearing_after failed", "details": str(e)}
 
 
+# ============================ TOOL: words_appearing_after ============================
+def words_appearing_after(year: int = 1920, top: int = 25,
+                          min_post_pm: float = 50.0,
+                          min_post_books: int = 50,
+                          min_pre_books: int = 10,
+                          basis: str = "auto") -> dict:
+    """Words that rose sharply in usage after a given year.
+
+    Mirror of `words_disappearing_after` (W-12 / 2026-05-23). Computes
+    per-million frequency in pre-`year` and post-`year` buckets, then
+    ranks by rise_ratio = post_pm / max(pre_pm, 0.1). Filters:
+    post_pm >= `min_post_pm` (word is common in post-period),
+    both buckets >= min_books to keep ratios stable.
+
+    Defaults target «words that emerged/rose after 1920»: year=1920,
+    min_post_pm=50/million ensures we're talking about real working
+    vocabulary, not random rare bursts.
+
+    basis: 'auto' (pub_year if known else birth+30) is the default.
+    """
+    t0 = time.perf_counter()
+    try:
+        df = _metadata_df()
+        df = df[df["language"].fillna("").str.contains("'en'", regex=False)].copy()
+        birth = pd.to_numeric(df["authoryearofbirth"], errors="coerce")
+        birth_proxy = birth + 30
+        pub = pd.to_numeric(df.get("pub_year"), errors="coerce") \
+            if "pub_year" in df.columns else pd.Series([pd.NA] * len(df), index=df.index)
+        if basis == "pub_year":
+            df["axis_year"] = pub
+        elif basis == "birth":
+            df["axis_year"] = birth_proxy
+        else:
+            df["axis_year"] = pub.fillna(birth_proxy)
+        df = df.dropna(subset=["axis_year"])
+        df["axis_year"] = df["axis_year"].astype(int)
+
+        pre = df[df["axis_year"] < year]
+        post = df[df["axis_year"] >= year]
+        if len(pre) < min_pre_books or len(post) < min_post_books:
+            return {"error": "not enough books in one bucket",
+                    "pre_books": int(len(pre)), "post_books": int(len(post)),
+                    "min_pre_books": min_pre_books, "min_post_books": min_post_books,
+                    "year": year}
+
+        def _aggregate(book_ids):
+            counts: Counter = Counter()
+            total_tokens = 0
+            for pg in book_ids:
+                f = _counts_path(pg)
+                if not f.exists():
+                    continue
+                with open(f, encoding="utf-8") as fh:
+                    for line in fh:
+                        parts = line.rstrip("\n").split("\t")
+                        if len(parts) != 2:
+                            continue
+                        try:
+                            n = int(parts[1])
+                        except ValueError:
+                            continue
+                        counts[parts[0]] += n
+                        total_tokens += n
+            return counts, total_tokens
+
+        # Cap each bucket for runtime — same 5000-book cap as the dual
+        # words_disappearing_after path.
+        pre = pre.copy()
+        post = post.copy()
+        pre["downloads"] = pd.to_numeric(pre["downloads"], errors="coerce").fillna(0)
+        post["downloads"] = pd.to_numeric(post["downloads"], errors="coerce").fillna(0)
+        pre_ids = list(pre.sort_values("downloads", ascending=False).head(5000)["id"])
+        post_ids = list(post.sort_values("downloads", ascending=False).head(5000)["id"])
+
+        pre_counts, pre_total = _aggregate(pre_ids)
+        post_counts, post_total = _aggregate(post_ids)
+        if not pre_total or not post_total:
+            return {"error": "empty bucket totals"}
+
+        pre_pm_factor = 1_000_000 / pre_total
+        post_pm_factor = 1_000_000 / post_total
+
+        rows = []
+        # Iterate post bucket — these are candidates that ROSE after.
+        # Mirror of disappearing path but anchored on post_pm rather
+        # than pre_pm. A word that was 0 in pre and 200 in post has
+        # rise_ratio = 200 / 0.1 = 2000, which is what we want.
+        for w, post_c in post_counts.items():
+            if not w.isalpha() or len(w) < 3:
+                continue
+            post_pm = post_c * post_pm_factor
+            if post_pm < min_post_pm:
+                continue
+            pre_c = pre_counts.get(w, 0)
+            pre_pm = pre_c * pre_pm_factor
+            rise = post_pm / max(pre_pm, 0.1)
+            rows.append({
+                "word": w,
+                "pre_per_million":  round(pre_pm, 2),
+                "post_per_million": round(post_pm, 2),
+                "rise_ratio":       round(rise, 2),
+                "pre_count":        pre_c,
+                "post_count":       post_c,
+            })
+        rows.sort(key=lambda r: -r["rise_ratio"])
+        return {
+            "year_cutoff":      year,
+            "basis":            basis,
+            "pre_bucket":       {"books": len(pre_ids), "total_tokens": pre_total},
+            "post_bucket":      {"books": len(post_ids), "total_tokens": post_total},
+            "min_post_per_million": min_post_pm,
+            "top": rows[:top],
+            "_elapsed_s": round(time.perf_counter() - t0, 2),
+        }
+    except Exception as e:
+        return {"error": "words_appearing_after failed", "details": str(e)}
+
+
 # ============================ TOOL 11: word_contexts_global ============================
 def _normalize_lang(raw: str) -> str:
     """Pull a plain ISO code out of the various shapes `language` can take in
@@ -3133,6 +3251,26 @@ TOOLS_SPEC += [
         }, "required": []},
     }},
     {"type": "function", "function": {
+        "name": "words_appearing_after",
+        "description": (
+            "🆕 W-12 / 2026-05-23. Слова резко вошедшие в употребление после "
+            "данного года — зеркальная пара к words_disappearing_after. "
+            "Разбивает корпус на pre/post buckets и возвращает топ-N слов "
+            "с наибольшим rise_ratio = post_per_million / pre_per_million. "
+            "Фильтр min_post_pm (default 50/million) гарантирует, что слово "
+            "стало common в post-period. Используй для «слова, ставшие чаще "
+            "после 1900», «emerging vocabulary after WWI», «новые слова XX "
+            "века», «trending words»."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "year":            {"type": "integer", "description": "default 1920"},
+            "top":             {"type": "integer", "description": "default 25"},
+            "min_post_pm":     {"type": "number", "description": "default 50.0 per-million"},
+            "basis":           {"type": "string", "description":
+                "'auto' (default) | 'pub_year' (strict OL) | 'birth' (legacy)"},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
         "name": "word_pos_distribution",
         "description": (
             "🆕 POS-распределение слова по фактическим вхождениям в scope "
@@ -3279,6 +3417,7 @@ TOOL_DISPATCH = {
     "word_freq_timeline":       word_freq_timeline,
     "word_contexts_global":     word_contexts_global,
     "words_disappearing_after": words_disappearing_after,
+    "words_appearing_after":    words_appearing_after,
     "find_book":                find_book,
     "book_emotion_profile":     book_emotion_profile,
     "emotion_collocates":       emotion_collocates,

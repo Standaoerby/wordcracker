@@ -154,6 +154,18 @@ def _plan_author_vocab(e: Entities) -> QueryPlan:
 def _plan_author_compare(e: Entities) -> QueryPlan:
     others = e.multi_author_regex
     if not e.author_regex or not others:
+        # Phase 4 W-5 (2026-05-23) — «сравни X и Y» / «compare X and Y»
+        # where X, Y are BOOK titles (not authors) used to bounce here
+        # with the «Нужны два автора» clarify because no author_regex
+        # matched. If the extractor surfaced ≥2 books, redirect to
+        # `_plan_book_compare` which will fan out per book. Closes W-5
+        # «сравни Dracula и Frankenstein» path.
+        books_count = (1 if e.book_id or e.book_title else 0) + len(
+            e.multi_book_ids or []) + sum(
+            1 for t in (e.multi_book_titles or []) if t)
+        if books_count >= 2:
+            from scripts.v2.planner.builders.book import _plan_book_compare
+            return _plan_book_compare(e)
         return QueryPlan(
             intent="clarify", entities=e, steps=[],
             needs_clarify=True,

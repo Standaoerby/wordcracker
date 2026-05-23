@@ -289,6 +289,34 @@ V1WordsDisappearingAfter.__defaults__ = {
 }
 
 
+class V1WordsAppearingAfter(V1Schema):
+    """W-12 (2026-05-23) — mirror of V1WordsDisappearingAfter for the
+    rise-direction tool. Rows carry `rise_ratio` instead of
+    `drop_ratio`; everything else (pre/post buckets, per_million,
+    counts) matches one-to-one."""
+    year_cutoff: int
+    basis: str
+    pre_bucket: dict
+    post_bucket: dict
+    min_post_per_million: float
+    top: list[dict]
+    _elapsed_s: float
+
+
+V1WordsAppearingAfter.__required__ = frozenset({"year_cutoff", "top"})
+V1WordsAppearingAfter.__row_keys__ = frozenset({
+    "word", "pre_per_million", "post_per_million",
+    "rise_ratio", "pre_count", "post_count",
+    "books", "total_tokens",
+})
+V1WordsAppearingAfter.__defaults__ = {
+    "year_cutoff": 1920, "basis": "auto", "top": [],
+    "pre_bucket": {"books": 0, "total_tokens": 0},
+    "post_bucket": {"books": 0, "total_tokens": 0},
+    "min_post_per_million": 50.0, "_elapsed_s": 0.0,
+}
+
+
 class V1WordContextsGlobal(V1Schema):
     word: str
     k: int
@@ -785,6 +813,7 @@ _ALL_SCHEMAS: tuple[type[V1Schema], ...] = (
     V1TopNgramsByAuthor, V1AffinityByAuthor, V1WordContexts,
     V1CompareAuthors, V1LexicalDiversity, V1WordCollocates,
     V1BookReadability, V1WordFreqTimeline, V1WordsDisappearingAfter,
+    V1WordsAppearingAfter,
     V1WordContextsGlobal, V1WordPosDistribution, V1AuthorAttribution,
     V1AuthorInfluences, V1BookEmotionProfile, V1EmotionCollocates,
     V1FindBook, V1WordEtymology, V1FindWordsByEtymology, V1AuthorProfile,
@@ -816,6 +845,7 @@ __all__ = [
     "V1TopNgramsByAuthor", "V1AffinityByAuthor", "V1WordContexts",
     "V1CompareAuthors", "V1LexicalDiversity", "V1WordCollocates",
     "V1BookReadability", "V1WordFreqTimeline", "V1WordsDisappearingAfter",
+    "V1WordsAppearingAfter",
     "V1WordContextsGlobal", "V1WordPosDistribution", "V1AuthorAttribution",
     "V1AuthorInfluences", "V1BookEmotionProfile", "V1EmotionCollocates",
     "V1FindBook", "V1WordEtymology", "V1FindWordsByEtymology",
