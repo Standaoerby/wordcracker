@@ -6,6 +6,82 @@
 
 ---
 
+## 2026-05-23 — Phase 1 remediation (T1)
+
+Closing actions from REMEDIATION_BRIEF.md / docs/T1_TZ.md (Фаза 1 doводка).
+Goal of T1: one resolver, one router executor (+ stream), engine flag
+removed, on/off toggles documented.
+
+### D-P1-4 — Prod runs the v2 engine (R8 verification)
+
+**Decision.** Confirmed by code inspection (no live prod access from
+this session) that production wordcracker bakes `WC_DEFAULT_ENGINE=v2`
+into the `ExecStart` of the chat server via the systemd drop-in
+`systemd/wordcracker-chat.service.d/v2-engine.conf:22`. The repo-level
+`docker-compose*.yml` do NOT set `WC_DEFAULT_ENGINE`, which led the
+earlier rollout-readiness report to flag this — but the systemd unit
+re-exports the var into the container at `docker compose exec` time
+(see the comment in the drop-in: "the main unit's ExecStart only
+forwards ASSISTANT_NAME ... so we reset ExecStart and re-add it with
+`-e WC_DEFAULT_ENGINE=v2`"). The drop-in also pins `WC_LLM_MODEL`
+and `WC_CRITIC_MODEL` to `wordcracker:v2`.
+
+**Live path therefore is:**
+
+- `chat_server._pick_engine` → returns `"v2"` (default falls through
+  because `WC_ALLOW_ENGINE_OVERRIDE` is not set in the drop-in).
+- `chat_server.ask` / `ask_stream` with `engine="v2"` → lazy-loads
+  `scripts.v2.rag_v2.ask` / `ask_stream`.
+- `rag_v2.ask*` runs the v3 rules planner first; if it emits a clarify
+  AND the v4 LLM planner returns a plan with steps, the v4 PlanSpec
+  path takes over via `router_mod.execute_spec(...)`. Otherwise the
+  v3 QueryPlan path runs via `router_mod.execute(plan, ...)`.
+- Resolver: `entity_resolver.resolve_author` is already a thin shim
+  that delegates to `entity_resolver_v6.resolve_v6` + `to_resolve_result`
+  (D-P1-2, 2026-05-22). v6 is the only resolver actually deciding.
+
+**Why this matters.** Prod = v2 unblocks T1 — proceed with consolidation
+per docs/T1_TZ.md. If prod had been v1 the entire v2 refactor would
+not be in production and T1 (and T2/T4/T5) would be moot until that
+were fixed.
+
+**Consequences.** Steps B–E of T1 are unblocked. The remaining work
+in this session is the structural one — see D-P1-5 through D-P1-7.
+
+### D-P1-7 — Operational toggles `WC_CRITIC` and `WC_NUMERIC_AUDIT`
+
+**Decision.** Both toggles are documented as **on by default**,
+matched in prod by the absence of an override in the systemd drop-in
+or compose files. The env reads stay in code; the on/off branches stay.
+
+| toggle             | prod state | code default                       | enforcement                  |
+|--------------------|------------|------------------------------------|------------------------------|
+| `WC_CRITIC`        | on         | `"on"` if env unset (`critic.py:40`) | Critic LLM verifies every answer; emits warning footer on flagged answers. |
+| `WC_NUMERIC_AUDIT` | on         | `"on"` if env unset (`numeric_audit.py:31`) | Programmatic check that numbers in the rendered answer trace back to tool data. |
+
+Neither var is set in `docker-compose*.yml` or in the systemd drop-in;
+the code defaults are therefore the prod values. Both branches have
+been on in prod since their respective sprints (Sprint 6.1 for critic;
+Sprint 16 Phase D for numeric audit).
+
+**Why.** Per REMEDIATION_BRIEF §3 ("исправленный гейт Фазы 1"):
+on/off toggles are allowed iff their prod value is **confirmed and
+documented**. The confirmation here is "no override anywhere; code
+default is the prod state". The toggles do not gate a code generation
+or a dead branch — they switch between "run the audit pass" and "skip
+the audit pass" on already-rendered answers. R1 explicitly permits
+this shape.
+
+**Why not delete the off branch.** Both toggles are operationally
+useful — when the critic LLM is unhealthy (Ollama under load, model
+swapped, audit drift), an operator setting `WC_CRITIC=off` is the
+fast-disable path. Deleting the branch would require code change +
+deploy for a state we want to be able to toggle by env var. This
+matches Class-A operational config (R1's permitted exception), not
+Class-B feature-flag dark code.
+
+---
+
 ## 2026-05-22 — Phase 1: схлопнуть поколения
 
 Closing actions from REFACTOR_BRIEF.md, Часть 3, Фаза 1. Goal: one live
