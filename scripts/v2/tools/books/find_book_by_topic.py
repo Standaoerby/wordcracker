@@ -69,6 +69,50 @@ _META_TITLE_BLOCKLIST: tuple[str, ...] = (
     "outline of",
     "primer of english",
     "the cambridge history",
+    # Phase 4 W-14 (2026-05-23) — Stan test bench «что почитать после
+    # Дракулы» surfaced «Греческие мифы» / «Anthology of …» in the top
+    # alongside legit fiction. Expand blocklist with mythology /
+    # textbook / anthology surface forms. KEEP narrow: «Tales from
+    # Shakespeare» IS Lamb's children's fiction adaptation, so we
+    # don't blocklist the bare «tales from». We anchor on mythology /
+    # treasury / studies / lectures / essays / pageant — these surface
+    # forms almost never name a novel.
+    "myths and legends",
+    "myths of the",
+    "myths of greek",
+    "myths of greece",
+    "myths of rome",
+    "greek mythology",
+    "roman mythology",
+    "norse mythology",
+    "ancient mythology",
+    "mythology of",
+    "tales of the greek",
+    "stories of greek",
+    "stories from greek",
+    "old greek stories",
+    "history of literature",
+    "history of fiction",
+    "history of the novel",
+    "studies in english",
+    "studies in literature",
+    "lectures on",
+    "essays on english",
+    "essays in literature",
+    "guide to english",
+    "treasury of english",
+    "treasury of literature",
+    "anthology of english",
+    "anthology of literature",
+    "selections from english",
+    "readings from english",
+    "english literature, an",       # «English Literature, An Illustrated…»
+    "introduction to english",
+    "introduction to literature",
+    "schools of english",
+    "course of english",
+    "pageant of",
+    "library of literary",
 )
 
 
@@ -118,7 +162,7 @@ def _translate_topic(topic: str) -> tuple[str, str | None]:
         "properties": {
             "topic":             {"type": "string", "description": "topical query на любом языке"},
             "top":               {"type": "integer", "description": "сколько уникальных книг (default 8)"},
-            "per_retriever":     {"type": "integer", "description": "k for each retriever before dedup (default 60)"},
+            "per_retriever":     {"type": "integer", "description": "k for each retriever before dedup (default 30 — W-13 tightened from 60 to fit BGE rerank in ≤30s)"},
             "author_filter":     {"type": "string",  "description": "опциональный regex для фильтра автора"},
             "rerank_with":       {"type": "string",  "description": "опциональный плагин из scoring.REGISTRY, e.g. 'bge_reranker'"},
             "min_rerank_score":  {"type": "number",  "description": "drop matches with rerank_score below this (default 0.4, BGE normalized)"},
@@ -134,15 +178,21 @@ def _translate_topic(topic: str) -> tuple[str, str | None]:
     # (E11 fix). Cost stays «heavy» so the budget estimator still
     # downsizes / clarifies on heavy queries before dispatch.
     cacheable=True,
-    # E26 (2026-05-22) — META blocklist drops bibliography/catalogue
-    # books from recommendation results. Invalidates entries written
-    # before the filter was applied.
-    wrapper_version="v2-e26-meta-blocklist",
+    # W-13 (Phase 5 P2, 2026-05-23) — bump wrapper_version so cache
+    # entries computed under the old per_retriever=60 (which made
+    # book_similar reliably 300+s with BGE rerank) get recomputed at
+    # the tighter per_retriever=30 / k=max(top*3,30) budget. Previous
+    # comment kept for context.
+    # E26 (2026-05-22) / W-14 (2026-05-23) — META blocklist drops
+    # bibliography / catalogue / mythology / textbook / anthology entries
+    # from recommendation results. R-23 Tier 0: bump wrapper_version so
+    # cached results recompute through the extended blocklist.
+    wrapper_version="v4-w13-latency-budget",
 )
 def find_book_by_topic(
     topic: str,
     top: int = 8,
-    per_retriever: int = 60,
+    per_retriever: int = 30,
     author_filter: str | None = None,
     rerank_with: str | None = None,
     min_rerank_score: float = 0.4,
@@ -166,9 +216,16 @@ def find_book_by_topic(
     # Delegate to hybrid_search — it handles RRF + optional rerank.
     # We always pull more chunks than `top` to leave room for dedup
     # AND for the rerank-threshold filter below.
+    #
+    # W-13 (Phase 5 P2, 2026-05-23) — k formula tightened from
+    # max(top*4, 40) to max(top*3, 30). The old budget passed 40-80
+    # chunks to BGE rerank → wall clock 30-300s on hot path. With
+    # top=8 the new pool is 30 chunks which keeps BGE under 5s on
+    # the lightweight model and still leaves enough headroom for
+    # rerank-threshold drops + edition-dedup (W-17).
     sub_args: dict[str, Any] = {
         "query": topic,
-        "k": max(top * 4, 40),       # extra headroom for threshold drops
+        "k": max(top * 3, 30),
         "per_retriever": per_retriever,
     }
     if author_filter:

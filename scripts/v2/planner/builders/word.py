@@ -64,6 +64,21 @@ def _plan_word_contexts(e: Entities) -> QueryPlan:
                "rerank_with": "bge_reranker"}
     if e.lang_hint:
         hs_args["lang"] = e.lang_hint
+    # Phase 4 W-10 (2026-05-23) — composite word card: hybrid_search
+    # supplies 2-3 corpus snippets with `title` per row; enrich_word
+    # supplies translation_ru + ipa + pos + definition_en + family_chain.
+    # Renderer must surface ALL surviving facets (skip facets that are
+    # genuinely missing — softdegrade-with-note, per Phase 6 view
+    # contract — but never silently drop a populated facet).
+    notes = [
+        "Это запрос о слове («что значит X» / «meaning of X» style). "
+        "Бандл объединяет: hybrid_search (корпус-сниппеты с title для "
+        "каждого) + enrich_word (translation_ru, ipa, pos, definition_en, "
+        "family_chain). В финальном ответе ОБЯЗАТЕЛЬНО покажи все "
+        "доступные фасеты: перевод, IPA, POS, определение, этимология, "
+        "2-3 корпус-сниппета с названиями книг. Если фасет реально пуст "
+        "в данных — напиши «не указано», но НЕ замалчивай его наличием.",
+    ]
     return QueryPlan(
         intent="word_contexts", entities=e,
         steps=[
@@ -75,7 +90,9 @@ def _plan_word_contexts(e: Entities) -> QueryPlan:
         expected_cost="medium",
         explain=(f"hybrid_search({e.word}, lang={e.lang_hint or '*'}) "
                  f"— FTS5+Chroma RRF + BGE rerank, "
-                 f"+ enrich_word in parallel (translation+etymology)"),
+                 f"+ enrich_word parallel (translation+IPA+POS+etymology) "
+                 f"— W-10 composite word bundle"),
+        render_notes=notes,
     )
 
 
@@ -99,14 +116,20 @@ def _plan_word_collocates(e: Entities) -> QueryPlan:
         if e.author_regex and isinstance(scope_or_plan, dict)
         else None
     )
+    # W-15 (2026-05-23) — explicitly request NPMI ranking so the
+    # rendered table sorts by association strength (engine/pressure/power
+    # for «steam») instead of raw counts (which surfaced the/of/and even
+    # with exclude_stopwords). Falls back to count internally if the
+    # counts files aren't readable (dev box without /workspace).
     return QueryPlan(
         intent="word_collocates", entities=e,
         steps=[PlanStep(tool="word_collocates",
                         args={"scope": scope_or_plan, "word": e.word,
-                              "window": 4, "top": e.top_n or 20},
+                              "window": 4, "top": e.top_n or 20,
+                              "metric": "npmi"},
                         fan_out=fan_out_marker)],
         expected_cost="medium",
-        explain=f"word_collocates({scope_or_plan}, {e.word})"
+        explain=f"word_collocates({scope_or_plan}, {e.word}, metric=npmi)"
                 + (f" + fan-out [{len(e.multi_author_regex[:3])} more]"
                    if fan_out_marker and e.multi_author_regex else ""),
     )
@@ -159,13 +182,40 @@ def _detect_multi_word_timeline(raw: str, primary: str | None) -> list[str]:
 
 
 def _plan_word_timeline(e: Entities) -> QueryPlan:
+    # Phase 4 W-12 (2026-05-23) — detect rise vs drop direction. Was:
+    # «слова, ставшие чаще» / «emerging words» fell through to the
+    # default words_disappearing_after path and answered the wrong
+    # question. The new `words_appearing_after` tool is the symmetric
+    # pair; pick which one to call based on direction keywords in the
+    # raw query.
+    raw_lc = ((e.raw_misc or {}).get("raw_text") or "").lower()
+    rise_markers = (
+        "ставш", "ставшие", "ставших", "появивш", "появились",
+        "новые слова", "новых слов",
+        "чаще", "выросл", "рост", "усилил",
+        "emerging", "rising", "trending", "appeared", "appearing",
+        "more frequent", "increasing", "became common",
+    )
+    drop_markers = (
+        "исчез", "вышедш", "вышли из", "ушл", "редк",
+        "disappear", "vanish", "obsolete", "less frequent",
+    )
+    rising = any(m in raw_lc for m in rise_markers)
+    dropping = any(m in raw_lc for m in drop_markers)
+    # If both surface, drop wins — historically users phrase the «исчезли»
+    # case more clearly; the «ставшие чаще» case is the new path.
+    rise_direction = rising and not dropping
+
     if e.year_from and not e.year_to:
+        tool_name = ("words_appearing_after" if rise_direction
+                      else "words_disappearing_after")
         return QueryPlan(
             intent="word_timeline", entities=e,
-            steps=[PlanStep(tool="words_disappearing_after",
+            steps=[PlanStep(tool=tool_name,
                             args={"year": e.year_from - 1, "top": e.top_n or 25})],
             expected_cost="medium",
-            explain=f"words_disappearing_after({e.year_from - 1})",
+            explain=f"{tool_name}({e.year_from - 1}) — "
+                    f"direction={'rise' if rise_direction else 'drop'}",
         )
     # Sprint 18 — multi-word timeline (Round 8 C5). Emit N parallel
     # word_freq_timeline calls; renderer plots them side by side.
@@ -192,12 +242,17 @@ def _plan_word_timeline(e: Entities) -> QueryPlan:
             expected_cost="medium",
             explain=f"word_freq_timeline({e.word})",
         )
+    # No word, no year — broad «slovar' эпохи». Pick direction by the
+    # same rise/drop markers as above (W-12).
+    tool_name = ("words_appearing_after" if rise_direction
+                  else "words_disappearing_after")
     return QueryPlan(
         intent="word_timeline", entities=e,
-        steps=[PlanStep(tool="words_disappearing_after",
+        steps=[PlanStep(tool=tool_name,
                         args={"year": 1920, "top": e.top_n or 25})],
         expected_cost="medium",
-        explain="words_disappearing_after default",
+        explain=f"{tool_name} default (1920) — "
+                f"direction={'rise' if rise_direction else 'drop'}",
     )
 
 
@@ -261,17 +316,23 @@ def _plan_word_etymology(e: Entities) -> QueryPlan:
                        if e.multi_author_regex else ""),
         )
     if e.word:
-        # Sprint 21 B101: fan out word_contexts in parallel — when user
-        # asks etymology of a word, they often want примеры + перевод
-        # together. word_etymology returns enrich_word data (translation
-        # + IPA + POS + definition + etymology); word_contexts adds the
-        # corpus examples. Both independent → router runs in parallel.
-        # word_contexts is optional — Wiktionary outage doesn't kill
-        # the etymology answer.
+        # Phase 4 W-10 (2026-05-23) — bundle FULL word card. Original
+        # Sprint 21 B101 description claimed word_etymology already
+        # returns translation + IPA + POS + definition, but the v1
+        # `rag_tools.word_etymology` only emits `family_chain` /
+        # `primary_family`. So bundle was missing the lexical facets.
+        # Add `enrich_word` (Wiktionary-cached translation + IPA + POS +
+        # definition + family_chain) and `hybrid_search` (corpus
+        # snippets with titles). Both optional alongside the headline
+        # etymology call — if Wiktionary is offline or no corpus hits,
+        # the etymology answer still lands.
         return QueryPlan(
             intent="word_etymology", entities=e,
             steps=[
                 PlanStep(tool="word_etymology", args={"word": e.word}),
+                PlanStep(tool="enrich_word",
+                         args={"word": e.word, "target_lang": "ru"},
+                         optional=True),
                 PlanStep(tool="hybrid_search",
                          args={"query": e.word, "k": 6,
                                "per_retriever": 30,
@@ -279,8 +340,9 @@ def _plan_word_etymology(e: Entities) -> QueryPlan:
                          optional=True),
             ],
             expected_cost="cheap",
-            explain=(f"word_etymology({e.word}) + hybrid_search({e.word}, k=6)"
-                     f" parallel — Stan B101 bundle"),
+            explain=(f"word_etymology({e.word}) + enrich_word({e.word}) + "
+                     f"hybrid_search({e.word}, k=6) parallel — full W-10 "
+                     f"bundle (etymology + translation/IPA/POS + corpus)"),
         )
     return QueryPlan(
         intent="clarify", entities=e, steps=[],

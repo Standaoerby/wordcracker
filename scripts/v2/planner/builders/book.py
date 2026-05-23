@@ -66,41 +66,102 @@ def _plan_book_lookup(e: Entities) -> QueryPlan:
 @_with_copyright_check
 def _plan_book_compare(e: Entities) -> QueryPlan:
     """Q24-style: «слова в Treasure Island и Moby Dick, но редко в David
-    Copperfield». Strategy: find_book each title (cached), then run
-    affinity_by_book on each — the renderer surfaces words common to the
-    positive set and rare in the negative.
+    Copperfield». Phase 4 W-5 (2026-05-23): when the user names ≥2 books,
+    fire `affinity_by_book` for EACH of them so the renderer can put
+    signature words side-by-side in one table. Single-book queries keep
+    the legacy single-step plan.
 
-    For v2-alpha we fire affinity_by_book on the *first* resolved book
-    only and let the renderer say «here's signature for X — compare with
-    Y/Z by re-asking». Full set-intersection is Sprint 9.x deferred.
+    Cap at 3 books to bound wall-clock — affinity_by_book is medium-cost
+    and renderer can only meaningfully compare 2-3 in one answer.
     """
-    # Need at least the primary book.
     if not e.book_id and not e.book_title:
         return _need_book(e)
+
+    # Gather every book the extractor saw (primary + secondaries).
+    # Mirror of `_plan_book_readability_compare` shape so multi-object
+    # plans behave consistently across compare intents (W-5 acceptance).
+    book_ids: list[str] = []
+    book_titles_unresolved: list[str] = []
     if e.book_id:
+        book_ids.append(e.book_id)
+    elif e.book_title:
+        book_titles_unresolved.append(e.book_title)
+    for pg, title in zip(e.multi_book_ids, e.multi_book_titles):
+        if pg:
+            book_ids.append(pg)
+        elif title:
+            book_titles_unresolved.append(title)
+
+    total = len(book_ids) + len(book_titles_unresolved)
+    multi = total >= 2
+
+    # Single-book legacy path (no multi-book fan-out needed).
+    if not multi:
+        if e.book_id:
+            return QueryPlan(
+                intent="book_compare", entities=e,
+                steps=[PlanStep(tool="affinity_by_book",
+                                args={"pg_id": e.book_id,
+                                      "top": e.top_n or 30,
+                                      "min_corpus_count": 500,
+                                      "exclude_proper_nouns": True})],
+                expected_cost="medium",
+                explain=(f"affinity_by_book({e.book_id}) — single book; "
+                         f"renderer asks user to name a peer to compare against"),
+            )
         return QueryPlan(
             intent="book_compare", entities=e,
-            steps=[PlanStep(tool="affinity_by_book",
-                            args={"pg_id": e.book_id,
-                                  "top": e.top_n or 30,
-                                  "min_corpus_count": 500,
-                                  "exclude_proper_nouns": True})],
+            steps=[
+                PlanStep(tool="find_book", args={"title": e.book_title}),
+                PlanStep(tool="affinity_by_book",
+                         args={"top": e.top_n or 30,
+                               "min_corpus_count": 500,
+                               "exclude_proper_nouns": True},
+                         depends_on=[0], inject_result_as="pg_id"),
+            ],
             expected_cost="medium",
-            explain=(f"affinity_by_book({e.book_id}) — primary book; "
-                     f"renderer suggests follow-up for secondary titles"),
+            explain="find_book → affinity_by_book (single); renderer asks for peer",
         )
+
+    # Multi-book composite plan: one affinity_by_book per book (cap 3).
+    steps: list[PlanStep] = []
+    cap = 3
+    for pg in book_ids[:cap]:
+        idx = len(steps)
+        steps.append(PlanStep(
+            tool="affinity_by_book",
+            args={"pg_id": pg,
+                  "top": e.top_n or 30,
+                  "min_corpus_count": 500,
+                  "exclude_proper_nouns": True},
+            optional=(idx > 0),
+        ))
+    for title in book_titles_unresolved[: cap - len(steps)]:
+        idx = len(steps)
+        steps.append(PlanStep(tool="find_book", args={"title": title}))
+        steps.append(PlanStep(
+            tool="affinity_by_book",
+            args={"top": e.top_n or 30,
+                  "min_corpus_count": 500,
+                  "exclude_proper_nouns": True},
+            depends_on=[idx], inject_result_as="pg_id",
+            optional=True,
+        ))
+    notes = [
+        "Это composite book_compare запрос — у пользователя несколько "
+        "книг в одном вопросе. ОБЯЗАТЕЛЬНО покажи signature-слова "
+        "ВСЕХ книг в ОДНОЙ таблице (колонки = книги, строки = слова) "
+        "или в нескольких равноправных таблицах — без «вот первая, "
+        "о второй спроси отдельно». Если для какой-то книги шаг упал — "
+        "честно скажи об этом, не молчи.",
+    ]
     return QueryPlan(
         intent="book_compare", entities=e,
-        steps=[
-            PlanStep(tool="find_book", args={"title": e.book_title}),
-            PlanStep(tool="affinity_by_book",
-                     args={"top": e.top_n or 30,
-                           "min_corpus_count": 500,
-                           "exclude_proper_nouns": True},
-                     depends_on=[0], inject_result_as="pg_id"),
-        ],
+        steps=steps,
         expected_cost="medium",
-        explain="find_book → affinity_by_book (primary); renderer asks for next",
+        explain=(f"affinity_by_book × {total} books — composite signature "
+                 f"comparison (cap 3)"),
+        render_notes=notes,
     )
 
 
@@ -322,7 +383,14 @@ def _plan_book_similar(e: Entities) -> QueryPlan:
         # Sprint 18 — BGE rerank default. For «похожие на X» queries the
         # bi-encoder pool surfaces noisy neighbours (book mentions, not
         # thematic relatives); cross-encoder reorder is the win.
-        args={"topic": topic, "top": 10, "rerank_with": "bge_reranker"},
+        #
+        # W-13 (Phase 5 P2, 2026-05-23) — explicit per_retriever=30 +
+        # top=8 to cap wall-clock at the wrapper level. Was top=10 with
+        # the wrapper-default per_retriever=60, which made «что почитать
+        # после X» reliably 200-317s on cold cache. New budget targets
+        # <60s on cold, <2s on warm.
+        args={"topic": topic, "top": 8, "per_retriever": 30,
+              "rerank_with": "bge_reranker"},
     )]
     return QueryPlan(
         intent="book_similar", entities=e,
@@ -415,17 +483,84 @@ def _plan_book_extremum(e: Entities) -> QueryPlan:
     universal tool — route to clarify with a targeted hint until v3.1.
 
     Stan's Phase E brief: focus on routing the most-common queries; the
-    long tail of «самая редкая» / «самая древняя» is deferred."""
+    long tail of «самая редкая» / «самая древняя» is deferred.
+
+    W-11 (Phase 5 P2, 2026-05-23) — plural difficulty queries («какие
+    книги XIX века самые сложные») now classify to this intent. There's
+    still no per-period ranking-by-readability tool, but the smart-
+    clarify recipe ships in <1s instead of LLM-fallback 50-60s parse-
+    fail.
+    """
     raw = (e.raw_misc or {}).get("raw_text", "") or ""
     raw_lc = raw.lower()
     if any(w in raw_lc for w in ("популярн", "скачиваем", "читаем",
                                   "popular", "downloaded", "most read")):
+        # Honour period filter when present — top_books_by_downloads
+        # accepts lang but not year (it's a global popularity proxy).
+        # The render note tells the renderer to disclose the limit.
+        notes = []
+        if e.year_from or e.year_to:
+            notes.append(
+                f"Пользователь сузил период ({e.year_from or '?'}-"
+                f"{e.year_to or '?'}). `top_books_by_downloads` сортирует "
+                f"по downloads глобально (фильтр по году у этого тула не "
+                f"включён). DISCLOSE: «отсортировал по downloads без "
+                f"year-фильтра — для строгого среза по периоду пройдись "
+                f"вручную по top списку и отфильтруй по pub_year»."
+            )
         return QueryPlan(
             intent="book_extremum", entities=e,
             steps=[PlanStep(tool="top_books_by_downloads",
                             args={"top": 1})],
             expected_cost="medium",
             explain="book_extremum → top_books_by_downloads(top=1)",
+            render_notes=notes,
+        )
+    # W-11 plural-difficulty case — «какие книги XIX века самые сложные»,
+    # «самые простые романы у викторианцев», «hardest books of the 1800s».
+    # No single tool ranks books by readability/archaic-density across a
+    # period — BookProfile.archaic_density is in backlog (book_recommendation
+    # B9 note). Emit a fast recipe-clarify so the user gets actionable
+    # next steps in <1s instead of bouncing through LLM-fallback.
+    difficulty_markers = (
+        "сложн", "трудн", "архаичн", "устаревш", "прост", "лёгк", "легк",
+        "complex", "difficult", "hard", "simplest", "easiest",
+        "archaic", "simple",
+    )
+    plural_book_markers = (
+        "какие", "самые", "наиболее", "the most", "hardest",
+        "simplest", "easiest",
+    )
+    if (any(m in raw_lc for m in difficulty_markers)
+            and any(m in raw_lc for m in plural_book_markers)):
+        # Build a recipe that uses tools we already have.
+        period_str = ""
+        if e.year_from or e.year_to:
+            period_str = (
+                f"\n• Период извлечён: {e.year_from or '?'}-"
+                f"{e.year_to or '?'}."
+            )
+        return QueryPlan(
+            intent="clarify", entities=e, steps=[],
+            needs_clarify=True,
+            clarify_question=(
+                "Ранжирование книг по сложности на уровне периода у меня "
+                "нет одним вызовом (per-book readability считается, но "
+                "не индексируется в виде «топ N сложных за XIX век»). "
+                f"Recipe из 2 шагов:{period_str}\n"
+                "1. Сначала возьми **топ-20 популярных книг** "
+                "(`top_books_by_downloads`) — или сузь автором: "
+                "«топ книг Dickens / Doyle / etc».\n"
+                "2. Для каждой — спроси «уровень сложности X» "
+                "(`book_readability`, Flesch + CEFR за <2с).\n"
+                "3. Отсортируй вручную по Flesch (ниже = сложнее).\n\n"
+                "Альтернатива — спроси «самая сложная книга у Dickens» "
+                "(book-compare per-author уже работает), или «топ "
+                "архаичных книг» через `book_archaic_words` per книгу."
+            ),
+            explain=("book_extremum → recipe-clarify (no single per-period "
+                     "ranking-by-readability tool)"),
+            authoritative_clarify=True,
         )
     # For length/complexity/rarity extremums we don't have a one-shot tool.
     # Route to clarify with a useful menu of options. The Phase G long-tail

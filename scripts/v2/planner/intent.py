@@ -305,9 +305,40 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"\b(you are now|ты теперь|ты больше не|pretend to be|"
          r"твоя новая роль|new role:|role\s*:\s*[a-zа-я]+)"),
      "out_of_scope", 0.95),
-    (_re(r"(напиши|сочини|допиши|сгенерируй)\s.{0,40}"
-         r"(рассказ\w*|стих\w*|поэм\w*|глав\w*|стат\w*)"), "out_of_scope", 0.95),
-    (_re(r"(write|compose)\s.{0,40}(story|poem|chapter|novel|article)"),
+    # W-16 (2026-05-23, Phase 5 P2) — Russian role-play imperatives.
+    # «Притворись X», «представь, что ты X», «отыграй роль», «изобрази
+    # X», «play the role of X», «act as X». Hits BEFORE plan-builder
+    # so the chatbot doesn't accept the role and start asking «о чём
+    # будем писать?». Tight enough to not catch legitimate analytics:
+    # the trigger verbs must be followed by a noun (critic, writer,
+    # author, character, narrator, persona, expert, …) within ~40
+    # chars. NB: `представь себе X» is NOT a role-play opener (it's
+    # «imagine X»); we anchor on «что ты / что я / себя X» which IS.
+    (_re(r"\b(притворис[ья]|притворитесь|прикинься|прикиньтесь|"
+         r"изобрази(?:те)?|сыграй(?:те)?|отыграй(?:те)?\s+роль|"
+         r"вой?ди\s+в\s+роль|войди\s+в\s+образ|"
+         r"представь(?:те)?,?\s+(?:что\s+)?(?:ты|вы|себя)|"
+         r"act\s+as(?:\s+a)?|"
+         r"play\s+(?:the\s+)?role(?:\s+of)?|"
+         r"role[-\s]?play\s+as|"
+         r"be\s+(?:a|an|the)\s+(?:critic|writer|author|poet|narrator|"
+         r"character|persona|expert|reviewer|editor|professor))\b"),
+     "out_of_scope", 0.95),
+    (_re(r"(напиши|сочини|допиши|сгенерируй|составь)\s.{0,40}"
+         r"(рассказ\w*|стих\w*|поэм\w*|глав\w*|стат\w*|"
+         # W-16 — essays / reviews / fiction continuations are the
+         # canonical role-play artifacts. «напиши эссе» fell through
+         # because «эссе» wasn't in the artifact list.
+         r"эссе|сочинени\w*|реценз\w*|обзор\w*|критическ\w+\s+(?:разбор|"
+         r"анал\w*|текст)|"
+         r"пародию|пастиш|пастиче|"
+         r"стилизаци\w*|"
+         # «продолжение текста / истории / романа»
+         r"продолжени\w*\s+(?:текста|истории|романа|главы|повести))"),
+     "out_of_scope", 0.95),
+    (_re(r"(write|compose|draft|generate)\s.{0,40}"
+         r"(story|poem|chapter|novel|article|essay|review|"
+         r"pastiche|critique|continuation|fan[-\s]?fic\w*)"),
      "out_of_scope", 0.9),
     # Q8 (Stan's 2026-05-18 demon round): «процитируй полностью», «дай
     # полный текст», «give me the full text», «quote verbatim» — verbatim-
@@ -384,6 +415,58 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"\bthe\s+(longest|shortest|most\s+(popular|downloaded|complex)|"
          r"simplest|rarest|oldest)\s+(book|novel|work)\b"),
      "book_extremum", 0.9),
+    # W-11 (Phase 5 P2, 2026-05-23) — plural ranking. «какие книги XIX
+    # века самые сложные», «какие самые простые романы у викторианцев»,
+    # «the hardest books of the 1800s». No single tool ranks books by
+    # readability/archaic-density across a period (BookProfile.archaic_
+    # density isn't built yet, see book_recommendation B9 note). Plan
+    # builder for book_extremum returns a fast smart-clarify recipe
+    # instead of LLM-fallback 50-60s parse-fail.
+    #
+    # IMPORTANT: leading marker MUST be a real ranking word («самые|
+    # наиболее|the most|hardest»). The earlier draft accepted bare
+    # «какие/какой» as leading, which mis-classified Q30 («Какие
+    # произведения подойдут для читателя уровня B2…») — that's a
+    # book_recommendation, not a ranking query.
+    #
+    # Three orderings covered (each ranking marker appears between BOOK
+    # and DIFFICULTY, or before both):
+    #   RANK.{0,80}BOOK.{0,80}DIFF     — «самые ... книги ... сложные»
+    #   RANK.{0,80}DIFF.{0,80}BOOK     — «самые сложные книги»
+    #   BOOK.{0,80}RANK\s+DIFF         — «<question> книги <period> самые сложные»
+    (_re(r"\b(самые|наиболее|the\s+most|hardest|simplest|easiest|"
+         r"most\s+(?:complex|difficult|archaic|simple|popular))\b.{0,80}"
+         r"\b(книг\w+|роман\w+|произведен\w+|повест\w+|"
+         r"books?|novels?|works?)\b.{0,80}"
+         r"\b(сложн\w+|трудн\w+|архаичн\w+|устаревш\w+|"
+         r"прост\w+|лёгк\w+|легк\w+|"
+         r"complex|difficult|hard|archaic|simple)\b"),
+     "book_extremum", 0.88),
+    (_re(r"\b(самые|наиболее|the\s+most|hardest|simplest|easiest|"
+         r"most\s+(?:complex|difficult|archaic|simple|popular))\b.{0,80}"
+         r"\b(сложн\w+|трудн\w+|архаичн\w+|устаревш\w+|"
+         r"прост\w+|лёгк\w+|легк\w+|"
+         r"complex|difficult|hard|archaic|simple)\b.{0,80}"
+         r"\b(книг\w+|роман\w+|произведен\w+|повест\w+|"
+         r"books?|novels?|works?)\b"),
+     "book_extremum", 0.88),
+    # «<question> книги <period> самые сложные» — BOOK comes first,
+    # ranking marker + difficulty trail at the end.
+    (_re(r"\b(книг\w+|роман\w+|произведен\w+|повест\w+|"
+         r"books?|novels?|works?)\b.{0,80}"
+         r"\b(самые|наиболее|the\s+most|hardest|simplest|easiest|"
+         r"most\s+(?:complex|difficult|archaic|simple|popular))\s+"
+         r"(?:\w+\s+){0,2}"
+         r"\b(сложн\w+|трудн\w+|архаичн\w+|устаревш\w+|"
+         r"прост\w+|лёгк\w+|легк\w+|"
+         r"complex|difficult|hard|archaic|simple)\b"),
+     "book_extremum", 0.88),
+    # English compact form — leading adjective IS the difficulty.
+    (_re(r"\b(hardest|simplest|easiest|"
+         r"most\s+(?:complex|difficult|archaic|simple|popular))\s+"
+         r"(?:\w+\s+){0,2}"
+         r"\b(books?|novels?|works?)\b"),
+     "book_extremum", 0.88),
 
     # Single-author corpus superlative — «самый плодовитый автор», «самый
     # популярный автор», «who is the most prolific author». Singular.
@@ -536,6 +619,18 @@ RULES: list[tuple[Pattern[str], str, float]] = [
      "book_readability_compare", 0.92),
     (_re(r"\b(which|what)\s+is\s+(harder|easier|simpler)\s+to\s+read\b"),
      "book_readability_compare", 0.9),
+    # Phase 4 W-5 (2026-05-23) — «что сложнее — X или Y» БЕЗ «читать» /
+    # «для чтения». Stan test bench: «что сложнее — Дракула или
+    # Франкенштейн» — фраза без явного «читать», но это readability-
+    # compare по смыслу. Anchor on «сложнее/легче/проще/труднее ... или»
+    # (присутствие «или» отделяет от single-book «X сложнее всех») плюс
+    # отсутствие явного слово-фокуса («слов/word»). Confidence 0.86 —
+    # ниже явных «читать»-rules чтобы они выигрывали когда есть.
+    (_re(r"\b(что|какая|какой|кто|which|what)\s+(?:is\s+)?"
+         r"(сложнее|сложней|труднее|трудней|легче|проще|harder|easier|simpler)\b"
+         r"(?!\s+(?:слов|word))"
+         r".{1,120}\b(или|or|vs|versus|против)\b"),
+     "book_readability_compare", 0.86),
 
     # ===== corpus_meta =====
     # Stan round 5: «сколько у Толстого книг» wrongly routed to corpus_meta
@@ -714,7 +809,12 @@ RULES: list[tuple[Pattern[str], str, float]] = [
      "book_compare", 0.85),
 
     # ===== author_compare =====
-    (_re(r"\b(сравни|compare)\s+.{1,60}\s+(и|vs|with)\s+"), "author_compare", 0.95),
+    # Phase 4 W-5 (2026-05-23) — generic «compare X and Y» / «сравни X и
+    # Y». Originally tagged author_compare only — but the same phrasing
+    # is used for books, so the plan builder redirects to book_compare
+    # when ≥2 book entities surface and no authors. Confidence stays at
+    # 0.95 since the intent classifier doesn't see entities.
+    (_re(r"\b(сравни|compare)\s+.{1,60}\s+(и|and|vs|with)\s+"), "author_compare", 0.95),
     (_re(r"отличают\s+стиль|отлич\w*\s.{0,30}стил\w*|"
          r"distinguishes the style|stylistic differences? between"),
      "author_compare", 0.9),
@@ -1018,7 +1118,9 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"в\s+мрачн\w+\s+или\s+тревожн\w+\s+контекст"), "word_emotion", 0.95),
 
     # ===== word_timeline =====
-    (_re(r"вышли\s+из\s+употреблени\w*|исчезл\w*|исчезают|исчезающ\w*|"
+    (_re(r"вышл\w+\s+из\s+употреблени\w*|"
+         r"вышедш\w+\s+из\s+употреблени\w*|"
+         r"исчезл\w*|исчезают|исчезающ\w*|"
          r"перестали\s+(использовать|встречаться)|"
          r"disappeared after|fell out of use|words that vanished"),
      "word_timeline", 0.92),
@@ -1050,6 +1152,26 @@ RULES: list[tuple[Pattern[str], str, float]] = [
      "word_timeline", 0.93),
     (_re(r"\bкогда\s+появил\w*\s+[a-z]{3,30}"),
      "word_timeline", 0.88),
+    # Phase 4 W-12 (2026-05-23) — rise direction. «слова, ставшие чаще»
+    # / «новые слова после 1900» / «слова, появившиеся в XX веке» /
+    # «trending words» / «emerging vocabulary after WWI». Symmetric pair
+    # to the existing «вышли из употребления» rule above. Plan builder
+    # picks `words_appearing_after` vs `words_disappearing_after` by the
+    # same direction markers; intent stays unified at `word_timeline`.
+    (_re(r"\b(слов\w*|words?)\b.{0,40}\b(ставш\w*\s+чаще|"
+         r"появивш\w*|стали\s+чаще|появились|"
+         r"started\s+(?:appearing|trending)|emerging|"
+         r"rising|trending\s+up|became\s+(?:common|popular)|"
+         r"more\s+frequent)"),
+     "word_timeline", 0.92),
+    (_re(r"\b(новые|new|emerging)\s+слов\w*\s+"
+         r"(?:после|after|в|in)\s+(?:\d{3,4}|XX|XIX|20)"),
+     "word_timeline", 0.92),
+    (_re(r"\bemerging\s+vocabulary|trending\s+words|rising\s+words?\b"),
+     "word_timeline", 0.92),
+    (_re(r"\bкакие\s+слов\w*\s+(?:появились|стали\s+чаще|"
+         r"вошли\s+в\s+употреблени\w*)"),
+     "word_timeline", 0.93),
 
     # ===== word_collocates =====
     (_re(r"соседств\w*|collocates?|collocations?"), "word_collocates", 0.9),
@@ -1080,6 +1202,30 @@ RULES: list[tuple[Pattern[str], str, float]] = [
      "word_contexts", 0.95),
     (_re(r"в\s+необычных\s+контекстах|обычными\s+сейчас\b.{0,40}\bконтекст"),
      "word_contexts", 0.9),
+    # Phase 4 W-10 (2026-05-23) — «что значит X» / «meaning of X» /
+    # «define X». Stan test bench: «что значит ajar» bounced to clarify
+    # because no rule fired. Route to word_contexts which already
+    # bundles enrich_word (translation + IPA + POS + definition +
+    # etymology via Wiktionary) AND hybrid_search (corpus snippets with
+    # titles). That gives the full W-10 bundle in one plan.
+    #
+    # Two-flavor rules to keep precision high without dropping coverage:
+    #   (A) strong triggers with explicit «слова / word» anchor — accept
+    #       any single token after them.
+    #   (B) weak triggers like «what is X» / «define X» — require the
+    #       bare token to NOT be a comparator/connector that would
+    #       indicate a book-compare query («what is harder, X or Y»).
+    (_re(r"\b(?:что\s+значит|что\s+такое|значени\w*\s+слова|смысл\s+слова|"
+         r"определени\w*\s+слова|объясни\s+слово|"
+         r"meaning\s+of(?:\s+the\s+word)?|definition\s+of(?:\s+the\s+word)?|"
+         r"what\s+(?:is|does)\s+the\s+word)\s+"
+         r"[\"'«“]?[a-zA-Zа-яё-]{2,30}[\"'»”]?"),
+     "word_contexts", 0.92),
+    (_re(r"\b(?:define|what\s+(?:is|does))\s+"
+         r"[\"'«“]?(?!harder\b|easier\b|simpler\b|more\b|less\b|"
+         r"this\b|that\b|the\b|a\b|an\b|your\b|that\s+|the\s+book)"
+         r"[a-zA-Zа-яё-]{2,30}[\"'»”]?\s*$"),
+     "word_contexts", 0.88),
 
     # ===== learning =====
     # Q7 (Stan's 2026-05-18 demon round): «20 слов уровня intermediate из
@@ -1141,6 +1287,25 @@ RULES: list[tuple[Pattern[str], str, float]] = [
      "country_compare", 0.95),
     (_re(r"отличают\s+британск\w*\s+(прозу|литератур\w*)\s+от\s+американск\w*"),
      "country_compare", 0.95),
+    # Phase 4 W-5 (2026-05-23) — generic «сравни <country1> и <country2>
+    # авторов / литературу / корпус». Without this rule «сравни
+    # британских и американских авторов» bucketed into author_compare
+    # (which produced an empty plan because no author_regex), and the
+    # user saw a clarify-bounce. The pattern requires both adjective
+    # stems + a compare verb («сравни / compare») + a nominal target
+    # («автор / литератур / корпус / писател / книг»).
+    (_re(r"\b(сравни\w*|compare)\b.{1,40}"
+         r"\b(британск\w*|american\w*|brit\w*|"
+         r"русск\w*|русских|french|французск\w*|"
+         r"немецк\w*|german)\w*\b.{1,40}"
+         r"\b(и|and|with|против|vs|versus)\b.{1,40}"
+         r"\b(американск\w*|brit\w*|британск\w*|"
+         r"русск\w*|french|французск\w*|"
+         r"немецк\w*|german)\w*\b.{0,60}"
+         r"\b(автор\w*|writer\w*|писател\w*|"
+         r"литератур\w*|literature|корпус\w*|corpus|"
+         r"книг\w*|book|произведен\w*|works?)"),
+     "country_compare", 0.93),
 
     # ===== country_vocab =====
     (_re(r"\bбританск\w*\b.{0,40}\bслов\w*\b"), "country_vocab", 0.7),
@@ -1154,10 +1319,50 @@ RULES: list[tuple[Pattern[str], str, float]] = [
      "genre_compare", 0.92),
 
     # ===== period_vocab =====
-    (_re(r"(виктори[аяь]нск\w*|edwardian|пред-?war|pre[- ]1900)"
-         r".{0,80}\b(слов\w*|word|vocab)\b"), "period_vocab", 0.85),
+    # W-11 (Phase 5 P2, 2026-05-23) — extended period stem `виктори[аяь]н\w*`
+    # (was `виктори[аяь]нск\w*` — required «ск», missed «викторианцев»
+    # / «викторианки» / plural-genitive forms that `_VICTORIAN` in
+    # entities.py already recognized as a period marker). Without the
+    # match, queries like «слова викторианцев 1837-1901» went to LLM
+    # fallback (45-60s) instead of period_vocab plan (<1s).
+    # Also: accept POS-noun triggers («существительные/прилагательные/
+    # глаголы») as anchors equivalent to «слова», so «какие
+    # существительные чаще у викторианцев» routes here too. Both orders
+    # work — anchor BEFORE the period or AFTER it.
+    (_re(r"(виктори[аяь]н\w*|victorian|edwardian|пред-?war|pre[- ]1900|"
+         r"эдвард(?:иан|овск)\w*)"
+         r".{0,80}\b(слов\w*|word|vocab|"
+         r"существительн\w+|nouns?|"
+         r"прилагательн\w+|adjectives?|"
+         r"глагол\w+|verbs?|"
+         r"наречи\w+|adverbs?)\b"),
+     "period_vocab", 0.85),
+    (_re(r"\b(слов\w*|word|vocab|"
+         r"существительн\w+|nouns?|"
+         r"прилагательн\w+|adjectives?|"
+         r"глагол\w+|verbs?|"
+         r"наречи\w+|adverbs?)\b"
+         r".{0,40}\b(виктори[аяь]н\w*|victorian|edwardian|"
+         r"эдвард(?:иан|овск)\w*)"),
+     "period_vocab", 0.85),
     (_re(r"\b(до\s+(1850|1860|1870|1880|1890|1900))\b"
          r".{0,60}\b(слов\w*|word)"), "period_vocab", 0.8),
+    # W-11 — explicit year-range «1837-1901» / «1800-1899» paired with
+    # «слова / words / nouns / …» is a period_vocab. Without this,
+    # «слова викторианцев 1837-1901» fell to author_vocab (which
+    # requires capitalized first letter) or to LLM fallback.
+    (_re(r"\b(слов\w*|word|vocab|"
+         r"существительн\w+|nouns?|"
+         r"прилагательн\w+|adjectives?|"
+         r"глагол\w+|verbs?)\b"
+         r".{0,40}\b(1[5-9]\d{2}|20\d{2})\s*[–—\-]\s*(1[5-9]\d{2}|20\d{2})\b"),
+     "period_vocab", 0.88),
+    (_re(r"\b(1[5-9]\d{2}|20\d{2})\s*[–—\-]\s*(1[5-9]\d{2}|20\d{2})\b"
+         r".{0,40}\b(слов\w*|word|vocab|"
+         r"существительн\w+|nouns?|"
+         r"прилагательн\w+|adjectives?|"
+         r"глагол\w+|verbs?)\b"),
+     "period_vocab", 0.86),
     (_re(r"женск\w+\s+персонаж\w*|female characters?"), "period_vocab", 0.85),
 
     # ===== vocab_passport =====

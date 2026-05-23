@@ -691,11 +691,19 @@ def build_corpus_meta_snapshot(
     spgc_baseline: str,
     chroma_chunks: int | None = None,
     user_uploads: int = 0,
+    year_min: int | None = None,
+    year_max: int | None = None,
+    year_basis: str | None = None,
     headline: str | None = None,
     caveats: list[str] | None = None,
     provenance: Provenance | None = None,
     language: Literal["ru", "en"] = "ru",
 ) -> RenderableView:
+    # W-17 (Phase 5 P2, 2026-05-23) — corpus period coverage. When the
+    # tool supplies year_min + year_max (real pub_year + birth+30 proxy
+    # union), the snapshot view advertises the temporal span; the
+    # template renderer adds a «Период охвата» row so the user can
+    # answer «какой период охватывает корпус» directly.
     return RenderableView(
         view_type=ViewType.CORPUS_META_SNAPSHOT,
         payload={
@@ -705,6 +713,9 @@ def build_corpus_meta_snapshot(
             "spgc_baseline": spgc_baseline,
             "chroma_chunks": chroma_chunks,
             "user_uploads": user_uploads,
+            "year_min": year_min,
+            "year_max": year_max,
+            "year_basis": year_basis,
         },
         headline=headline,
         caveats=list(caveats or []),

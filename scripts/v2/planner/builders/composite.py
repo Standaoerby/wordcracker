@@ -16,19 +16,34 @@ from scripts.v2.planner.builders.word import _plan_word_collocates
 
 
 def _plan_country_compare(e: Entities) -> QueryPlan:
-    """Q12/Q23: «BrE vs AmE». Use compare via top_authors_by_country + affinity
-    fragments. For v2-alpha we kick off with top_authors_by_country(GB)
-    plus a follow-up suggestion in the explain."""
+    """Q12/Q23: «BrE vs AmE». Use compare via top_authors_by_country.
+
+    Phase 4 W-5 (2026-05-23): both halves were already in the plan, but
+    the renderer routinely surfaced only one side («односторонний список»).
+    Add an explicit composite-view render note so the renderer MUST show
+    GB and US side-by-side (two equal-weight tables, not «here's GB; ask
+    about US separately»).
+    """
+    notes = [
+        "Это country_compare — у пользователя в вопросе сравнение двух "
+        "стран (typically GB vs US). В ответе ОБЯЗАТЕЛЬНО покажи "
+        "ОБЕ страны side-by-side (две равноправные таблицы или одну "
+        "таблицу с двумя колонками). НЕ обрывайся на первой стране и "
+        "не предлагай пользователю «уточнить про вторую» — данные уже "
+        "получены для обеих.",
+    ]
     return QueryPlan(
         intent="country_compare", entities=e,
         steps=[
             PlanStep(tool="top_authors_by_country",
                      args={"country": "GB", "metric": "books", "top": 10}),
             PlanStep(tool="top_authors_by_country",
-                     args={"country": "US", "metric": "books", "top": 10}),
+                     args={"country": "US", "metric": "books", "top": 10},
+                     optional=True),
         ],
         expected_cost="medium",
-        explain="top_authors_by_country GB + US — потом пользователь может выбрать affinity per author",
+        explain="top_authors_by_country GB + US — composite side-by-side",
+        render_notes=notes,
     )
 
 
@@ -249,10 +264,18 @@ def _plan_topic_book_search(e: Entities) -> QueryPlan:
                         # for topical book search. RRF gives the candidate
                         # pool, cross-encoder reorders for true topical
                         # relevance. ~1-2s extra latency, big quality lift.
+                        #
+                        # W-13 (Phase 5 P2, 2026-05-23) — pin
+                        # per_retriever=30 to keep the BGE rerank pool
+                        # bounded (~5s wall clock vs 30+ at the old
+                        # per_retriever=60 default). The wrapper default
+                        # now matches this, but the plan-level explicit
+                        # value makes the contract visible.
                         args={"topic": topic, "top": 8,
+                              "per_retriever": 30,
                               "rerank_with": "bge_reranker"})],
         expected_cost="medium",
         explain=f"topic_book_search → find_book_by_topic(topic={topic!r}, "
-                "rerank=bge_reranker)",
+                "rerank=bge_reranker, per_retriever=30)",
         render_notes=notes,
     )

@@ -80,16 +80,84 @@ _NULL_AUTHOR_TOKENS = frozenset({
     "library of congress",
     "internet archive",
     "various authors", "miscellaneous",
+    # Phase 3 W-4 (Stan 2026-05-22) — top-lists of authors were
+    # dominated by US-government / commission «authors»: Warren
+    # Commission report, congressional testimony bundles, FBI files,
+    # NASA technical papers. None are «авторы» in the literary sense
+    # the user means by «топ авторов».
+    "president's commission on the assassination of president kennedy",
+    "warren commission",
+    "u.s. congress", "us congress", "congress",
+    "federal bureau of investigation", "fbi",
+    "national aeronautics and space administration", "nasa",
+    "u.s. department of state", "us department of state",
+    "u.s. department of justice", "department of justice",
+    "u.s. navy", "u.s. army", "u.s. air force", "u.s. marine corps",
+    "us navy", "us army", "us air force",
+    "british army", "royal navy",
+    "smithsonian institution", "smithsonian",
+    "national park service",
+    "u.s. supreme court", "supreme court",
+    "house of representatives",
+    "u.s. senate", "us senate", "senate",
+    # Project Gutenberg housekeeping artifacts that occasionally
+    # surface as «authors» when metadata join misfires.
+    "project gutenberg", "gutenberg",
+    # Common publisher / society aggregate entries
+    "publishers' weekly", "publisher's weekly",
+    "american mathematical society",
+    "royal society",
+    "national geographic society",
 })
+
+# Phase 3 W-4 — substrings that, if present anywhere in the author field,
+# flag the row as a non-literary aggregate. PG metadata often joins the
+# parent agency before the commission name, e.g.
+#     "United States. Warren Commission"
+#     "United States. Congress. House Committee on …"
+#     "United States. National Aeronautics and Space Administration"
+# Set-membership against the full string misses these — substring check
+# catches them deterministically.
+_NULL_AUTHOR_SUBSTRINGS: tuple[str, ...] = (
+    "warren commission",
+    "congressional",
+    "congress.",
+    "house committee",
+    "senate committee",
+    "department of state",
+    "department of justice",
+    "department of war",
+    "central intelligence",
+    "national aeronautics",
+    "library of congress",
+    "smithsonian",
+    "naval academy",
+    "war department",
+    "supreme court of the united",
+    "house of representatives",
+    "department of the navy",
+    "department of the army",
+    "department of agriculture",
+    "department of commerce",
+    "department of the interior",
+    "bureau of investigation",
+    "bureau of naval personnel",
+    "office of strategic",
+    # Generic publisher-aggregate buckets that masquerade as authors
+    "various authors", "anonymous",
+)
 
 
 def drop_null_authors(rows: list[dict], *,
                        author_key: str = "author") -> Tuple[list[dict], int]:
-    """B5 — drop rows where author is null/NaN/anonymous-like.
+    """B5 + Phase 3 W-4 — drop rows where author is null/NaN/anonymous-like
+    OR matches a non-literary aggregate (commission / agency / department).
 
     `top_authors_by(metric=tokens)` returned a NaN author as #1 with
     204M tokens because the metadata join produced a null cell that
-    the SQL aggregate happily summed. Frontline filter.
+    the SQL aggregate happily summed. W-4 extends the filter to catch
+    US-government commission and agency «authors» (CIA, Warren
+    Commission, Library of Congress) that dominate token-volume topcharts.
     """
     if not rows:
         return rows, 0
@@ -100,6 +168,8 @@ def drop_null_authors(rows: list[dict], *,
             continue
         s = str(v).strip().lower()
         if not s or s in _NULL_AUTHOR_TOKENS:
+            continue
+        if any(sub in s for sub in _NULL_AUTHOR_SUBSTRINGS):
             continue
         out.append(r)
     return out, len(rows) - len(out)
@@ -214,23 +284,59 @@ _TITLE_PREFIX_STRIP = re.compile(
     re.IGNORECASE,
 )
 _TITLE_SUFFIX_STRIP = re.compile(
-    # Drop subtitles after « ; » or «, or »
+    # Drop subtitles after « ; » or «, or » — W-17 extends the keyword
+    # list with «for these times» (Hard Times) so the
+    # «Hard Times — For These Times» edition collapses too.
     r"\s*[;,—–]\s*(?:or|and|with|illustrated|complete|the\s+real|"
+    r"for\s+these\s+times|"
     r"abridged|annotated|critical|definitive|expanded|first|"
     r"original|revised|special|standard|unabridged|"
     r"a\s+(?:novel|tale|story|romance|history))\b.*$",
+    re.IGNORECASE,
+)
+# W-17 (Phase 5 P2, 2026-05-23) — additional dedup forms that the
+# original SUFFIX regex missed and which let Frankenstein leak as 5
+# distinct PG ids and Hard Times as 2:
+#   * parenthetical edition tags:  «Frankenstein (1818 edition)»
+#                                   «Pride and Prejudice (Illustrated)»
+#   * bare «Or» without «;»/«,»:  «Frankenstein Or The Modern Prometheus»
+#                                  «Hard Times For These Times»
+# Applied AFTER the legacy SUFFIX regex so the cheaper «;/,» path still
+# wins when it already matches.
+_TITLE_PARENS_STRIP = re.compile(r"\s*\([^)]*\)\s*$")
+# Bare «Or <subtitle>» — needs at least one word after «Or» to be a
+# real subtitle (not just a song lyric ending in «or»). «For These
+# Times» trailing the canonical title is treated as a subtitle even
+# without a following word.
+_TITLE_BARE_OR_STRIP = re.compile(
+    r"\s+or\s+(?:the\s+|a\s+)?[A-ZА-ЯЁa-z].*$|"
+    r"\s+for\s+these\s+times\b.*$",
     re.IGNORECASE,
 )
 
 
 def _normalize_book_title(title: str) -> str:
     """«Moby Dick; Or, The Whale» → «moby dick». «The Adventures of
-    Sherlock Holmes» → «adventures of sherlock holmes»."""
+    Sherlock Holmes» → «adventures of sherlock holmes».
+
+    W-17 — also catches:
+      * «Frankenstein (1818 edition)»       → «frankenstein»
+      * «Pride and Prejudice (Illustrated)» → «pride and prejudice»
+      * «Frankenstein Or The Modern Prometheus» → «frankenstein»
+      * «Hard Times For These Times»        → «hard times»
+    """
     if not title:
         return ""
     s = str(title).strip()
     # Strip subtitles & «; Or, ...» suffixes
     s = _TITLE_SUFFIX_STRIP.sub("", s)
+    # W-17 — strip parenthetical edition / illustrator / year tags
+    # before lowercasing so the «(1818 edition)» regex anchors cleanly.
+    s = _TITLE_PARENS_STRIP.sub("", s)
+    # W-17 — strip bare «Or <subtitle>» / «For These Times» tails. The
+    # bare-Or form lacks the leading «;» / «,», so the legacy regex
+    # skipped it.
+    s = _TITLE_BARE_OR_STRIP.sub("", s)
     # Lowercase
     s = s.lower()
     # Strip leading article

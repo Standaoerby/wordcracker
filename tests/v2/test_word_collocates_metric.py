@@ -31,16 +31,50 @@ class WordCollocatesMetric(unittest.TestCase):
             ],
         }
 
-    def test_default_metric_count_unchanged_passthrough(self):
-        """metric defaults to 'count' → wrapper returns v1 result unchanged."""
+    def test_explicit_metric_count_unchanged_passthrough(self):
+        """metric='count' (explicit) → wrapper returns v1 result unchanged.
+
+        W-15 (2026-05-23) — the default flipped to 'npmi', so this
+        passthrough check now needs explicit metric='count' to exercise
+        the v1-passthrough branch.
+        """
         from scripts.v2.tools.words.collocates import word_collocates
         with mock.patch("scripts.rag_tools.word_collocates",
                         return_value=self.v1_raw):
-            r = word_collocates({"author": "^X,"}, "fog", top=4)
+            r = word_collocates({"author": "^X,"}, "fog", top=4,
+                                 metric="count")
         self.assertTrue(r.ok)
         words = [c["word"] for c in r.data["top_collocates"]]
         self.assertEqual(words, ["thick", "morning", "city", "the"])
         self.assertNotIn("metric", r.data)
+
+    def test_w15_default_metric_is_npmi(self):
+        """W-15 acceptance: calling word_collocates with no `metric` kwarg
+        defaults to NPMI rerank, not raw counts. When marginals are
+        readable (mocked) the wrapper writes raw['metric']='npmi' and
+        each row carries an `npmi` key — the rendered table can sort
+        by association strength instead of frequency.
+        """
+        from scripts.v2.tools.words.collocates import word_collocates
+        with mock.patch("scripts.rag_tools.word_collocates",
+                        return_value=self.v1_raw), \
+             mock.patch("scripts.v2.tools.words.collocates."
+                        "_augment_with_marginals") as aug:
+            aug.return_value = ([
+                {"word": "thick",   "c_pair": 80,  "c_neighbor": 300},
+                {"word": "morning", "c_pair": 60,  "c_neighbor": 400},
+                {"word": "city",    "c_pair": 40,  "c_neighbor": 250},
+                {"word": "the",     "c_pair": 600, "c_neighbor": 8000},
+            ], 200, 100_000, 50)
+            # NO `metric=` kwarg — new default should be npmi.
+            r = word_collocates({"author": "^X,"}, "fog", top=4)
+        self.assertTrue(r.ok)
+        self.assertEqual(r.data.get("metric"), "npmi")
+        for c in r.data["top_collocates"]:
+            self.assertIn("npmi", c)
+        # 'the' must NOT be on top after NPMI rerank — that was the W-15 bug.
+        words = [c["word"] for c in r.data["top_collocates"]]
+        self.assertNotEqual(words[0], "the")
 
     def test_unknown_metric_emits_warning(self):
         from scripts.v2.tools.words.collocates import word_collocates

@@ -160,6 +160,17 @@ def corpus_overview() -> ToolResult:
     # — NO n_authors, NO n_tokens. Same B-R14-7 contract class as E15.
     # Fix: read v1's `total_tokens`; compute n_authors lazily from
     # _metadata_df author column.
+    # W-17 (Phase 5 P2, 2026-05-23) — corpus period coverage. Pull
+    # min/max real publication year from `pub_year` (Open Library
+    # enrichment, sparse) UNION the writing-prime proxy
+    # `authoryearofbirth + 30` (covers the whole catalogue). Without
+    # this, «какой период охватывает корпус» bounced to clarify.
+    year_min, year_max, year_basis = _corpus_period_min_max()
+    if year_min is not None and year_max is not None:
+        data["corpus_period_min_year"] = year_min
+        data["corpus_period_max_year"] = year_max
+        data["corpus_period_basis"] = year_basis
+
     try:
         from scripts.v2 import view_builders as vb
         from scripts.v2.view_types import DataValidity
@@ -168,9 +179,11 @@ def corpus_overview() -> ToolResult:
         # v1 key is `total_tokens` (E39 fix); `n_tokens` was a phantom
         n_tokens = (spgc.get("total_tokens")
                     or spgc.get("n_tokens"))  # legacy fallback
-        # n_authors is NOT in corpus_meta.json — compute from metadata
-        # DataFrame. Lazy import to avoid pandas cost when view path
-        # is skipped.
+        # W-17 — n_authors. Tool-derived count is the only trustworthy
+        # source; surface it when present. When the metadata frame
+        # isn't reachable (dev box without /workspace), leave it 0 so
+        # the renderer can omit the «Авторов» row (W-17 acceptance:
+        # «либо из tool data, либо не показывать»).
         n_authors = 0
         try:
             from scripts.rag_tools import _metadata_df
@@ -191,6 +204,9 @@ def corpus_overview() -> ToolResult:
             spgc_baseline="SPGC-2018-07-18",
             chroma_chunks=chunks if isinstance(chunks, int) else None,
             user_uploads=int(data.get("raw_books_user_uploads") or 0),
+            year_min=year_min,
+            year_max=year_max,
+            year_basis=year_basis,
             headline="Обзор корпуса",
             language="ru",
         )
@@ -201,6 +217,61 @@ def corpus_overview() -> ToolResult:
             "corpus_overview view emission failed"
         )
     return result
+
+
+def _corpus_period_min_max() -> tuple[int | None, int | None, str | None]:
+    """W-17 — min/max year of corpus content.
+
+    Uses `pub_year` from Open Library enrichment when present (real
+    publication year, ~4 books at time of writing but growing as the
+    `fetch_pub_year.py` batch runs); falls back to
+    `authoryearofbirth + 30` as a writing-prime proxy for the rest
+    of the catalogue.
+
+    Returns (min, max, basis_label). Drops obvious outliers (year <
+    1500, year > current_year + 1). On any failure returns
+    (None, None, None) — caller treats the period field as «not
+    available» rather than crashing.
+    """
+    try:
+        from scripts.rag_tools import _metadata_df
+        import pandas as pd
+    except Exception:
+        return None, None, None
+    try:
+        df = _metadata_df()
+    except Exception:
+        return None, None, None
+    if df is None or len(df) == 0:
+        return None, None, None
+    years: list[int] = []
+    basis_parts: list[str] = []
+    # Prefer real pub_year when available
+    if "pub_year" in df.columns:
+        pub = pd.to_numeric(df["pub_year"], errors="coerce").dropna()
+        if len(pub) > 0:
+            basis_parts.append(f"pub_year (Open Library, {len(pub):,} books)")
+            years.extend(int(y) for y in pub.tolist())
+    # Fallback / coverage filler — birth + 30 (writing prime proxy)
+    if "authoryearofbirth" in df.columns:
+        birth = pd.to_numeric(df["authoryearofbirth"], errors="coerce").dropna()
+        if len(birth) > 0:
+            proxy = (birth + 30).astype(int).tolist()
+            basis_parts.append(
+                f"authoryearofbirth+30 proxy ({len(birth):,} books)"
+            )
+            years.extend(proxy)
+    if not years:
+        return None, None, None
+    # Sanity filter: drop years outside [1500, current_year + 1]. Some
+    # PG metadata cells carry typos (year = 18) or 0 fillers; without
+    # the filter the period reads as «18-2024».
+    import datetime as _dt
+    upper = _dt.date.today().year + 1
+    cleaned = [y for y in years if 1500 <= y <= upper]
+    if not cleaned:
+        return None, None, None
+    return min(cleaned), max(cleaned), " + ".join(basis_parts) or None
 
 
 def _pgrep_alive(pattern: str) -> bool:

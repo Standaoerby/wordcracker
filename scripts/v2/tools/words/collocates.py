@@ -42,7 +42,7 @@ from scripts.v2.contracts.schemas import V1WordCollocates
             "top":                {"type": "integer", "description": "default 20"},
             "exclude_stopwords":  {"type": "boolean", "description": "default true"},
             "max_books":          {"type": "integer", "description": "default 8000"},
-            "metric":             {"type": "string",  "description": "count|pmi|npmi|dice (default count)"},
+            "metric":             {"type": "string",  "description": "count|pmi|npmi|dice (default npmi — W-15)"},
             "min_cooccurrence":   {"type": "integer", "description": "filter pairs with c(t,w) below this (default 5)"},
         },
         "required": ["scope", "word"],
@@ -50,14 +50,19 @@ from scripts.v2.contracts.schemas import V1WordCollocates
     requires=["word", "scope"],
     cost="medium",
     cacheable=True,
-    wrapper_version="v2-phase2-contract",
+    # W-15 (2026-05-23) — default metric flipped count → npmi so the
+    # rendered table sorts by association strength rather than raw counts
+    # (which were dominated by stop-words like «the/of/and» even with
+    # exclude_stopwords on). Bump wrapper_version so old npmi=None rows
+    # in cache get recomputed.
+    wrapper_version="v3-w15-npmi-default",
 )
 @v1_contract(v1_fn="scripts.rag_tools.word_collocates",
              schema=V1WordCollocates)
 def word_collocates(scope, word: str, window: int = 4, top: int = 20,
                     exclude_stopwords: bool = True,
                     max_books: int = 8000,
-                    metric: str = "count",
+                    metric: str = "npmi",
                     min_cooccurrence: int = 5) -> ToolResult:
     # Late binding via fresh import so tests can `mock.patch
     # ("scripts.rag_tools.word_collocates")` without re-loading the

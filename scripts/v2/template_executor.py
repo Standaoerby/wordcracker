@@ -595,16 +595,35 @@ def _render_corpus_meta_snapshot(view: RenderableView) -> str:
     p = view.payload
     rows = [
         ["Книг", format_int(p.get("n_books"))],
-        ["Авторов", format_int(p.get("n_authors"))],
-        ["Токенов", format_int(p.get("n_tokens"))],
-        ["SPGC baseline", safe_str(p.get("spgc_baseline"))],
     ]
+    # W-17 (Phase 5 P2, 2026-05-23) — show «Авторов» only when the tool
+    # surfaced a real count. Zero usually means «not computed in this
+    # environment» (no /workspace metadata DataFrame), and rendering
+    # «Авторов: 0» misled users into thinking the corpus was empty.
+    n_authors = p.get("n_authors") or 0
+    if n_authors:
+        rows.append(["Авторов", format_int(n_authors)])
+    rows.append(["Токенов", format_int(p.get("n_tokens"))])
+    # W-17 — corpus period coverage row. min/max year of content
+    # (pub_year ∪ authoryearofbirth+30 proxy). Suppress when either
+    # bound is missing so we never render «?–1924» / «1830–?».
+    y_min = p.get("year_min")
+    y_max = p.get("year_max")
+    if y_min is not None and y_max is not None:
+        rows.append(["Период охвата", f"{int(y_min)}–{int(y_max)}"])
+    rows.append(["SPGC baseline", safe_str(p.get("spgc_baseline"))])
     if p.get("chroma_chunks") is not None:
         rows.append(["ChromaDB chunks", format_int(p["chroma_chunks"])])
     if p.get("user_uploads"):
         rows.append(["User-загрузки", format_int(p["user_uploads"])])
     headline = safe_str(view.headline, default="Обзор корпуса")
-    return f"### {headline}\n\n" + md_table(["", ""], rows) + render_caveats(view.caveats)
+    out = f"### {headline}\n\n" + md_table(["", ""], rows)
+    # W-17 — surface the basis (pub_year + birth+30 mix) right after
+    # the table so users understand the coverage caveat.
+    basis = safe_str(p.get("year_basis"), default="")
+    if y_min is not None and y_max is not None and basis:
+        out += f"\n_Период оценён по: {basis}._\n"
+    return out + render_caveats(view.caveats)
 
 
 def _render_export_artifact(view: RenderableView) -> str:
