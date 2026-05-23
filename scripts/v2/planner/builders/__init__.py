@@ -1,47 +1,64 @@
 """Plan builders package.
 
-Phase 4 (REFACTOR_BRIEF) — the public surface for plan builders moves
-HERE. Each builder is a small function that turns `(intent, Entities)`
-into a `QueryPlan` with one or more `PlanStep`s; the router applies
-fan-out / timeout / clarify-guard invariants on the resulting plan
-(see `planner/invariants.py`).
+Phase 4 / T4 (REMEDIATION_BRIEF) — each builder is a small function
+that turns `(intent, Entities)` into a `QueryPlan` with one or more
+`PlanStep`s. The router applies fan-out / timeout / clarify-guard
+invariants on the resulting plan (see `planner/invariants.py`).
 
-CURRENT STATE: this is a re-exporting facade. The builders still
-physically live in `planner/plan.py`; we re-publish them here so
-external consumers (router, rag_v2, tests) can migrate imports to
-`scripts.v2.planner.builders` over time. The PLAN_BUILDERS dispatch
-table is exposed unchanged.
+Per-domain layout:
 
-FOLLOW-UP: split `plan.py` into per-domain modules under this package
-(`author.py`, `book.py`, `word.py`, `learning.py`, `meta.py`, ...).
-Doing the physical move in its own commit keeps blame readable and
-isolates the risk of import churn — the gate of Phase 4 is met
-without it (fan-out invariant + POS/etymology fan-out are landed),
-so the file split is a clean follow-up.
+  _common.py    — `PlanStep`, `QueryPlan`, scope/clarify/copyright
+                  helpers, smart-clarify recipe. NO `_plan_*` here.
+  author.py     — author_metadata / vocab / compare / closest /
+                  attribution / influences / lookup / top_authors.
+  book.py       — book_lookup / vocab / readability / archaic /
+                  emotion / recommendation / similar / pub_year /
+                  extremum / readability_compare / book_compare.
+  word.py       — word_contexts / collocates / timeline / pos /
+                  etymology / emotion / dialogue / movement.
+  corpus.py     — introduction / corpus_meta / corpus_extremum /
+                  out_of_scope.
+  composite.py  — country_compare / composite_compare / country_vocab /
+                  period_vocab / genre_compare / topic_words /
+                  topic_book_search.
+  learning.py   — learning / lexical_wealth / vocab_passport /
+                  translation_quality / translate_word_list /
+                  export_word_list.
+  similarity.py — similar_to.
 
-The static-registry rule (`PLAN_BUILDERS` is built once, no mid-module
-mutation) IS already enforced in `plan.py` after Phase 4 — see the
-single `PLAN_BUILDERS = {...}` declaration; the old post-hoc
-`PLAN_BUILDERS["..."] = ...` assignments for `translate_word_list`
-and `export_word_list` are gone.
+`scripts/v2/planner/plan.py` owns the static `PLAN_BUILDERS` registry
+and the `build()` entry point; it re-exports everything below for
+backward-compat (tests import `_plan_*` and helpers directly from
+`scripts.v2.planner.plan`).
 """
 from __future__ import annotations
 
-# Public registry — the canonical intent → builder map. Built statically
-# in plan.py; re-exported here so callers can write
-#   `from scripts.v2.planner.builders import PLAN_BUILDERS`.
-from scripts.v2.planner.plan import (
-    PLAN_BUILDERS,
-    QueryPlan,
+# Types + shared helpers
+from scripts.v2.planner.builders._common import (
+    AUTHORS_UNDER_COPYRIGHT,
+    Cost,
     PlanStep,
-    build,
+    QueryPlan,
+    _ambiguous_author_clarify,
+    _auto_min_corpus_count,
+    _author_label_lc,
+    _copyright_refusal_if_author_under_copyright,
+    _copyright_refusal_if_book_under_copyright,
+    _fan_out_authors_steps,
+    _HIGH_TRANSLIT_AUTHORS,
+    _need_author,
+    _need_book,
+    _need_country,
+    _need_word,
+    _scope_dict_or_clarify,
+    _scope_from,
+    _smart_clarify_recipe,
+    _with_author_copyright_check,
+    _with_copyright_check,
 )
 
-# Convenience re-exports of every individual builder. Mirrors the
-# PLAN_BUILDERS table so consumers can import a specific builder by
-# name for testing/introspection.
-from scripts.v2.planner.plan import (
-    # author
+# Per-domain builders
+from scripts.v2.planner.builders.author import (
     _plan_author_attribution,
     _plan_author_closest,
     _plan_author_compare,
@@ -50,7 +67,9 @@ from scripts.v2.planner.plan import (
     _plan_author_metadata,
     _plan_author_top_words,
     _plan_author_vocab,
-    # book
+    _plan_top_authors,
+)
+from scripts.v2.planner.builders.book import (
     _plan_book_archaic,
     _plan_book_compare,
     _plan_book_emotion,
@@ -62,7 +81,32 @@ from scripts.v2.planner.plan import (
     _plan_book_recommendation,
     _plan_book_similar,
     _plan_book_vocab,
-    # word
+)
+from scripts.v2.planner.builders.composite import (
+    _plan_composite_compare,
+    _plan_country_compare,
+    _plan_country_vocab,
+    _plan_genre_compare,
+    _plan_period_vocab,
+    _plan_topic_book_search,
+    _plan_topic_words,
+)
+from scripts.v2.planner.builders.corpus import (
+    _plan_corpus_extremum,
+    _plan_corpus_meta,
+    _plan_introduction,
+    _plan_out_of_scope,
+)
+from scripts.v2.planner.builders.learning import (
+    _plan_export_word_list,
+    _plan_learning,
+    _plan_lexical_wealth,
+    _plan_translate_word_list,
+    _plan_translation_quality,
+    _plan_vocab_passport,
+)
+from scripts.v2.planner.builders.similarity import _plan_similar_to
+from scripts.v2.planner.builders.word import (
     _plan_word_collocates,
     _plan_word_contexts,
     _plan_word_dialogue,
@@ -71,36 +115,30 @@ from scripts.v2.planner.plan import (
     _plan_word_movement,
     _plan_word_pos,
     _plan_word_timeline,
-    # corpus / meta
-    _plan_corpus_extremum,
-    _plan_corpus_meta,
-    _plan_introduction,
-    _plan_top_authors,
-    _plan_out_of_scope,
-    # country / period / genre / topic
-    _plan_composite_compare,
-    _plan_country_compare,
-    _plan_country_vocab,
-    _plan_genre_compare,
-    _plan_period_vocab,
-    _plan_topic_book_search,
-    _plan_topic_words,
-    # learning / lexical / translation
-    _plan_export_word_list,
-    _plan_learning,
-    _plan_lexical_wealth,
-    _plan_translate_word_list,
-    _plan_translation_quality,
-    _plan_vocab_passport,
-    # similarity
-    _plan_similar_to,
 )
 
 __all__ = [
-    "PLAN_BUILDERS",
-    "QueryPlan",
+    # types / helpers
+    "AUTHORS_UNDER_COPYRIGHT",
+    "Cost",
     "PlanStep",
-    "build",
+    "QueryPlan",
+    "_HIGH_TRANSLIT_AUTHORS",
+    "_ambiguous_author_clarify",
+    "_auto_min_corpus_count",
+    "_author_label_lc",
+    "_copyright_refusal_if_author_under_copyright",
+    "_copyright_refusal_if_book_under_copyright",
+    "_fan_out_authors_steps",
+    "_need_author",
+    "_need_book",
+    "_need_country",
+    "_need_word",
+    "_scope_dict_or_clarify",
+    "_scope_from",
+    "_smart_clarify_recipe",
+    "_with_author_copyright_check",
+    "_with_copyright_check",
     # author
     "_plan_author_attribution",
     "_plan_author_closest",
@@ -110,6 +148,7 @@ __all__ = [
     "_plan_author_metadata",
     "_plan_author_top_words",
     "_plan_author_vocab",
+    "_plan_top_authors",
     # book
     "_plan_book_archaic",
     "_plan_book_compare",
@@ -135,9 +174,8 @@ __all__ = [
     "_plan_corpus_extremum",
     "_plan_corpus_meta",
     "_plan_introduction",
-    "_plan_top_authors",
     "_plan_out_of_scope",
-    # country / period / genre / topic
+    # composite (country / period / genre / topic)
     "_plan_composite_compare",
     "_plan_country_compare",
     "_plan_country_vocab",
