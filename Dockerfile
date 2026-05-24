@@ -17,13 +17,6 @@ RUN apt update && apt install -y --no-install-recommends \
     && apt clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Bootstrap pip / setuptools / wheel BEFORE the hashed install.
-# pip-compile leaves setuptools unpinned (it's a build-time dep — see
-# the `# WARNING` block at the bottom of requirements.lock). Installing
-# it explicitly here lets `pip install --require-hashes` proceed without
-# requiring --allow-unsafe regeneration of the lock.
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
-
 # Drop torchvision / torchaudio from the base layer: both are pinned to
 # torch==2.6.0 and become binary-incompatible when the lock upgrades
 # torch to 2.12.0. Grep'd clean across scripts/ and tests/ on

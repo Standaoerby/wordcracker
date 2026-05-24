@@ -47,6 +47,7 @@ docker compose run --rm \
             --resolver=backtracking \
             --generate-hashes \
             --strip-extras \
+            --allow-unsafe \
             --quiet \
             requirements.in && \
         echo "lock generated"'
