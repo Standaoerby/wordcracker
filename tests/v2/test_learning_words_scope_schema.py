@@ -30,6 +30,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+# Side-effect import: the @tool decorator on `learning_words` registers
+# the spec into `tool_registry.REGISTRY`. Without importing the module
+# first, `REGISTRY["learning_words"]` raises KeyError. Pattern matches
+# test_w15_stopword_filter.py and other registry-reading tests.
+from scripts.v2.tools.learning.learning_words import learning_words  # noqa: F401
 from scripts.v2.tool_registry import REGISTRY
 
 
