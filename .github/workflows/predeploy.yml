@@ -76,3 +76,25 @@ jobs:
       - name: Collect tests/v2 (must be 0 collection errors per R10)
         run: |
           python -m pytest tests/v2 --collect-only -q
+
+  test-cache-race-linux:
+    # POSIX-only contract: `os.replace` is atomic on Linux (rename(2)), so
+    # the 4-writers-on-same-key race that `_write_disk` guards against (per
+    # b8dd3ab + memory `project_cache_writer_pattern`) resolves cleanly with
+    # unique `.tmp` per writer. Windows MoveFileExW can throw
+    # ERROR_ACCESS_DENIED while another writer is mid-replace on the same
+    # destination → the `CacheWriteDiskRaceSafe` class is `skipIf(win32)`
+    # per D-S0-2. This job is the canonical Linux gate for that property
+    # until the predeploy harness (ADR-B4 §1) runs the full suite.
+    name: cache race safety (Linux POSIX rename atomicity)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pytest
+        run: pip install pytest
+      - name: Run CacheWriteDiskRaceSafe (must pass on POSIX)
+        run: |
+          python -m pytest tests/v2/test_cache_concurrent_writes.py -v
