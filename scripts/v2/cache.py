@@ -23,6 +23,7 @@ import hashlib
 import json
 import logging
 import os
+import tempfile
 import threading
 import time
 from collections import OrderedDict
@@ -145,15 +146,41 @@ def _read_disk(tool: str, key: str) -> dict | None:
 
 
 def _write_disk(tool: str, key: str, payload: dict) -> None:
+    # Race-safe: previous code computed `tmp = p.with_suffix(".tmp")` —
+    # a fixed name per cache_key. Two ThreadingHTTPServer threads
+    # writing the same key both targeted the same .tmp; first
+    # replace() won, the second's source was gone → ENOENT (prod
+    # 2026-05-24, two concurrent top_ngrams_by_author calls). Silent
+    # corruption when the race went unobserved: thread A's payload
+    # could land in B's .tmp before B's replace ran, so the cached
+    # bytes were the wrong thread's. NamedTemporaryFile(delete=False)
+    # gives each writer a unique name in the same directory, so the
+    # final replace() is an independent atomic rename per writer.
     p = _disk_path(tool, key)
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, default=str),
-                       encoding="utf-8")
-        tmp.replace(p)
+    except OSError as e:
+        log.warning("cache mkdir failed for %s: %s", key, e)
+        return
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8",
+            prefix=f"{p.stem}.", suffix=".tmp",
+            dir=str(p.parent), delete=False,
+        ) as tmp_f:
+            json.dump(payload, tmp_f, ensure_ascii=False, default=str)
+            tmp_path = Path(tmp_f.name)
+        tmp_path.replace(p)
+        tmp_path = None  # ownership transferred to p; skip cleanup
     except OSError as e:
         log.warning("cache write failed for %s: %s", key, e)
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 # ---- public API ----
