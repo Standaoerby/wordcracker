@@ -6,6 +6,254 @@
 
 ---
 
+## 2026-05-24 — S-B1: deploy artifact landed (ADR-B1 phase 3 + ADR-B2 accepted)
+
+Closes block **S-B1** of `docs/tz_structural_fixes_2026-05-24.md`. The
+TZ consolidates ADR-B1 (image-tag-by-commit) + ADR-B2 (no code
+bind-mount in prod) under a single S-B1 acceptance gate: an immutable
+SHA-tagged Docker image is the only thing that reaches prod, bind-mount
+of the live repo is dev-only, and rollback is `re-run with the previous
+tag`. This section is the implementation record that turns both ADRs
+into runnable code.
+
+### D-SB1-1 — Compose layout (restructure, not prod-overlay)
+
+**Context.** ADR-B2 Proposed Option 3 ("add `docker-compose.prod.yml`
+that REMOVES bind-mounts"). At implementation time two structural
+shapes turned out to be available; the ADR text didn't pick between
+them definitively. Picking now.
+
+**Options reconsidered.**
+1. **Add a `docker-compose.prod.yml` overlay** that nullifies code
+   volumes via compose `!override` / `!reset` directive. Pros: matches
+   the literal ADR-B2 text; minimal file reshuffle. Cons: every prod
+   invocation has to chain three `-f` flags (or systemd must know the
+   full file set); `!override`/`!reset` need recent compose-spec
+   (≥2.20); silent fail mode if the directive misbehaves is "bind-mount
+   survives" — exactly the dark-code class S-B1 is meant to close.
+2. **Restructure: prod-relevant config in base, dev-only conveniences
+   in `docker-compose.override.yml`.** Pros: standard docker-compose
+   convention; prod opts out of override with a single `-f
+   docker-compose.yml` flag; no fragile YAML-spec directives; the dev
+   path (`docker compose up`) keeps auto-applying override and still
+   bind-mounts. Cons: one-time move of ollama service + env block from
+   override into base.
+
+**Decision.** Option 2 (restructure). Reasons in order: (a) the
+silent-bind-mount failure mode of Option 1 is the precise dark-code
+shape the block targets; (b) prod and dev diverge in one direction only
+(dev *adds* mounts), which is exactly what override.yml was designed
+for; (c) systemd `ExecStartPre` becomes
+`/usr/bin/docker compose -f docker-compose.yml up -d gutenberg-lab` —
+single explicit flag, greppable from the systemd unit text.
+
+**Consequences.**
+- `docker-compose.yml` is the prod source of truth: ollama service,
+  gutenberg-lab env block, image tag without fallback, data bind-mounts
+  for corpus/state.
+- `docker-compose.override.yml` is dev-only and auto-applied to bare
+  `docker compose up`: code bind-mounts (`./scripts`, `./tests`,
+  `./notebooks`, `./data`, `./raw_books`) and a `WC_IMAGE_TAG=dev`
+  default (set via the same file's `environment:` is not enough — the
+  fallback lives at the `image:` line).
+- Prod path: `docker compose -f docker-compose.yml up -d` (skips
+  override). Dev path: `docker compose up -d` (picks up both).
+- `.env` at repo root is the canonical place to pin `WC_IMAGE_TAG` for
+  the running shell. Repo ships `.env.example`; `.env` itself stays
+  gitignored.
+- Data bind-mounts (`/data/books`, `/data/spgc`, `/data/chroma_db`, …)
+  stay in base — they are corpus/state, not source code, and ADR-B2's
+  own trade-off section excluded them from the rule explicitly.
+
+**Trade-offs.**
+- One-time relocation of the ollama service spec and the gutenberg-lab
+  env block. Diff is small but touches both compose files in the same
+  commit.
+- Operator running bare `docker compose up` on the prod host (without
+  `-f`) silently switches into dev shape (bind-mounts back). Mitigated
+  by systemd being the canonical entrypoint on prod and using `-f`
+  explicitly. The verify script (D-SB1-5) catches the wrong tag if
+  someone forgets.
+
+### D-SB1-2 — Code is baked into the image via COPY
+
+**Decision.** `Dockerfile` gains `COPY scripts/ /workspace/scripts/`
+and `COPY tests/ /workspace/tests/` after the pip-install layer. A new
+`.dockerignore` keeps the build context small (exclude `.git`,
+`data/`, `raw_books/`, `notebooks/`, `__pycache__`, `docs/`, …).
+
+**Why.** This is the operational half of "no bind-mount of code in
+prod" — removing the bind-mount in compose without baking code into
+the image would leave `/workspace/scripts` empty in prod.
+
+**Consequences.**
+- Rebuild on code change costs one COPY layer (~5-50 MB depending on
+  scope); the heavy pip layer stays cached so per-code-change rebuild
+  is ~5 s on the prod host.
+- `git checkout` on the host repo no longer affects the running prod
+  container. Atomic deploy is now a property of the image, not the
+  host filesystem state.
+- The defensive pyc-purge `ExecStartPre` at
+  `systemd/wordcracker-chat.service:25` becomes redundant for the
+  scripts/ path (kept as defence-in-depth for one more deploy cycle;
+  removal lands in ADR-B3 along with the broader systemd rewrite).
+
+### D-SB1-3 — `WC_IMAGE_TAG` is required; no `:-latest` fallback
+
+**Decision.** `docker-compose.yml` declares
+`image: wordcracker-textlab:${WC_IMAGE_TAG:?WC_IMAGE_TAG must be set (e.g. via .env or `bash scripts/deploy.sh`)}`.
+The `${VAR:?msg}` substitution fails at `docker compose config` time
+when the variable is unset, printing the explanatory message — no
+silent `latest` ever ships to prod.
+
+Dev: `docker-compose.override.yml` overrides the same `image:` line
+with `wordcracker-textlab:${WC_IMAGE_TAG:-dev}`, so `docker compose up`
+without `-f` (i.e. dev) picks up the override and uses `dev` if the
+env is unset. Prod path (`-f docker-compose.yml`) does NOT pick up
+override, so the strict `${VAR:?}` form takes effect.
+
+**Why.** Phase 1's `:-latest` fallback was explicitly marked
+"temporary; drop in phase 3" in ADR-B1. The S-B1 acceptance gate
+requires the drop now: as long as the fallback exists, an operator who
+forgets to export the tag silently ships whatever `latest` happens to
+point at — which is the precise failure that wasted runs 2-5 of the
+2026-05-22 deploy epic.
+
+### D-SB1-4 — Deploy & rollback procedure
+
+**Deploy** (`scripts/deploy.sh [<git-ref>]`):
+
+1. `SHA=$(git rev-parse --short <git-ref or HEAD>)`. Bare ref refuses
+   to deploy from a dirty tree (the `--allow-dirty` flag is the
+   override).
+2. `docker build -t wordcracker-textlab:$SHA -f Dockerfile .`. Tag is
+   the short SHA; image lives in the local docker store (single host,
+   single user — ADR-B1 trade-off: no registry).
+3. Atomically write `WC_IMAGE_TAG=$SHA` into `.env` (tempfile +
+   rename) so subsequent compose invocations on the host pick it up.
+4. `docker compose -f docker-compose.yml up -d --force-recreate gutenberg-lab`.
+   `--force-recreate` ensures the container picks up the new image
+   even if compose thinks nothing changed.
+5. `systemctl restart wordcracker-chat wordcracker-admin` — the
+   chat/admin processes inside the container re-launch against the
+   freshly-recreated container.
+6. `bash scripts/verify_deployed_image.sh $SHA` — fails loudly if the
+   running image tag ≠ $SHA (D-SB1-5).
+
+**Rollback** (`scripts/deploy.sh --rollback <prev-sha>`):
+
+1. The previous SHA's image is already on the host (deploys keep the
+   last N SHA-tagged images — pruning policy below).
+2. The rollback path runs steps 3-6 of deploy with the previous SHA;
+   no rebuild needed.
+3. If the previous image was pruned, fall back to: check out the
+   previous SHA, run a full `bash scripts/deploy.sh`.
+
+**Image retention.** `deploy.sh` runs `docker image ls
+wordcracker-textlab` after restart and prunes all but the last 5
+SHA-tagged images. 5 is a soft default; bump it in the script's
+constants if a longer rollback window is wanted. Untagged dangling
+layers from interrupted builds are pruned separately.
+
+### D-SB1-5 — Verification: `scripts/verify_deployed_image.sh`
+
+**Decision.** `scripts/verify_deployed_image.sh [<expected-sha>]`:
+
+1. Resolve expected SHA — argument if provided, else `git rev-parse
+   --short HEAD`.
+2. Resolve running image for `gutenberg-lab`:
+   `docker compose -f docker-compose.yml ps gutenberg-lab --format
+   json | jq -r '.[0].Image'` (or the older `docker inspect` fallback
+   if `--format json` isn't available on the host's compose version).
+3. Strip the `wordcracker-textlab:` prefix from the running image;
+   compare to expected.
+4. Exit 0 on match, non-zero with a diff message on mismatch.
+
+This is the S-B1 acceptance script. It runs as the last step of
+`deploy.sh` and is independently invocable for spot checks. A more
+complete runtime-identity probe (`git_sha` in `/health`, footer SHA,
+`ARG GIT_SHA` baked into the image, version string scrubbed of feature
+flags) is ADR-B3 territory — explicitly out of scope here.
+
+### D-SB1-6 — systemd `ExecStartPre` pinned to base compose file
+
+**Decision.** `systemd/wordcracker-chat.service` and
+`systemd/wordcracker-admin.service` change every `docker compose` line
+from `/usr/bin/docker compose ...` to
+`/usr/bin/docker compose -f docker-compose.yml ...`.
+
+**Why.** Without `-f`, `docker compose` auto-applies
+`docker-compose.override.yml`, which (after D-SB1-1) re-introduces
+code bind-mounts. The `-f` flag pins systemd to the prod-only file
+set. Explicit, greppable, and survives the future ADR-B3 rewrite of
+these units (where the rewrite carries `-f` along).
+
+**Operator step.** Systemd unit files are under `systemd/` in the
+repo but live at `/etc/systemd/system/` on prod. Syncing them is a
+one-time prod operation:
+
+```
+sudo install -m 644 systemd/wordcracker-chat.service /etc/systemd/system/
+sudo install -m 644 systemd/wordcracker-admin.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl restart wordcracker-chat wordcracker-admin
+```
+
+`scripts/install_systemd_units.sh` automates the above. It is invoked
+manually by the operator after `deploy.sh` lands a commit that
+touches `systemd/`. (Folding it into `deploy.sh` would require sudo on
+every deploy — operator chose to keep that boundary explicit.)
+
+### Negative tests
+
+`tests/v2/test_deploy_artifact.py` (new) closes R2:
+
+1. Load `docker-compose.yml` (prod base) and assert gutenberg-lab's
+   `volumes` list contains **zero** `./` paths (no host-repo
+   bind-mounts).
+2. Load `docker-compose.yml` + `docker-compose.override.yml` (dev
+   layout) and assert gutenberg-lab's `volumes` list **does** include
+   `./scripts:/workspace/scripts` — catches accidental removal of dev
+   convenience.
+3. Assert the `image:` line of the base file contains `${WC_IMAGE_TAG:?`
+   (strict-required substitution) and does NOT contain `:-latest`.
+4. Assert each `docker compose` invocation in `systemd/*.service`
+   carries `-f docker-compose.yml` (catches D-SB1-6 regression).
+
+Per R2: each "X triggers Y" has its "NOT-X does not trigger Y"
+mirror. Tests 1+2 form one such pair (X = base file → no code mount;
+NOT-X = override applied → code mount present). Tests 3 and 4 are
+single-direction asserts whose negative is the trivial baseline (the
+literal string check fails if the regex slips).
+
+### Acceptance gate (TZ S-B1)
+
+| Gate                                                                  | How verified                                                                       |
+|-----------------------------------------------------------------------|------------------------------------------------------------------------------------|
+| `docker image ls` shows image with SHA tag                            | After `bash scripts/deploy.sh`: `docker image ls wordcracker-textlab`              |
+| Container is running from the tagged image                            | `bash scripts/verify_deployed_image.sh` exit 0                                     |
+| Bind-mount of sources absent in prod compose                          | `tests/v2/test_deploy_artifact.py::test_no_code_bind_mounts_in_prod_base`          |
+| Script-level check "running tag == git SHA of target commit"          | `scripts/verify_deployed_image.sh` (above)                                         |
+
+### Follow-ups deliberately out of scope of S-B1
+
+- **`/health.git_sha` + footer SHA + `ARG GIT_SHA` build-arg** — ADR-B3
+  ("runtime identity") covers it. `verify_deployed_image.sh` checks
+  the docker-level tag; not the in-process self-report.
+- **chat_server / admin_server as compose services with proper PID 1**
+  — ADR-B3. The pyc-purge / `docker compose exec` chain stays in
+  systemd until then.
+- **Predeploy gate (`scripts/v2/predeploy_check.py`)** — ADR-B4.
+  `deploy.sh` has a `TODO(ADR-B4)` comment marking where the predeploy
+  call will slot in.
+- **`v2-engine.conf` drop-in removal** — per D-S0-5: opportunistic
+  removal during ADR-B3 or earlier if touched for another reason.
+- **Image registry vs local store** — ADR-B1 trade-off: single host,
+  single user → local `/var/lib/docker` store is enough. Registry
+  becomes interesting only when a second prod host appears.
+
+---
+
 ## 2026-05-24 — S-0: green CI + honest WC_* flag map
 
 Closes block S-0 of `docs/tz_structural_fixes_2026-05-24.md` (TZ not in

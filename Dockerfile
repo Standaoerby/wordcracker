@@ -1,9 +1,10 @@
 FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
 
-# ADR-B1 phase 2: install from requirements.lock with hash verification.
-# Phase 1 added requirements.in + lockfile generator + compose tag
-# template; phase 3 will wire the deploy hook and drop the :-latest
-# fallback. See docs/v2/decisions.md → ADR-B1.
+# ADR-B1 phase 3 + ADR-B2 (S-B1 acceptance): install deps from
+# requirements.lock with hash verification, then COPY the prod code
+# tree (scripts/, tests/) into the image so the running container does
+# not depend on a host bind-mount of the live repo. See
+# docs/v2/decisions.md → S-B1 / D-SB1-2.
 
 # OS-level deps. --no-install-recommends keeps the apt layer slim;
 # removing /var/lib/apt/lists strips the package metadata cache.
@@ -51,6 +52,16 @@ RUN pip install --no-cache-dir \
         https://github.com/explosion/spacy-models/releases/download/en_core_web_trf-3.8.0/en_core_web_trf-3.8.0-py3-none-any.whl
 
 WORKDIR /workspace
+
+# D-SB1-2: bake the production code tree into the image. Dev (bind-mount
+# via docker-compose.override.yml) overlays /workspace/scripts and
+# /workspace/tests; prod (-f docker-compose.yml only) reads them straight
+# from the layers below. .dockerignore keeps the build context small —
+# corpus dirs (data/, raw_books/), .git, notebooks/, docs/ never enter
+# the image.
+COPY scripts/ /workspace/scripts/
+COPY tests/ /workspace/tests/
+
 EXPOSE 8888
 
 # jupyter on 8888 stays the default CMD. chat_server / admin_server

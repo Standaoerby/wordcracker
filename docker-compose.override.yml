@@ -1,50 +1,22 @@
-services:
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - /data/ollama:/root/.ollama
-    deploy:
-      resources:
-        # qwen3:14b lives in VRAM (~14 GB), the host RAM footprint of the ollama
-        # serve process is tiny (~1 GB). 16 GB cap protects against runaway
-        # mmap loading of a larger model someone might pull later.
-        limits:
-          memory: 16G
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    restart: unless-stopped
-    healthcheck:
-      # `ollama list` is built into the binary, hits the local API, and fails
-      # if either GPU or API is degraded. wget/curl are NOT in the ollama
-      # minimal image, so don't reach for them here.
-      test: ["CMD-SHELL", "nvidia-smi -L >/dev/null 2>&1 && ollama list >/dev/null 2>&1"]
-      interval: 60s
-      timeout: 10s
-      retries: 2
-      start_period: 90s
+# Dev-only override. D-SB1-1: this file is AUTO-applied by bare
+# `docker compose up` (dev path). It is NOT applied on prod, because
+# systemd invokes compose with `-f docker-compose.yml` explicitly
+# (D-SB1-6) which skips override.
+#
+# Two dev conveniences live here:
+#   1. WC_IMAGE_TAG falls back to `dev` when unset, so bare
+#      `docker compose up` works without an .env file. Prod has no
+#      fallback — see docker-compose.yml.
+#   2. Code paths bind-mount from the host so edit-and-reload works
+#      against the running container. Prod uses the baked-in image
+#      content from Dockerfile COPY.
 
+services:
   gutenberg-lab:
-    environment:
-      - OLLAMA_HOST=http://ollama:11434
-      - ASSISTANT_NAME=Словоёб
-      # Sprint 22+ alpha5 — Token Budget Layer override. Bump qwen3:14b
-      # ctx from default 8192 to 16384 (~2× headroom). With this, the
-      # Christie 200-word case fits comfortably without ladder shrink.
-      # Lower budgeted utilization = lower confabulation risk.
-      # Set to 32768 if VRAM allows and longer queries are common.
-      - WC_OLLAMA_NUM_CTX=16384
-      # Phase 1 (2026-05-22) — feature flags consolidated per
-      # REFACTOR_BRIEF R1 (no dark code). The following are now the
-      # SINGLE permanent path and have no env-gate counterparts:
-      #   - v4 LLM planner (compound / follow-up queries)
-      #   - LLM intent fallback (when rules miss)
-      #   - v6 layered entity linker (closes E13)
-      #   - v5 pipeline envelope (RequestTrace + RequestBudget)
-      #   - legacy `_llm_render` renderer (typed Stage 3 / 4 branches deleted)
-      # See docs/v2/decisions.md → D-P1-1 ... D-P1-3.
+    image: wordcracker-textlab:${WC_IMAGE_TAG:-dev}
+    volumes:
+      - ./notebooks:/workspace/notebooks
+      - ./scripts:/workspace/scripts
+      - ./tests:/workspace/tests
+      - ./data:/workspace/data
+      - ./raw_books:/workspace/raw_books

@@ -1,10 +1,53 @@
+# Base / prod compose. D-SB1-1: this file is the prod source of truth.
+# It contains ollama, gutenberg-lab (image-by-SHA, env, corpus mounts).
+# It does NOT bind-mount code from the host — code is baked into the
+# image via Dockerfile COPY (D-SB1-2).
+#
+# Dev convenience (bind-mount of ./scripts ./tests etc.) lives in
+# docker-compose.override.yml, which is auto-applied to bare
+# `docker compose up` (dev path) and skipped by
+# `docker compose -f docker-compose.yml up` (prod path used by systemd).
+#
+# See docs/v2/decisions.md → 2026-05-24 S-B1.
+
 services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - /data/ollama:/root/.ollama
+    deploy:
+      resources:
+        # qwen3:14b lives in VRAM (~14 GB), the host RAM footprint of the ollama
+        # serve process is tiny (~1 GB). 16 GB cap protects against runaway
+        # mmap loading of a larger model someone might pull later.
+        limits:
+          memory: 16G
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      # `ollama list` is built into the binary, hits the local API, and fails
+      # if either GPU or API is degraded. wget/curl are NOT in the ollama
+      # minimal image, so don't reach for them here.
+      test: ["CMD-SHELL", "nvidia-smi -L >/dev/null 2>&1 && ollama list >/dev/null 2>&1"]
+      interval: 60s
+      timeout: 10s
+      retries: 2
+      start_period: 90s
+
   gutenberg-lab:
-    # ADR-B1: image tag templated for deploy-by-SHA. The `:-latest`
-    # fallback keeps current behaviour (deploys without WC_IMAGE_TAG
-    # set continue to use :latest, same as before). Once phase 3
-    # lands, the fallback is removed and WC_IMAGE_TAG becomes required.
-    image: wordcracker-textlab:${WC_IMAGE_TAG:-latest}
+    # D-SB1-3: WC_IMAGE_TAG is REQUIRED in the prod path. The ${VAR:?msg}
+    # form fails `docker compose config` / `up` loudly if the variable
+    # is unset — no silent `:latest` ever ships to prod. Dev overrides
+    # this image: line in docker-compose.override.yml with a `:-dev`
+    # fallback so bare `docker compose up` still works locally.
+    image: wordcracker-textlab:${WC_IMAGE_TAG:?WC_IMAGE_TAG must be set (export it, write .env, or run scripts/deploy.sh)}
     build:
       context: .
       dockerfile: Dockerfile
@@ -12,12 +55,30 @@ services:
       - "8888:8888"
       - "8890:8890"
       - "8891:8891"
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - ASSISTANT_NAME=Словоёб
+      # Sprint 22+ alpha5 — Token Budget Layer override. Bump qwen3:14b
+      # ctx from default 8192 to 16384 (~2× headroom). With this, the
+      # Christie 200-word case fits comfortably without ladder shrink.
+      # Lower budgeted utilization = lower confabulation risk.
+      # Set to 32768 if VRAM allows and longer queries are common.
+      - WC_OLLAMA_NUM_CTX=16384
+      # Phase 1 (2026-05-22) — feature flags consolidated per
+      # REFACTOR_BRIEF R1 (no dark code). The following are now the
+      # SINGLE permanent path and have no env-gate counterparts:
+      #   - v4 LLM planner (compound / follow-up queries)
+      #   - LLM intent fallback (when rules miss)
+      #   - v6 layered entity linker (closes E13)
+      #   - v5 pipeline envelope (RequestTrace + RequestBudget)
+      #   - legacy `_llm_render` renderer (typed Stage 3 / 4 branches deleted)
+      # See docs/v2/decisions.md → D-P1-1 ... D-P1-3.
     volumes:
-      - ./notebooks:/workspace/notebooks
-      - ./scripts:/workspace/scripts
-      - ./tests:/workspace/tests
-      - ./data:/workspace/data
-      - ./raw_books:/workspace/raw_books
+      # D-SB1-1: only corpus / state bind-mounts in the prod base. Code
+      # paths (./scripts, ./tests, ./notebooks, ./data, ./raw_books)
+      # live under dev-only override. /data/* paths are large state on
+      # the host disk and were explicitly excluded from ADR-B2's "no
+      # bind-mount" rule.
       - /data/books:/workspace/books
       - /data/clean_books:/workspace/clean_books
       - /data/chroma_db:/workspace/chroma_db

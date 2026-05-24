@@ -5,3 +5,7 @@ __pycache__/
 *.pyc
 *.ipynb_checkpoints
 /media/
+
+# D-SB1-3: .env carries the per-host WC_IMAGE_TAG (and any future
+# per-host secrets). .env.example is committed as a template.
+.env

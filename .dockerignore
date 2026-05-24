@@ -1,0 +1,42 @@
+# .dockerignore — D-SB1-2: keep the build context small so the COPY
+# layers only ship code, not corpus / dev artifacts / docs.
+#
+# Anything listed here is excluded from the build context entirely —
+# COPY commands cannot see these paths even if they are addressed
+# explicitly.
+
+# Git / CI metadata — never needed at runtime
+.git
+.gitattributes
+.gitignore
+.github
+
+# Corpus and runtime state — bind-mounted in prod from /data on the host
+data
+raw_books
+
+# Dev artifacts
+notebooks
+.ipynb_checkpoints
+.pytest_cache
+__pycache__
+*.pyc
+
+# Local secrets / per-host config
+.env
+
+# Top-level docs and briefs
+*.md
+docs
+
+# Operator-side files that don't run inside the container
+systemd
+infra
+build_lockfile.sh
+Modelfile.v2
+
+# Compose files describe HOW to run the container; not needed INSIDE it
+docker-compose.yml
+docker-compose.override.yml
+.dockerignore
+Dockerfile
