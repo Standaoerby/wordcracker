@@ -71,7 +71,13 @@ NOT uniform: B1 is multi-day; A4 is half a day.
 
 ### ADR-B1 — Pinned dependencies + image-tag-by-commit
 
-**Status.** Proposed.
+**Status.** Accepted (2026-05-24). Phases 1 + 2 landed in commits
+329908b → 897573a → 9f646c4 → c86d22d → 148609d; image rebuilt and
+verified on prod (cuda True, 2012 tests collected, service restart
+clean, cache_write_failed count = 0 post-restart). Phase 3 (deploy
+hook + drop `:-latest` fallback) is deferred behind a deliberate
+bake-time per R7 — see task list. Other ADRs in this block remain
+Proposed pending review or implementation.
 
 **Context.** [Dockerfile:7-28](Dockerfile:7) installs `jupyterlab`,
 `spacy[transformers]`, `transformers`, `sentence-transformers`,
@@ -769,7 +775,65 @@ directly.
 
 ---
 
+### Follow-ups surfaced during ADR-B1 implementation
 
+Things discovered while landing B1 phases 1 + 2 that don't belong
+inside the existing ADRs but need to be on record so we don't
+re-discover them later.
+
+**F1 — `cache._write_disk` race (closed by commit b8dd3ab).** Two
+ThreadingHTTPServer threads computing the same heavy query both
+targeted `p.with_suffix(".tmp")` — a fixed filename per cache_key.
+Loser's `replace()` got ENOENT; winner's payload could be
+overwritten mid-write_text by the loser before the surviving
+`replace()` ran. Fixed via
+`tempfile.NamedTemporaryFile(delete=False)` so each writer gets a
+unique `.tmp` in the same directory. **Class lesson:** any
+filesystem cache layer reachable from `ThreadingHTTPServer` (or any
+multi-writer context) MUST use per-writer unique tmpfile names —
+shared-name + atomic-rename is not atomic across writers. Negative
+test at [tests/v2/test_cache_concurrent_writes.py](tests/v2/test_cache_concurrent_writes.py)
+locks the contract.
+
+**F2 — 20.6 GB image after phase 2 (candidate ADR: "slim base").**
+The Dockerfile keeps `pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime`
+as base (preinstalled torch 2.6.0+cu124 + cuDNN 9) and then `pip
+install --require-hashes` upgrades torch to 2.12.0+cu130 (PyPI now
+bundles its own CUDA 13 via `nvidia-cublas-cu13` /
+`nvidia-cudnn-cu13` / etc. wheels). Both CUDA runtimes end up in
+`/opt/conda/lib/python3.11/site-packages/` — dead weight. Reclaim
+opportunity ≈ 5 GB by switching base to `python:3.11-slim` and
+letting the lock install everything. Worth its own ADR — not
+attempted here because base swap = larger blast radius than B1's
+"pinned-deps" scope.
+
+**F3 — In-flight request coalescing (candidate ADR or A-domain
+follow-up).** 2026-05-24 prod log: two `top_ngrams_by_author` calls
+with identical fingerprint completed at the same wall-clock second
+(06:47:47), with 3346.75 s and 3747.57 s elapsed — i.e. **two
+users running the same 55-minute compute in parallel**, neither
+benefitting from the other's work. After ADR-A1 precompute lands
+this becomes irrelevant for canonical phrasings, but the structural
+gap (`dispatch` has no in-flight tracking) deserves its own ADR.
+The fix shape is small: a `dict[cache_key → Future]` in
+`tool_registry.dispatch` so the second caller waits on the first's
+result instead of duplicating compute.
+
+**F4 — `v2-engine.conf` drop-in still in active systemd chain.**
+`sudo systemctl status wordcracker-chat` post-restart still shows
+`Drop-In: …/v2-engine.conf` with `WC_DEFAULT_ENGINE=v2` exported
+into the container — even though D-P1-5 deleted that var from code.
+Confirms ADR-B5 (env-var lifecycle bound to decisions.md) is needed
+in the form proposed; until B5 lands, the drift is harmless but
+documents itself in the live unit file.
+
+These four are NOT part of the B1 acceptance gate. F1 is already
+closed; F2, F3, F4 are candidates for future ADRs once the bake
+period validates the current B1 image.
+
+---
+
+## 2026-05-23 — Phase 1 remediation (T1)
 
 Closing actions from REMEDIATION_BRIEF.md / docs/T1_TZ.md (Фаза 1 doводка).
 Goal of T1: one resolver, one router executor (+ stream), engine flag
