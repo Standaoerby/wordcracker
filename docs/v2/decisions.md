@@ -962,6 +962,291 @@ directly.
 
 ---
 
+### Why Domain C exists alongside B
+
+Domain B makes the *application image* reproducible by SHA (B1) and
+removes host bind-mount drift for code (B2). It says nothing about the
+**LLM model** — yet the model is the heaviest single artifact the
+system depends on (~14 GB base + a tuned SYSTEM prompt) and the only
+artifact whose identity ("what does `wordcracker:v2` resolve to right
+now?") is currently established by a one-time manual `ollama create` on
+the host. B1's "same git SHA → same artifact" invariant breaks the
+moment we cross from Python deps into Ollama-land. Domain C closes that
+seam — same motivation as B (deploy reproducibility), different
+artifact class (the model on disk in the Ollama container's volume).
+
+Order: this ADR can land independently of B1-B5; it does not depend on
+them. But it does **assume** B4's predeploy gate exists as the
+mechanism that warm-loads the resulting model into VRAM after a deploy
+(see ADR-B4 §3 golden-set + the explicit note at the end of this ADR).
+
+---
+
+### ADR-C1 — LLM model residency policy
+
+**Status.** Proposed.
+
+**Context.** The system depends on two named Ollama models:
+
+- `qwen3:14b` — stock upstream Ollama model (~14 GB on disk;
+  pulled via `ollama pull qwen3:14b`). Referenced as default in
+  [scripts/v2/rag_v2.py:43](scripts/rag_v2.py:43),
+  [scripts/v2/planner/llm_planner.py:76-79](scripts/v2/planner/llm_planner.py:76),
+  [scripts/v2/critic.py:38-39](scripts/v2/critic.py:38);
+  hard-coded (no env override) in
+  [scripts/rag_query.py:40](scripts/rag_query.py:40),
+  [scripts/rag_tools.py:73, 277-278](scripts/rag_tools.py:73),
+  [scripts/learning_tools.py:625](scripts/learning_tools.py:625),
+  and [scripts/ollama_gpu_watcher.sh:46](scripts/ollama_gpu_watcher.sh:46).
+- `wordcracker:v2` — locally-built tuned variant. Defined by
+  [Modelfile.v2](Modelfile.v2): `FROM qwen3:14b` + 6 PARAMETER lines
+  (temperature 0.1, top_p 0.8, repeat_penalty 1.1, num_ctx 8192,
+  num_predict 1200, stop `<|im_end|>`) + a 1.5 KB Russian
+  operator-style SYSTEM block ([Modelfile.v2:35-56](Modelfile.v2:35)).
+  Default in [scripts/v2/planner/llm_intent.py:62-63](scripts/v2/planner/llm_intent.py:62);
+  pinned in prod for chat + critic by
+  [systemd/wordcracker-chat.service.d/v2-engine.conf:22](systemd/wordcracker-chat.service.d/v2-engine.conf:22)
+  (`WC_LLM_MODEL=wordcracker:v2 WC_CRITIC_MODEL=wordcracker:v2`).
+
+The Ollama service is stock `ollama/ollama:latest`
+([docker-compose.override.yml:3](docker-compose.override.yml:3)) with
+its model directory bind-mounted from host:
+[docker-compose.override.yml:7-8](docker-compose.override.yml:7) maps
+`/data/ollama:/root/.ollama`. Both `qwen3:14b` blobs and
+`wordcracker:v2` blobs live there.
+
+**Build procedure for `wordcracker:v2` today (per the comment block at
+[Modelfile.v2:8-12](Modelfile.v2:8)).** Manual, three steps, no
+automation:
+
+1. `scp Modelfile.v2` onto the host.
+2. `docker compose exec ollama ollama create wordcracker:v2 -f /workspace/Modelfile.v2`
+   (requires bind-mount or container `/tmp`).
+3. `WC_LLM_MODEL=wordcracker:v2` is already in the systemd drop-in;
+   no further config.
+
+Concrete consequences of the status quo:
+
+- **Drift class #1 — base model floats.** `ollama pull qwen3:14b` on
+  day N+30 returns whatever Ollama's library currently calls `:14b`.
+  Modelfile.v2 has `FROM qwen3:14b` (no digest) so rebuilding
+  `wordcracker:v2` against the floated base silently changes the
+  effective model. Same `wordcracker:v2` tag, different weights.
+- **Drift class #2 — Modelfile.v2 changes don't redeploy themselves.**
+  Editing the SYSTEM prompt in the repo does nothing until somebody
+  remembers to `ollama create` on the host. There is no gate; no R2
+  ("fix executes on prod flag combo") mechanism for the model layer.
+- **Drift class #3 — model-name inconsistency across callers.** The
+  systemd drop-in pins `wordcracker:v2` for chat + critic, but the
+  v4 planner reads `WC_LLM_PLANNER_MODEL` → `WC_LLM_MODEL` →
+  `"qwen3:14b"` ([scripts/v2/planner/llm_planner.py:76-79](scripts/v2/planner/llm_planner.py:76))
+  with the drop-in only setting `WC_LLM_MODEL`. So the planner
+  reads `wordcracker:v2` in prod (one fall-through), but the half-dozen
+  hard-coded `qwen3:14b` callsites in `scripts/` (translate,
+  learning_tools, rag_query, ollama_gpu_watcher) target the base
+  model unconditionally. **Result: two models live in VRAM
+  simultaneously** when both paths run, with no policy declaring
+  whether that's intended.
+- **Drift class #4 — GPU watcher warms the wrong model.**
+  [ollama_gpu_watcher.sh:45-47](scripts/ollama_gpu_watcher.sh:45) calls
+  `/api/generate` with `model=qwen3:14b, keep_alive=-1` after a GPU
+  passthrough recovery. After prod was switched to `wordcracker:v2`,
+  this warm-back still loads the base — the prod-pinned model takes a
+  cold-load hit on the first user request after a GPU blip.
+
+Audit C5 ("bake time = 0; деплой-и-откат за 30 минут") assumes the
+artifact (image) defines behaviour. With the LLM model, the artifact
+defining behaviour is `wordcracker:v2`'s on-disk blob in
+`/data/ollama/models/...` — which is not under any deploy mechanism's
+control today.
+
+**Options considered.**
+
+1. **(а) Status quo — manual `ollama create` on host, bind-mounted
+   `/data/ollama`, no automation.** Modelfile.v2 lives in repo as
+   documentation. Operator runs `ollama create wordcracker:v2 -f
+   Modelfile.v2` after Modelfile edits. Both `qwen3:14b` and
+   `wordcracker:v2` persist across Ollama restart via the volume.
+   *Pros:* zero new infrastructure; matches what's already deployed.
+   *Cons:* every drift class above is unfixed. Violates R8 ("read the
+   live path") because the live path is "whatever Modelfile.v2 looked
+   like the last time the operator manually ran a command, against
+   whatever base the registry served that day."
+
+2. **(б) Bake `wordcracker:v2` into a custom Ollama image at build
+   time.** New `Dockerfile.ollama`: `FROM ollama/ollama:latest`,
+   `COPY Modelfile.v2 /`, `RUN ollama serve & sleep 5 && ollama create
+   wordcracker:v2 -f /Modelfile.v2 && kill %1`. Pairs with ADR-B1 —
+   image tagged by Modelfile-content-hash (or by repo SHA). Compose
+   references `wordcracker-ollama:${OLLAMA_IMAGE_TAG}`.
+   *Pros:* deploy = `docker compose up -d ollama` = atomic model swap;
+   reproducible by tag; no init-time work.
+   *Cons:* (i) Ollama's `OLLAMA_MODELS` directory is `/root/.ollama`,
+   which is bind-mounted from `/data/ollama` in
+   [docker-compose.override.yml:7-8](docker-compose.override.yml:7) —
+   the mount **hides the baked-in models** at runtime. Fixing this
+   means either dropping the bind-mount (and re-pulling
+   `qwen3:14b`-the-base on every Ollama-image swap, ~14 GB download)
+   OR switching to a named volume with a seed-on-first-run script (the
+   complexity Option (в) was supposed to avoid). (ii) Build host needs
+   ~28 GB free during the `RUN ollama create` step (base ~14 GB + new
+   tag ~14 GB pre-dedup). (iii) Ollama image rebuild on every
+   Modelfile edit, even though the build is just metadata + SYSTEM
+   text. (iv) Local image SHA-tag deploys (B1) on a registry-less
+   single-host setup already use `docker save | docker load`; doubling
+   that for a 14 GB-larger image is noticeable.
+
+3. **(в) Idempotent init-sidecar against the running Ollama
+   service.** Stock `ollama/ollama:latest`. Modelfile.v2 mounted
+   read-only into the ollama container (or fetched by a sidecar via
+   `docker cp`). On Ollama service start, a small init script runs
+   the equivalent of:
+
+   ```
+   want_hash = sha256(Modelfile.v2)
+   have_hash = read /data/ollama/wordcracker-v2.tag-meta (created last time)
+   if want_hash != have_hash OR `ollama list` doesn't include wordcracker:v2:
+       ollama create wordcracker:v2 -f /Modelfile.v2
+       write Modelfile-hash to /data/ollama/wordcracker-v2.tag-meta
+   ```
+
+   Same script also `ollama pull qwen3:14b` if the base is missing,
+   pinning the digest in the sidecar logic (read `ollama show
+   qwen3:14b --modelfile` once, compare against expected digest from
+   a `models.lock` checked into the repo).
+   *Pros:* (i) plays well with the existing bind-mount — models
+   stored in `/data/ollama` as today, only the *create* is
+   re-triggered when Modelfile changes; (ii) idempotent — restart of
+   the ollama service is cheap when nothing changed; (iii) no extra
+   image bloat; (iv) `models.lock` adjacent to `requirements.lock`
+   (B1) gives base-digest reproducibility without baking
+   gigabytes into images; (v) Modelfile.v2 change → image-SHA-tagged
+   `chat`/`admin` deploy → restart → init sees new hash → recreates
+   tag — all driven from one repo commit.
+   *Cons:* (i) extra startup time on Modelfile change (~10-20 s for
+   `ollama create`, one-time); (ii) the "lock the base digest"
+   half needs a small `scripts/v2/build_models_lock.py` companion;
+   (iii) one more piece of init logic to reason about, though smaller
+   than B1's pip-compile flow.
+
+4. **(г) External / private Ollama registry — `ollama pull
+   wordcracker:v2:<sha>`.** Push the built model to a private
+   registry; deploy hook does `ollama pull wordcracker:v2:${MODEL_TAG}`
+   against the local Ollama. Decouples model lifecycle from compose
+   entirely; mirrors how application images would work with a Docker
+   registry.
+   *Pros:* most cloud-native; clean for multi-host scale-out;
+   identical mental model to Docker image deploys.
+   *Cons:* requires registry infrastructure that doesn't exist on
+   this single-host setup; doubles the "where does the artifact live"
+   question (image registry + model registry); pulling 14 GB of model
+   over the network on every model bump is wasteful for a local-only
+   deploy. Premature for current scale (single host, one operator).
+
+**Decision.** **Option (в) — idempotent init-sidecar driven by
+`Modelfile.v2` + a small `models.lock` for base-digest pinning.**
+
+Concretely:
+
+1. Repo gains `models.lock` adjacent to `requirements.lock`:
+
+   ```
+   # one line per upstream Ollama model used.
+   # digest = output of `ollama show <tag> --modelfile | head -1`
+   #          (the `FROM <digest>` line for the resolved blob).
+   qwen3:14b sha256:<digest>
+   ```
+
+   Maintained the same way as `requirements.lock` (B1) — manual
+   `make refresh-models-lock` step on intentional base bump.
+
+2. Modelfile.v2 stays in repo, unchanged in shape. Future
+   improvement (out of scope for this ADR): replace `FROM qwen3:14b`
+   with `FROM qwen3:14b@sha256:<digest>` once Ollama's Modelfile
+   syntax supports digest pinning natively (it does as of Ollama
+   0.4); when adopted, `models.lock` becomes redundant for the base
+   and the lock collapses to just the *creation hash* of the tuned
+   tag.
+
+3. A new init script — `scripts/v2/ollama_init.sh` — runs as the
+   ollama service's `command` (wrapping `ollama serve`):
+
+   ```
+   ollama serve &
+   wait_for_api  # poll /api/tags until 200
+   ensure_pulled qwen3:14b $(grep ^qwen3:14b models.lock | awk '{print $2}')
+   ensure_created wordcracker:v2 /Modelfile.v2  # compares stored hash
+   wait
+   ```
+
+   `Modelfile.v2` and `models.lock` are bind-mounted read-only into
+   the ollama container at `/Modelfile.v2` and `/models.lock`.
+
+4. The single source of truth for the model name moves to
+   `scripts/v2/env_registry.py` (per ADR-B5) — `WC_LLM_MODEL`,
+   `WC_LLM_PLANNER_MODEL`, `WC_CRITIC_MODEL` all default to
+   `"wordcracker:v2"` (was inconsistent — `llm_intent.py` defaulted
+   to `wordcracker:v2`, the other three defaulted to `qwen3:14b`).
+   The hard-coded `qwen3:14b` callsites in `rag_query.py`,
+   `rag_tools.py`, `learning_tools.py`, and `ollama_gpu_watcher.sh`
+   move to read the registry. This is **out of scope for this ADR's
+   implementation** (it's a code change) but the residency policy
+   assumes it lands as part of B5 follow-through; without it,
+   Option (в) only fixes residency for the chat/critic path, not
+   the auxiliary paths.
+
+5. Predeploy gate (ADR-B4) gains one more check: assert
+   `wordcracker:v2` exists in `ollama list` AND its creation hash
+   matches `sha256(Modelfile.v2)`. Failure → deploy blocked.
+
+**Consequences.**
+
+- `wordcracker:v2`'s blob lives in `/data/ollama` as today, but its
+  *identity* is now derived from Modelfile.v2 + models.lock — both
+  checked into the repo. A git SHA + an Ollama init script run = the
+  same model on disk, repeatably.
+- Modelfile.v2 edit → commit → predeploy gate → deploy → ollama
+  service restart → init script sees new Modelfile hash → recreates
+  the `wordcracker:v2` tag in ~10-20 s. The user-facing model swap
+  is atomic at the moment the predeploy gate's `ensure_created`
+  call returns.
+- Drift class #1 closed by `models.lock` (base digest pinned).
+- Drift class #2 closed by the init script (Modelfile hash drives
+  re-creation).
+- Drift class #3 reduced to a code-change task tracked under
+  ADR-B5 (env-registry single-source-of-truth) — residency policy
+  defines what `WC_LLM_MODEL` SHOULD be, the registry enforces it.
+- Drift class #4 (GPU watcher) becomes a one-line edit in
+  `ollama_gpu_watcher.sh` once it reads the registry — same B5
+  follow-through.
+- Modelfile.v2 stops being a comment-block ritual ("scp, exec,
+  set env") and becomes an artifact whose presence and content are
+  mechanically verified at deploy time.
+
+**Trade-offs.**
+
+- Ollama service no longer launches with the stock command; it now
+  wraps a small shell init. **Friction is desired** (R7 / R8 — the
+  Ollama service's behaviour must be explicit and grep-able rather
+  than "whatever the operator did last").
+- `models.lock` is one more manual-bump file alongside
+  `requirements.lock`. Same maintenance pattern, same payoff (base
+  changes are intentional, dated, and visible in git history).
+- The init script adds ~10-20 s to ollama service startup the
+  *first time* a Modelfile.v2 change is deployed (subsequent restarts
+  are no-ops because the hash matches). Acceptable — chat / admin
+  services can `depends_on: { ollama: { condition: service_healthy }
+  }` so they don't race the model creation.
+- Option (б) would avoid the init script entirely but at the cost
+  of bind-mount conflict + 14 GB of duplicated state. Option (в)
+  keeps the bind-mount (which we already trust for data persistence)
+  and adds only the *trigger* mechanism.
+- Option (г)'s registry path is the right long-term move if/when this
+  system grows beyond one host. Today it pays infra cost for no
+  current benefit. Revisit if scale-out becomes a real consideration.
+
+---
+
 ### Follow-ups surfaced during ADR-B1 implementation
 
 Things discovered while landing B1 phases 1 + 2 that don't belong
