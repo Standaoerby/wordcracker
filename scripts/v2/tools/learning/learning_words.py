@@ -48,7 +48,48 @@ _LITERARY_LOCATION_BLACKLIST = frozenset({
     input_schema={
         "type": "object",
         "properties": {
-            "scope":     {"type": "object", "description": "{'book': PGid} | {'author': regex}"},
+            # Phase 2 / W-19 (2026-05-25) — bad_answers id 6d864f676266
+            # showed the LLM emitting `scope: "corpus"` against the
+            # pre-fix `{"type": "object"}` declaration. Two structural
+            # issues fixed in this oneOf:
+            #   1. v1 (learning_tools.py:439) accepts {'book':PGid} OR
+            #      {'author':regex} OR the literal string 'all_corpus'.
+            #      The old schema declared only `type: object`, so it
+            #      both LIED about the type (string is valid too) and
+            #      hid the all_corpus option from the LLM's view of the
+            #      contract.
+            #   2. Description didn't list 'all_corpus' as a valid value,
+            #      so when the LLM wanted "whole corpus" it improvised
+            #      `"corpus"` and the wrapper rejected with «bad scope».
+            # The oneOf below is the actual contract v1 enforces; every
+            # branch is independently dispatchable.
+            "scope": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {"book": {"type": "string",
+                                                 "description": "PGid e.g. 'PG1342'"}},
+                        "required": ["book"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {"author": {"type": "string",
+                                                   "description": "author regex e.g. '^Doyle,'"}},
+                        "required": ["author"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "string",
+                        "enum": ["all_corpus"],
+                        "description": "literal 'all_corpus' for whole-corpus scope",
+                    },
+                ],
+                "description":
+                    "ONE of: {'book': 'PG1342'} | {'author': '^Doyle,'} | 'all_corpus'. "
+                    "Pick 'all_corpus' for level-banded vocabulary across the entire "
+                    "library when no specific book or author is named.",
+            },
             "level":     {"type": "string",
                           "enum": ["basic", "intermediate", "advanced", "rare"],
                           "description": "default 'intermediate'"},
