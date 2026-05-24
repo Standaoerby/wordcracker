@@ -124,10 +124,13 @@ def top_books_by_recency(top: int = 20, lang: str = "en",
     requires=["book"],
     cost="cheap",
     cacheable=True,
-    # E24 (2026-05-22) — view now fills `count` from per_million when
-    # share is source (was None → «Вхождений» column empty in persona
-    # Q4/Q12 — exactly the column the user looks at for frequency).
-    wrapper_version="v4-phase2-contract",
+    # W-3 (2026-05-24) — wrapper now also stamps `raw["emotions"]` as
+    # a flat list-of-rows so the LLM render payload no longer has to
+    # join `share_among_primary_emotions` × `per_million` mentally
+    # (that join failing was the «Вхождений» = «—» symptom). Bumping
+    # the version invalidates cached results from v4 which lacked the
+    # `emotions` key.
+    wrapper_version="v5-w3-emotion-rows",
 )
 @v1_contract(v1_fn="scripts.rag_tools.book_emotion_profile",
              schema=V1BookEmotionProfile)
@@ -213,6 +216,65 @@ def _attach_top_books_view(result, rows, *, metric: str, top: int,
         )
 
 
+def _build_emotion_rows(raw: dict) -> list[dict]:
+    """Project v1's dict-of-dicts (`share_among_primary_emotions`,
+    `per_million`) into a flat list of typed rows the renderer template
+    and the LLM render payload can both read.
+
+    W-3 (2026-05-24): the LLM-render path used to receive only the raw
+    dict-of-dicts shape; the LLM had to mentally JOIN share + per_million
+    per emotion to fill the «Вхождений» column. When the join failed —
+    Stan persona Q4/Q12 «Эмоциональный профиль Frankenstein» — that
+    column rendered with «—» in every cell. Exposing a normalized list
+    of `{emotion, share, count, per_million}` rows removes the join
+    burden: the LLM iterates rows, renders one cell per documented key.
+    """
+    share_raw = raw.get("share_among_primary_emotions")
+    per_million_raw = raw.get("per_million")
+    emotions_raw = share_raw or per_million_raw or {}
+    emotions: list[dict] = []
+    if not isinstance(emotions_raw, dict):
+        return emotions
+    values = [v for v in emotions_raw.values()
+              if isinstance(v, (int, float))]
+    total = sum(values) if values else 0
+    already_shares = (0.95 <= total <= 1.05) and bool(share_raw)
+    per_million_for: dict = (per_million_raw
+                              if isinstance(per_million_raw, dict)
+                              else {})
+    for emo, val in emotions_raw.items():
+        if not isinstance(val, (int, float)):
+            continue
+        pm_val = per_million_for.get(emo)
+        if already_shares:
+            share = float(val)
+            # Show per-million frequency as count (more meaningful
+            # than the share fraction) — E24 «Вхождений» column.
+            count = (round(float(pm_val))
+                      if isinstance(pm_val, (int, float)) else None)
+        else:
+            share = (float(val) / total) if total else 0.0
+            count = (round(float(val))
+                      if isinstance(val, (int, float)) else None)
+        emotions.append({
+            "emotion": emo,
+            "share": share,
+            "count": count,
+            # Renderer-friendly alias so a column-name guess of
+            # «per_million» still hits a value. Identical to count when
+            # v1 surfaces per_million directly.
+            "per_million": (float(pm_val)
+                             if isinstance(pm_val, (int, float))
+                             else (float(val) if not already_shares
+                                                  and isinstance(val, (int, float))
+                                                  else None)),
+        })
+    # Sort emotions by share descending so the table leads with the
+    # dominant emotions; matches what the typed-view template would do.
+    emotions.sort(key=lambda x: x.get("share") or 0, reverse=True)
+    return emotions
+
+
 def _attach_emotion_profile_view(result, raw, pg_id: str) -> None:
     # E15 P0 FIX (2026-05-22): v1 book_emotion_profile (rag_tools.py:1900)
     # returns keys `per_million` (dict {emo: float}),
@@ -229,57 +291,16 @@ def _attach_emotion_profile_view(result, raw, pg_id: str) -> None:
         # V1BookEmotionProfile canonical: title, share_among_primary_emotions,
         # per_million, sample_anchor_words.
         title = raw.get("title") or pg_id
-        share_raw = raw.get("share_among_primary_emotions")
-        per_million_raw = raw.get("per_million")
-        emotions_raw = share_raw or per_million_raw or {}
-        emotions: list[dict] = []
-        if isinstance(emotions_raw, dict):
-            # If we have shares already (sum to ~1), use directly; if not
-            # (e.g. per_million), recompute shares.
-            values = [v for v in emotions_raw.values()
-                      if isinstance(v, (int, float))]
-            total = sum(values) if values else 0
-            already_shares = (0.95 <= total <= 1.05) and bool(share_raw)
-            # E24 (2026-05-22) — persona test Q4/Q12 «эмоциональный профиль
-            # Frankenstein/Dracula» showed «Вхождений» (count) column
-            # empty. v1 returns BOTH share_among_primary_emotions AND
-            # per_million. When share is source, count was None; now
-            # populate from per_million as a meaningful per-million
-            # frequency so the column is filled.
-            per_million_for: dict = (per_million_raw
-                                      if isinstance(per_million_raw, dict)
-                                      else {})
-            for emo, val in emotions_raw.items():
-                if not isinstance(val, (int, float)):
-                    continue
-                if already_shares:
-                    share = float(val)
-                    pm_val = per_million_for.get(emo)
-                    # Show per-million frequency as count (more meaningful
-                    # than the share fraction)
-                    count = (round(float(pm_val)) if isinstance(pm_val, (int, float))
-                              else None)
-                else:
-                    share = (float(val) / total) if total else 0.0
-                    count = val
-                emotions.append({
-                    "emotion": emo,
-                    "share": share,
-                    "count": count,
-                })
-        # V1BookEmotionProfile share_among_primary_emotions is always
-        # a dict (never list) — list branch removed.
+        emotions = _build_emotion_rows(raw)
+        # W-3 (2026-05-24) — surface the normalized row list on raw so
+        # the LLM render payload sees the same rows the typed-view
+        # template would render. `_normalize_payload_tool_results`
+        # iterates lists-of-dicts; without `emotions` the LLM only saw
+        # dict-of-dicts (share + per_million) and dropped the join.
+        raw["emotions"] = emotions
         # V1BookEmotionProfile doesn't expose `dominant`/`top_emotions` at
         # top level; compute from emotions list.
-        dominant: list = []
-        if emotions:
-            dominant = [
-                e["emotion"] for e in
-                sorted(emotions, key=lambda x: x.get("share") or 0,
-                       reverse=True)[:3]
-            ]
-        if not isinstance(dominant, list):
-            dominant = [str(dominant)]
+        dominant: list = [e["emotion"] for e in emotions[:3]]
         view = vb.build_emotion_profile(
             book_title=title,
             pg_id=pg_id,

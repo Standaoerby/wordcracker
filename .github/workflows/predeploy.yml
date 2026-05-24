@@ -1,0 +1,78 @@
+name: predeploy
+
+# W-18 pre-deploy gate (CI half). Runs the parts of the deploy gate
+# that do NOT need a live chat endpoint:
+#
+#   - version-bump check vs the PR base (catches the 2026-05-24
+#     failure mode: merge to main without ANALYTICS_VERSION moving)
+#   - pytest tests/v2 collect (R10 — sweet must collect with 0 errors)
+#   - probe-config sanity (12 probes, no __FILL_FROM_SOURCE__ slots,
+#     `repeat` set on P12)
+#
+# The live 12-probe run happens on the deploy host via
+# `scripts/predeploy_gate.sh` — it needs a reachable chat API, which a
+# CI runner doesn't have.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  version-bump:
+    name: Mandatory version-bump
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # We need the parent commit for `git show HEAD~1:...`.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Resolve base ref
+        id: base
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "ref=origin/${{ github.base_ref }}" >> $GITHUB_OUTPUT
+          else
+            echo "ref=HEAD~1" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check ANALYTICS_VERSION moved
+        run: |
+          python scripts/check_version_bump.py \
+            --against git --git-ref "${{ steps.base.outputs.ref }}"
+
+  probe-config-sanity:
+    name: 12-probe config sanity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pytest
+        run: pip install pytest
+      - name: Run W-18 unit tests (config shape, runner logic, version reader)
+        run: |
+          python -m pytest tests/v2/test_w18_predeploy_probe_suite.py \
+                            tests/v2/test_w18_check_version_bump.py -q
+
+  test-collect:
+    name: pytest tests/v2 collect (R10)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pytest
+        run: pip install pytest
+      - name: Collect tests/v2 (must be 0 collection errors per R10)
+        run: |
+          python -m pytest tests/v2 --collect-only -q

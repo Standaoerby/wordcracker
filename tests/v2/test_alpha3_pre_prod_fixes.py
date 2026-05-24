@@ -535,12 +535,14 @@ class CacheKey_WrapperVersionInvalidation(unittest.TestCase):
                           "v6-e22-lang-query-fix")
         # B100 title enrichment in lexical_search
         self.assertEqual(REGISTRY["lexical_search"].wrapper_version, "v2-titles")
-        # W-13 (Phase 5 P2) — find_book_by_topic latency budget (per_retriever
-        # 60→30, k=max(top*3,30)). Bump invalidates cache entries that were
-        # computed under the old slower 40-80 chunk pool. Previous version
-        # was "v3-w14-meta-blocklist" (E26 + W-14 META-title blocklist).
+        # W-14 follow-up (Phase 5 P2, 2026-05-24) — META blocklist
+        # moved pre-truncate. Cached results from v4 could carry a META-
+        # only topN when v1 ranked META above fiction (the Дракула case);
+        # bump forces recompute through the pre-trunc order. Previous
+        # versions: "v3-w14-meta-blocklist" → "v4-w13-latency-budget" →
+        # "v5-w14-pre-trunc-meta".
         self.assertEqual(REGISTRY["find_book_by_topic"].wrapper_version,
-                          "v4-w13-latency-budget")
+                          "v5-w14-pre-trunc-meta")
 
     # R-23 negative invariant — drift of the version-string FORMAT is
     # caught here without requiring this test to mirror the registry.

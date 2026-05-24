@@ -124,13 +124,27 @@ def check_wrapper_against_schema(
 # rendering hints / count-honesty signals. They are NOT part of any v1
 # contract but are tolerated in the AST scan.
 INTERNAL_V2_KEYS = frozenset({
-    "_render_note", "_threshold_auto_lowered", "_word_for_filter",
+    "_render_note", "_render_columns", "_threshold_auto_lowered",
+    "_word_for_filter",
     "top_requested", "top_returned",
     "min_corpus_count_used", "min_corpus_count_requested",
     "empty_sides", "cosine_is_structural_zero", "shared_top_words_count",
     "metric_explanations", "proper_noun_filter",
     "words",  # phase-0 alias for $s2.words[N] resolution
     "top_unique_a", "top_unique_b", "slug_a", "slug_b",
+    # W-3 (2026-05-24) — renderer-ready row lists stamped by wrappers
+    # alongside the raw v1 shape so the LLM render payload no longer
+    # has to JOIN dict-of-dicts (book_emotion) or infer per-author
+    # comparison rows from scalars (compare_authors). Drop in a
+    # frozenset entry so the contract AST validator tolerates them.
+    "entities",   # compare_authors per-author rows
+    "emotions",   # book_emotion_profile per-emotion rows
+    "side",       # entities row field (author1/author2)
+    "signature_words_count", "signature_words",
+    "per_million",  # used by book_emotion_profile row alias
+    "share",
+    "shared_high_affinity",
+    "cosine_similarity",
     # generic row-level row-builder keys
     "name", "regex", "label", "rank",
     # metric_explanations row keys (built by v2 wrapper itself)

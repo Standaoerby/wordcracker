@@ -511,5 +511,95 @@ class W1TZAcceptance(_ResolverTestBase):
         self.assertIn("Leo", d.resolved.display)
 
 
+class W1V2Rule15FirstNameFilter(_ResolverTestBase):
+    """W-1 v2 (2026-05-24) — Rule 1.5 explicit first-name filter.
+
+    Pre-W-1-v2, the filter was implicit through token_overlap scoring
+    weights + Rule 2 bypass. The user TZ direction (1) calls for an
+    EXPLICIT filter — when extras are present and exactly one
+    candidate matches, resolve regardless of string_sim / prominence /
+    threshold rules. These tests pin that semantic.
+    """
+
+    def test_filter_resolves_when_extras_uniquely_match(self):
+        # «Christopher Marlowe» — extras=('christopher',). Marlowe
+        # canonicals: Christopher / Stephen / Amy Bell. Only one
+        # contains «christopher» — must resolve directly to it via the
+        # filter, before any threshold rule fires.
+        d = resolve_v6("Christopher Marlowe")
+        self.assertEqual(d.decision, Decision.RESOLVED)
+        self.assertIn("Christopher", d.resolved.display)
+
+    def test_filter_resolves_cross_alphabet_canonical_format(self):
+        # «Дойл, Артур Конан» — Cyrillic canonical-format. mention type
+        # CANONICAL_FORMAT, extras=('артур','конан'). string_sim is 0
+        # across alphabets, but translit map lifts token_overlap on
+        # the Arthur Conan canonical to 1.0; the filter narrows to
+        # exactly one matcher → RESOLVED. Pre-W-1-v2 would only resolve
+        # via string_sim ≥ 0.5 (Rule 3), which this case never hits.
+        d = resolve_v6("Дойл, Артур Конан")
+        self.assertEqual(d.decision, Decision.RESOLVED)
+        self.assertIn("Arthur Conan", d.resolved.display)
+
+    def test_filter_resolves_charles_doyle_against_dominant_arthur(self):
+        # «Charles Doyle» — Arthur Conan dominates Doyle prominence
+        # (65k vs 200, 99% share, 325× ratio). Pre-W-1-v2, the
+        # dominance rule 4.45 fires only when top.token_overlap > 0,
+        # which Arthur Conan DOES have (false positive via translit?
+        # — no, 'charles' is Latin so no translit involved). What
+        # actually used to happen: Arthur Conan had high combined
+        # because prominence dominated; Charles had moderate combined;
+        # ratio between them was ≥ 1.5, threshold ≥ 0.55 met → Rule 6
+        # picked Arthur Conan despite user saying «Charles». Rule 1.5
+        # fixes this: extras=('charles',) → only Charles matches →
+        # RESOLVED to Charles, NOT to the prominent Arthur Conan.
+        d = resolve_v6("Charles Doyle")
+        self.assertEqual(d.decision, Decision.RESOLVED)
+        self.assertEqual(d.resolved.display, "Doyle, Charles",
+                          msg="filter must resolve to the named author, "
+                              "NOT the most prominent homonym")
+
+    def test_filter_falls_through_when_no_extras_match(self):
+        # «Tudor Marlowe» — extras=('tudor',). No Marlowe canonical
+        # contains «tudor» → filter returns empty → fall through. The
+        # resolver should NOT silently pick the most-prominent Marlowe
+        # (Christopher); it should clarify or fall to the existing
+        # path. This is the safety check that the filter doesn't break
+        # corpus-missing cases.
+        d = resolve_v6("Tudor Marlowe")
+        # Acceptable outcomes: clarify (best UX), or resolve to
+        # Marlowe-Christopher via Rule 6 (top combined wins). What's
+        # NOT acceptable: silent crash / wrong type / unresolved on
+        # an unrelated path.
+        self.assertIn(
+            d.decision,
+            (Decision.RESOLVED, Decision.CLARIFY_NEEDED),
+        )
+
+
+class W1V2Rule3CanonicalFormatWithExtras(_ResolverTestBase):
+    """W-1 v2 (2026-05-24) — Rule 3 strengthening.
+
+    Pre-fix, Rule 3 required `string_sim ≥ 0.5`. Cross-alphabet
+    canonical-format queries («Дойл, Артур Конан») never met that
+    threshold and only resolved via the new Rule 1.5 filter. These
+    tests pin Rule 3's new OR-branch: CANONICAL_FORMAT with non-empty
+    extras AND top.token_overlap > 0 → RESOLVED unconditionally.
+    """
+
+    def test_canonical_format_cross_alphabet_resolves(self):
+        # Direction (3): «формат точное совпадение и НЕ вызывает
+        # повторную дизамбигуацию» — must hold cross-alphabet too.
+        d = resolve_v6("Дойл, Артур Конан")
+        self.assertEqual(d.decision, Decision.RESOLVED)
+
+    def test_canonical_format_same_alphabet_still_resolves(self):
+        # Same-alphabet path (Rule 3 (a)) still works — regression
+        # guard for the strengthening commit.
+        d = resolve_v6("Marlowe, Christopher")
+        self.assertEqual(d.decision, Decision.RESOLVED)
+        self.assertEqual(d.resolved.display, "Marlowe, Christopher")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

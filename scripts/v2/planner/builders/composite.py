@@ -161,6 +161,36 @@ def _plan_country_vocab(e: Entities) -> QueryPlan:
     )
 
 
+_PERIOD_ANCHOR_RE = None
+
+
+def _has_explicit_period_anchor(text_lower: str) -> bool:
+    """True iff the raw query carries a specific period marker — era stem
+    (виктори/edwardian), explicit year range (1837-1901), or named century
+    (XIX/девятнадцатый/19th century).
+
+    W-11 follow-up (Phase 5 P2, 2026-05-24): bare «эпохи»/«периода» without
+    one of these markers is too vague to silently default to «викторианская
+    эпоха» (1837-1901). The period_vocab builder uses this guard to
+    smart-clarify instead of running a 50s heavy top_ngrams pass against a
+    misleading default.
+    """
+    import re
+    global _PERIOD_ANCHOR_RE
+    if _PERIOD_ANCHOR_RE is None:
+        _PERIOD_ANCHOR_RE = re.compile(
+            r"\b(виктори[аяь]н\w*|victorian|edwardian|"
+            r"эдвард(?:иан|овск)\w*|"
+            r"пред-?war|pre[- ]1900|"
+            r"XIX|XX|XVIII|XVII|"
+            r"девятнадцат\w*|двадцат\w*|восемнадцат\w*|семнадцат\w*|"
+            r"19th[\s-]centur\w*|20th[\s-]centur\w*|18th[\s-]centur\w*|"
+            r"1[5-9]\d{2}|20\d{2})\b",
+            re.IGNORECASE,
+        )
+    return bool(_PERIOD_ANCHOR_RE.search(text_lower or ""))
+
+
 def _plan_period_vocab(e: Entities) -> QueryPlan:
     text_lower = (e.raw_misc.get("raw_text") or "").lower()
     # Q38-style: «женских персонажей викторианской литературы» — gender of
@@ -179,9 +209,44 @@ def _plan_period_vocab(e: Entities) -> QueryPlan:
             ),
             explain="period_vocab + gender → no annotation",
         )
+
     yf, yt = e.year_from, e.year_to
+    # W-11 follow-up (2026-05-24) — when the user named a POS+period
+    # without a specific anchor («топ существительных эпохи»,
+    # «существительные периода»), the old default fell back to 1837-1901
+    # silently and ran a 50s heavy `top_ngrams_by_author(.*)`. Two
+    # problems: (a) the default «victorian» pick is misleading — user
+    # didn't ask for it; (b) the heavy execution blew past the 10s chat
+    # acceptance budget. Smart-clarify with a concrete recipe instead so
+    # the user can pick a period in <1s.
+    has_anchor = _has_explicit_period_anchor(text_lower)
+    if not e.author_regex and not yf and not yt and not has_anchor:
+        pos_label = (", ".join(e.pos_filter).lower() + " ("
+                     + {"NOUN": "существительные", "VERB": "глаголы",
+                        "ADJ": "прилагательные", "ADV": "наречия"}.get(
+                         (e.pos_filter or [None])[0], "слова") + ")"
+                     if e.pos_filter else "слова")
+        return QueryPlan(
+            intent="clarify", entities=e, steps=[],
+            needs_clarify=True,
+            clarify_question=(
+                f"Какой период интересует? Без конкретики я не могу "
+                f"ранжировать {pos_label} — корпус ~75k книг XV-XX веков, "
+                f"и «эпоха» здесь слишком общо.\n\n"
+                f"Уточни одной из формулировок:\n"
+                f"• «топ {pos_label} XIX века» — 1800-1899\n"
+                f"• «топ {pos_label} викторианской эпохи» — 1837-1901\n"
+                f"• «топ {pos_label} 1900-1950» — явный диапазон\n"
+                f"• «топ {pos_label} у Doyle / Dickens» — narrow by author "
+                f"(самый быстрый путь, ~2с на cached авторе)"
+            ),
+            explain="period_vocab: vague period + no author → smart-clarify",
+            authoritative_clarify=True,
+        )
+
     if not yf and not yt:
         yf, yt = 1837, 1901
+
     return QueryPlan(
         intent="period_vocab", entities=e,
         steps=[PlanStep(tool="top_ngrams_by_author",

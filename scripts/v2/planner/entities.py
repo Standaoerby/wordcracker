@@ -777,6 +777,56 @@ def _collect_surname_candidates(regex: str, *, limit: int = 5) -> list[dict]:
     ]
 
 
+def _filter_candidates_by_extras(
+    candidates: list[dict], extras: tuple[str, ...],
+) -> list[dict]:
+    """W-1 v2 (2026-05-24): used by `extract()` when v6 didn't decide
+    but the query carries a first-name hint. Keeps the same translit
+    map the v6 scorer uses so cross-alphabet hints («конан» → Conan)
+    don't get lost in the fallback.
+
+    Returns the subset of `candidates` whose `name` field contains at
+    least one `extras` token (or its transliteration / initial). Empty
+    list when no candidate matches — caller decides whether to clarify
+    on the full list or fall through.
+    """
+    if not extras or not candidates:
+        return []
+    try:
+        from scripts.v2.entity_resolver_v6.scoring import (
+            _transliterate_ru_token, _strip_punctuation,
+        )
+    except Exception:
+        # Defensive: scoring helpers always present — but never crash
+        # on import. Use trivial fallbacks (no translit / dumb strip).
+        def _transliterate_ru_token(t: str) -> str:
+            return t
+        def _strip_punctuation(s: str) -> str:
+            return s
+    out: list[dict] = []
+    for cand in candidates:
+        name = (cand.get("name") or "").lower()
+        cand_norm = _strip_punctuation(name)
+        cand_token_set = {t for t in cand_norm.split() if t}
+        cand_first_letters = {t[0] for t in cand_token_set if t}
+        for t in extras:
+            t_norm = _strip_punctuation(t.lower())
+            if not t_norm:
+                continue
+            t_translit = _transliterate_ru_token(t_norm)
+            if t_norm in cand_token_set or t_translit in cand_token_set:
+                out.append(cand)
+                break
+            if len(t_norm) >= 3 and (
+                    t_norm in cand_norm or t_translit in cand_norm):
+                out.append(cand)
+                break
+            if len(t_norm) == 1 and t_norm in cand_first_letters:
+                out.append(cand)
+                break
+    return out
+
+
 # ---------- user-upload resolver (Sprint 19+ HP fix) ----------
 # When the user uploaded a copyrighted book locally (HP / LOTR / 1984 /
 # Catcher / etc. — listed in KNOWN_BOOKS with empty PG sentinel), we
@@ -1559,10 +1609,60 @@ def extract(text: str) -> Entities:
                     for c in d.clarify_candidates
                 ]
         except Exception:
-            pass
+            # W-1 v2 (2026-05-24): a silent except here was masking the
+            # exact prod failure mode — when v6 raised for any reason,
+            # the fallback `_collect_surname_candidates` (no first-name
+            # awareness) would over-eagerly clarify on «Christopher
+            # Marlowe» / «Конан Дойла». Surface the exception via the
+            # module logger so we can SEE it next time.
+            import logging as _logging
+            _logging.getLogger(
+                "wordcracker.v2.planner.entities"
+            ).exception("resolve_v6_for_alias raised for %r", text)
         if not primary_regex_override and not author_clarify_candidates:
             try:
-                author_clarify_candidates = _collect_surname_candidates(primary_author[1])
+                # First-name-aware fallback. If v6 didn't decide but the
+                # query gives us disambiguating tokens around the alias,
+                # use them to filter the surname-candidates list. One
+                # uniquely matched candidate → resolve here; otherwise
+                # surface the full list for clarify.
+                _extras: tuple[str, ...] = ()
+                try:
+                    from scripts.v2.entity_resolver_v6.main import (
+                        _extract_extra_tokens as _v6_extract_extra_tokens,
+                    )
+                    from scripts.v2.entity_resolver_v6.normalize import (
+                        normalize_query as _v6_normalize,
+                        ru_lemmatize_author_query as _v6_lemmatize,
+                    )
+                    _norm = _v6_normalize(text)
+                    _q_lc = _norm.output
+                    _q_lem, _ = _v6_lemmatize(_q_lc)
+                    if _q_lem != _q_lc:
+                        _q_lc = _q_lem
+                    _extras = _v6_extract_extra_tokens(
+                        _q_lc, primary_author[0]
+                    )
+                except Exception:
+                    _extras = ()
+                cands = _collect_surname_candidates(primary_author[1])
+                if _extras and len(cands) >= 2:
+                    filtered = _filter_candidates_by_extras(cands, _extras)
+                    if len(filtered) == 1:
+                        # Unique first-name match — resolve to it.
+                        primary_regex_override = (
+                            f"^{filtered[0]['name']}"
+                        )
+                    elif len(filtered) >= 2:
+                        # Multiple matches — narrow the clarify list to
+                        # those that still match the user's hint.
+                        author_clarify_candidates = filtered
+                    else:
+                        # No matches — keep the unfiltered list so the
+                        # user can pick (corpus might be missing).
+                        author_clarify_candidates = cands
+                else:
+                    author_clarify_candidates = cands
             except Exception:
                 author_clarify_candidates = []
 

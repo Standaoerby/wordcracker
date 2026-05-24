@@ -33,10 +33,15 @@ from scripts.v2.contracts.schemas import (
     requires=["author", "word"],
     cost="cheap",
     cacheable=True,
-    # R-23 Tier 0 — E9 fix (snippet vs context vs text key) + B17 dedup
-    # landed without a version bump, so stale cached results from
-    # before the fixes were still being served.
-    wrapper_version="v3-phase2-contract",
+    # W-6 (2026-05-23) — normalize each sample's snippet field at the
+    # wrapper layer (was view-only). Cached pre-W-6 results still had
+    # raw v1 samples with `context` field only → LLM render saw
+    # `snippet=None` → rendered «None». Bump invalidates.
+    # W-6 follow-up (2026-05-24) — add token-set Jaccard
+    # near-duplicate dedup on top of exact dedup. Cached v4 results
+    # still carry overlapping-window pairs; bump invalidates so the
+    # follow-up filter actually fires on the next call.
+    wrapper_version="v5-phase2-contract",
 )
 @v1_contract(v1_fn="scripts.rag_tools.word_contexts",
              schema=V1WordContexts)
@@ -51,27 +56,76 @@ def word_contexts(author_regex: str, word: str, window: int = 10,
         return ToolResult.fail(tool="word_contexts", err_type="not_found",
                                message=str(raw["error"]), query=query)
     samples = (raw.get("samples") if isinstance(raw, dict) else None) or []
+    # W-6 (2026-05-23) — normalize each sample so `snippet` carries the
+    # actual text, regardless of which v1 field (`context` / `snippet` /
+    # `text`) it arrived under. The LLM render path reads `data.samples`
+    # directly, so without this every sample would carry `snippet=None`
+    # and the LLM would dutifully render «None» (Stan prod 2026-05-22
+    # «примеры heart у Дойла → 5 контекстов, текст каждого = None»).
+    # Once `snippet` is populated, `dedup_by_key(key="snippet")` actually
+    # collapses overlapping windows of the same passage instead of
+    # passing them through as «missing key → keep».
+    if samples:
+        for s in samples:
+            if not isinstance(s, dict):
+                continue
+            text = s.get("snippet") or s.get("context") or s.get("text") or ""
+            if isinstance(text, str) and text.strip():
+                s["snippet"] = text.strip()
+        # Drop samples whose snippet is still missing/blank — these would
+        # have rendered as «None» in the LLM table.
+        samples = [s for s in samples
+                   if isinstance(s, dict)
+                   and isinstance(s.get("snippet"), str)
+                   and s["snippet"].strip()]
     # Sprint 20+ B17 — multi-author word_contexts had identical snippets
     # under different PG ids (Doyle contexts 1=3, 2=4 in Stan Round 11
-    # Q30). Generic snippet dedup.
+    # Q30). Generic snippet dedup. After W-6 normalization above this
+    # actually fires (previously every row was «missing key» → no-op).
+    #
+    # W-6 follow-up (2026-05-24) — exact dedup_by_key only collapses
+    # whitespace/case duplicates. Stan «примеры heart у Дойла» kept
+    # surfacing near-duplicate pairs where two ±10-token windows
+    # bracketed the SAME sentence from opposite sides. Apply
+    # `dedup_overlapping_snippets` (token-set Jaccard ≥ 55%) on top of
+    # the exact dedup to catch those.
     dedup_dropped = 0
+    overlap_dropped = 0
     if samples:
-        from scripts.v2.tools._result_filters import dedup_by_key
+        from scripts.v2.tools._result_filters import (
+            dedup_by_key, dedup_overlapping_snippets,
+        )
         samples, dedup_dropped = dedup_by_key(samples, key="snippet")
-        if dedup_dropped and isinstance(raw, dict):
-            raw["samples"] = samples
-            raw["_filter_drops"] = {"dedup_by_key": dedup_dropped}
+        samples, overlap_dropped = dedup_overlapping_snippets(
+            samples, key="snippet")
+    if isinstance(raw, dict):
+        raw["samples"] = samples
+        if dedup_dropped or overlap_dropped:
+            # NOTE: dict-literal form (not subscript-assignment) so the
+            # AST contract checker doesn't pick up the filter-key string
+            # as a phantom v1 read.
+            raw["_filter_drops"] = {
+                "dedup_by_key": dedup_dropped,
+                "dedup_overlapping_snippets": overlap_dropped,
+            }
     warnings: list[ToolWarning] = []
     if not samples:
         warnings.append(ToolWarning(
             "no_samples", "word not found in author's corpus",
         ))
-    elif dedup_dropped:
-        warnings.append(ToolWarning(
-            "snippet_dedup",
-            f"deduped {dedup_dropped} identical snippet(s) — "
-            f"same passage indexed under multiple PG ids",
-        ))
+    else:
+        if dedup_dropped:
+            warnings.append(ToolWarning(
+                "snippet_dedup",
+                f"deduped {dedup_dropped} identical snippet(s) — "
+                f"same passage indexed under multiple PG ids",
+            ))
+        if overlap_dropped:
+            warnings.append(ToolWarning(
+                "snippet_overlap_dedup",
+                f"deduped {overlap_dropped} near-duplicate snippet(s) — "
+                f"overlapping ±N-token windows on the same passage",
+            ))
     result = ToolResult.success(
         tool="word_contexts", data=raw,
         coverage=Coverage(books_matched=len(samples), books_total=-1),
@@ -100,7 +154,8 @@ def word_contexts(author_regex: str, word: str, window: int = 10,
     cost="medium",
     cacheable=True,
     # R-23 Tier 0 — see word_contexts: same context-key fix.
-    wrapper_version="v3-phase2-contract",
+    # W-6 follow-up (2026-05-24) — overlapping-window dedup added; bump.
+    wrapper_version="v4-phase2-contract",
 )
 @v1_contract(v1_fn="scripts.rag_tools.word_contexts_global",
              schema=V1WordContextsGlobal)
@@ -113,17 +168,72 @@ def word_contexts_global(word: str, k: int = 12,
         return ToolResult.fail(tool="word_contexts_global", err_type="not_found",
                                message=str(raw["error"]), query=query)
     samples = (raw.get("samples") if isinstance(raw, dict) else None) or []
+    # W-6 (2026-05-23) — see word_contexts above. Same normalization +
+    # dedup path so the global variant doesn't leak «None» snippets to
+    # the renderer either.
+    samples, dedup_dropped = _normalize_and_dedup_samples(samples)
+    if isinstance(raw, dict):
+        raw["samples"] = samples
+        if dedup_dropped:
+            # NOTE: dict-literal form (not subscript-assignment) so the
+            # AST contract checker doesn't pick up the filter-key string
+            # as a phantom v1 read.
+            raw["_filter_drops"] = {"dedup_by_key": dedup_dropped}
+    warnings: list[ToolWarning] = []
+    if not samples:
+        warnings.append(ToolWarning("no_samples", "no contexts found"))
+    elif dedup_dropped:
+        warnings.append(ToolWarning(
+            "snippet_dedup",
+            f"deduped {dedup_dropped} identical snippet(s) across PG ids",
+        ))
     result = ToolResult.success(
         tool="word_contexts_global", data=raw,
         coverage=Coverage(books_matched=len({s.get("pg_id") for s in samples}),
                           books_total=-1),
-        warnings=[ToolWarning("no_samples", "no contexts found")]
-                 if not samples else [],
+        warnings=warnings,
         query=query,
     )
     _attach_word_contexts_view(result, samples, word=word,
                                 scope_label="весь корпус")
     return result
+
+
+def _normalize_and_dedup_samples(samples: list) -> tuple[list[dict], int]:
+    """W-6 helper — normalize the `snippet` field across heterogeneous v1
+    shapes (rag_tools uses `context`; legacy paths use `snippet`/`text`),
+    drop blank rows, and dedup by snippet text. Returns
+    (samples, total_dropped).
+
+    Two-stage dedup:
+      1. Exact dedup_by_key (lowercased / whitespace-collapsed).
+      2. dedup_overlapping_snippets (token-set Jaccard ≥ 0.55) so the
+         ±N-token windows that bracket the SAME source sentence from
+         opposite sides collapse to one — W-6 follow-up after the
+         exact-dedup didn't reach that class of duplicate.
+
+    Identity-preserved fields (pg_id, title, author) stay on the first
+    occurrence."""
+    if not samples:
+        return [], 0
+    normalized: list[dict] = []
+    for s in samples:
+        if not isinstance(s, dict):
+            continue
+        text = s.get("snippet") or s.get("context") or s.get("text") or ""
+        if not isinstance(text, str) or not text.strip():
+            continue
+        s["snippet"] = text.strip()
+        normalized.append(s)
+    if not normalized:
+        return [], 0
+    from scripts.v2.tools._result_filters import (
+        dedup_by_key, dedup_overlapping_snippets,
+    )
+    deduped, dropped_exact = dedup_by_key(normalized, key="snippet")
+    deduped, dropped_overlap = dedup_overlapping_snippets(
+        deduped, key="snippet")
+    return deduped, dropped_exact + dropped_overlap
 
 
 # =====================================================================

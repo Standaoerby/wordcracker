@@ -66,13 +66,21 @@ def decide(
     """Apply thresholds; return ResolverDecision.
 
     Decision priority (first matching rule wins):
-      1. Empty candidates → NOT_FOUND
-      2. token_overlap ≥ TOKEN_BYPASS → RESOLVED (user disambiguated)
-      3. CANONICAL_FORMAT + string_sim ≥ floor → RESOLVED
-      4. Single candidate → RESOLVED
-      5. combined < CLARIFY_FLOOR → NOT_FOUND
-      6. combined ≥ RESOLVE_THRESHOLD AND ratio ≥ RATIO_THRESHOLD → RESOLVED
-      7. Otherwise → CLARIFY_NEEDED with top 5
+      1.  Empty candidates → NOT_FOUND
+      1.5 First-name filter (W-1 v2): when user supplied disambiguating
+          tokens and mention isn't bare SURNAME_ONLY, restrict candidates
+          to those whose canonical name actually contains the extras.
+          One matcher → RESOLVED. Several matchers → continue with only
+          matchers. No matcher → fall through unchanged.
+      2.  token_overlap ≥ TOKEN_BYPASS → RESOLVED (user disambiguated)
+      3.  CANONICAL_FORMAT + (extras OR string_sim ≥ floor) → RESOLVED
+      4.  Single candidate → RESOLVED
+      4.45 Dominant homonym (≥90% share or ≥10× ratio) → RESOLVED
+      4.5 SURNAME_ONLY w/ multiple cands → CLARIFY_NEEDED
+      4.6 RU_STEM with dominant prominence → RESOLVED
+      5.  combined < CLARIFY_FLOOR → NOT_FOUND
+      6.  combined ≥ RESOLVE_THRESHOLD AND ratio ≥ RATIO_THRESHOLD → RESOLVED
+      7.  Otherwise → CLARIFY_NEEDED with top 5
     """
     if not scored:
         return ResolverDecision(
@@ -83,6 +91,50 @@ def decide(
             mention=mention,
             all_scores=[],
         )
+
+    # Rule 1.5 — First-name filter (W-1 v2, 2026-05-24).
+    # When user provided disambiguating tokens (mention.extra_tokens)
+    # AND mention is not a bare SURNAME_ONLY, RESTRICT candidates to
+    # those that actually contain at least one extra. This is an
+    # explicit filter (not just up-weight) per TZ §W-1 direction (1):
+    # «резолв учитывает заданное имя/инициалы и фильтрует кандидатов».
+    #
+    # SURNAME_ONLY is excluded because by definition it has no extras
+    # — leave it to Rule 4.5 (UX clarify on bare surname).
+    #
+    # Behaviour:
+    #   - exactly 1 matcher → RESOLVED (the user uniquely identified
+    #     one canonical), even when string_sim is low (cross-alphabet)
+    #   - 2+ matchers      → continue with matchers as `scored`, so
+    #                        every downstream rule (Rule 2 bypass, Rule
+    #                        4.45 dominance, Rule 7 clarify) operates
+    #                        on the relevant subset; clarify list will
+    #                        no longer include candidates the user
+    #                        explicitly excluded by giving a first name
+    #   - 0 matchers       → fall through unchanged (corpus may not
+    #                        contain the named author; let downstream
+    #                        decide clarify vs not_found)
+    filter_applied = False
+    if (mention.extra_tokens
+            and mention.type != MentionType.SURNAME_ONLY):
+        matchers = [s for s in scored if s.token_overlap > 0]
+        if len(matchers) == 1:
+            top_m = matchers[0]
+            return ResolverDecision(
+                decision=Decision.RESOLVED,
+                resolved=top_m.candidate,
+                confidence=top_m.combined,
+                reason=(
+                    f"first-name filter unique match "
+                    f"extras={list(mention.extra_tokens)} "
+                    f"(combined={top_m.combined:.2f})"
+                ),
+                mention=mention,
+                all_scores=scored,
+            )
+        if len(matchers) >= 2:
+            scored = matchers
+            filter_applied = True
 
     top = scored[0]
     runner_up = scored[1] if len(scored) > 1 else None
@@ -99,18 +151,41 @@ def decide(
             all_scores=scored,
         )
 
-    # Rule 3 — CANONICAL_FORMAT direct resolve
-    if (mention.type == MentionType.CANONICAL_FORMAT
-            and top.string_sim >= CANONICAL_STRING_FLOOR):
-        return ResolverDecision(
-            decision=Decision.RESOLVED,
-            resolved=top.candidate,
-            confidence=top.combined,
-            reason=f"canonical_format string_sim={top.string_sim:.2f} "
-                   f"(user wrote canonical form)",
-            mention=mention,
-            all_scores=scored,
-        )
+    # Rule 3 — CANONICAL_FORMAT direct resolve.
+    # User wrote «Surname, FirstName» — the canonical form is the
+    # strongest possible signal. Resolve when EITHER:
+    #   (a) string_sim ≥ floor (same-alphabet match), or
+    #   (b) extras present AND top.token_overlap > 0 (cross-alphabet
+    #       transliteration covers the gap, e.g. «Дойл, Артур Конан»
+    #       where Cyrillic surface tokens never Jaccard-match Latin
+    #       canonicals but the translit map lifts token_overlap).
+    # Per TZ §W-1 direction (3): «формат точное совпадение и НЕ
+    # вызывает повторную дизамбигуацию».
+    if mention.type == MentionType.CANONICAL_FORMAT:
+        if top.string_sim >= CANONICAL_STRING_FLOOR:
+            return ResolverDecision(
+                decision=Decision.RESOLVED,
+                resolved=top.candidate,
+                confidence=top.combined,
+                reason=f"canonical_format string_sim={top.string_sim:.2f} "
+                       f"(user wrote canonical form)",
+                mention=mention,
+                all_scores=scored,
+            )
+        if mention.extra_tokens and top.token_overlap > 0:
+            return ResolverDecision(
+                decision=Decision.RESOLVED,
+                resolved=top.candidate,
+                confidence=top.combined,
+                reason=(
+                    f"canonical_format with extras="
+                    f"{list(mention.extra_tokens)} "
+                    f"(token_overlap={top.token_overlap:.2f}, "
+                    f"string_sim={top.string_sim:.2f} translit gap)"
+                ),
+                mention=mention,
+                all_scores=scored,
+            )
 
     # Rule 4 — single candidate
     if runner_up is None:

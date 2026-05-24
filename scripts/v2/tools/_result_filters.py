@@ -103,11 +103,29 @@ _NULL_AUTHOR_TOKENS = frozenset({
     # Project Gutenberg housekeeping artifacts that occasionally
     # surface as «authors» when metadata join misfires.
     "project gutenberg", "gutenberg",
+    "project gutenberg literary archive foundation",
     # Common publisher / society aggregate entries
     "publishers' weekly", "publisher's weekly",
     "american mathematical society",
     "royal society",
     "national geographic society",
+    # W-4 reconciliation (2026-05-24) — additional aggregate buckets
+    # that surface in token-volume topcharts:
+    "world bank",
+    "united nations",
+    "u.s. patent office", "us patent office", "patent office",
+    "smithsonian astrophysical observatory",
+    "national bureau of standards",
+    "geological survey",
+    "u.s. geological survey", "us geological survey",
+    "american library association",
+    "modern language association",
+    "encyclopaedia britannica",  # also caught by «encyclop» substring
+    "various", "various contributors",
+    "editors of the encyclopaedia britannica",
+    "compiled",                  # «Compiled, » author cell from PG
+    "selected",                  # «Selected, » prefix
+    "translator",                # rare «Translator, » metadata noise
 })
 
 # Phase 3 W-4 — substrings that, if present anywhere in the author field,
@@ -145,6 +163,18 @@ _NULL_AUTHOR_SUBSTRINGS: tuple[str, ...] = (
     "office of strategic",
     # Generic publisher-aggregate buckets that masquerade as authors
     "various authors", "anonymous",
+    # W-4 reconciliation (2026-05-24) — additional substrings observed
+    # in PG metadata aggregates that escape the token set:
+    "literary archive foundation",
+    "patent office",
+    "geological survey",
+    "office of the secretary",
+    "national bureau",
+    "encyclopaedia",     # «Editors of the Encyclopaedia Britannica»
+    "encyclopedia",
+    "joint chiefs of staff",
+    "bureau of the census",
+    "census bureau",
 )
 
 
@@ -273,6 +303,96 @@ def dedup_by_key(rows: list[dict], *, key: str = "snippet",
             continue
         seen.add(norm)
         out.append(r)
+    return out, len(rows) - len(out)
+
+
+# ---------- near-duplicate (overlapping-window) snippet dedup ----------
+
+# Tokenizer for snippet shingles — keep alphanumerics, lowercase, split
+# on everything else. Apostrophes inside words preserved so «don't»
+# stays one token.
+_SNIPPET_TOKEN_RE = re.compile(r"[A-Za-zА-Яа-яЁё0-9']+")
+
+
+def _snippet_token_set(text: str) -> frozenset[str]:
+    if not isinstance(text, str):
+        return frozenset()
+    toks = _SNIPPET_TOKEN_RE.findall(text.lower())
+    # Drop very short / numeric-only tokens — they're noise (articles,
+    # numbers) that inflate Jaccard scores on unrelated passages.
+    return frozenset(t for t in toks if len(t) >= 3 and not t.isdigit())
+
+
+def dedup_overlapping_snippets(
+    rows: list[dict], *,
+    key: str = "snippet",
+    threshold: float = 0.45,
+) -> Tuple[list[dict], int]:
+    """W-6 (2026-05-24) — collapse near-duplicate snippets that overlap
+    on the same source sentence.
+
+    Stan prod 2026-05-22 «примеры heart у Дойла»: after dedup_by_key
+    fired the exact dups, the surviving samples still contained pairs
+    like ctx1 = «...his heart was heavy with the news he had to deliver»
+    and ctx2 = «with the news he had to deliver. His heart pounded
+    against his ribs» — two ±10-token windows on the *same paragraph*
+    that the rag retriever surfaced separately because the windows
+    happen to bracket the same target word from opposite sides.
+    dedup_by_key (exact match) can't catch this; we need overlap.
+
+    Token-set Jaccard ≥ `threshold` → treat as duplicate. Default 0.45
+    was tuned empirically against Stan's prod windows: ±10-token
+    windows around the same target on a 25-token sentence share ~50%
+    content tokens (≈6 / 12) after short-stopword pruning. A lower
+    bound at 0.45 catches that class without false-collapsing two
+    genuinely different snippets that incidentally share «heart, the,
+    his» (Jaccard ~0.1).
+
+    Order is preserved; the FIRST occurrence wins (matches dedup_by_key
+    semantics so downstream callers don't have to think about it).
+
+    Tokens shorter than 3 chars and bare digits are excluded from the
+    set so short stopwords/numeric noise don't drive the score.
+
+    Skips rows missing the key (consistent with dedup_by_key).
+    """
+    if not rows:
+        return rows, 0
+    if threshold <= 0 or threshold > 1:
+        # Defensive: out-of-range threshold disables the filter rather
+        # than ValueError-ing inside a render-path helper.
+        return rows, 0
+    out: list[dict] = []
+    kept_sets: list[frozenset[str]] = []
+    for r in rows:
+        v = r.get(key) if isinstance(r, dict) else None
+        if not isinstance(v, str) or not v.strip():
+            out.append(r)
+            kept_sets.append(frozenset())
+            continue
+        tok = _snippet_token_set(v)
+        if not tok:
+            out.append(r)
+            kept_sets.append(tok)
+            continue
+        duplicate = False
+        for prev in kept_sets:
+            if not prev:
+                continue
+            inter = len(tok & prev)
+            if inter == 0:
+                continue
+            union = len(tok | prev)
+            if union == 0:
+                continue
+            jacc = inter / union
+            if jacc >= threshold:
+                duplicate = True
+                break
+        if duplicate:
+            continue
+        out.append(r)
+        kept_sets.append(tok)
     return out, len(rows) - len(out)
 
 
@@ -457,6 +577,7 @@ __all__ = [
     "apply_filters",
     "dedup_book_editions",
     "dedup_by_key",
+    "dedup_overlapping_snippets",
     "drop_iso_language_codes",
     "drop_null_authors",
     "drop_short_consonant_clusters",

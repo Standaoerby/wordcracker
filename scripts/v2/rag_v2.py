@@ -98,7 +98,32 @@ RENDER_PROMPT = """Тебя зовут {name}. Ты — литературный
     - Если array пустой (n=0) — НЕ строй пустую таблицу, скажи «список пустой».
     - Если array из 1-2 объектов — можно текстом или mini-table; выбирай по читабельности.
 
-Tool trace тебе передан как JSON. Каждая запись — {{tool, query, data, warnings, coverage}}. Возьми оттуда factual content. **Ничего вне этих данных.**"""
+19. **Скрывать колонки без данных (W-3, 2026-05-23).** Колонка таблицы либо заполнена реальным значением, либо её НЕТ в выводе. Если у тебя в данных все строки имеют отсутствующее / None / пустое значение для какого-то поля — НЕ добавляй колонку с этим полем. Не пиши столбец, где у всех строк «—». Пейлоад уже отнормирован: если ключ X отсутствует у всех строк — он удалён до тебя; ты НЕ должен его восстанавливать «логически» (типа «может быть, есть IPA — добавлю пустую колонку IPA»). Колонка показывается тогда и только тогда, когда хотя бы у одной строки есть конкретное значение. Per-row «—» в смешанной колонке допустим (честное «нет данных по ячейке»), а целая колонка «—» — запрещена.
+
+20. **Антивыдумка фактов (W-7, 2026-05-23, ужесточено 2026-05-24).** Это правило сильнее всех остальных. ЛЮБОЕ из перечисленного НИЖЕ ДОЛЖНО присутствовать буквально в `tool_results[*].data` (или его вложенных полях) — иначе ты пишешь «не указано в данных» и НЕ выдумываешь:
+    - **Числа и счёты** — количество книг/слов/упоминаний/частот/процентов/рейтингов/дистанций/индексов.
+    - **Годы** — рождения, смерти, публикации, любые даты. Stan prod-bug 2026-05-22: рендер написал «год смерти Marlowe 2008» — чистая галлюцинация, в data нет death_year. Правильно: «год смерти не указан в данных».
+    - **ID** — PG-id (PG1342), U-id (U7), ISBN, любые идентификаторы. Не «PG12345 — Crime and Punishment», если PG12345 не в matches/data.
+    - **Имена** — авторов, книг, персонажей, мест. Не упоминай «The Bookbinder's Apprentice», если этого названия нет в matches/data. Не упоминай «Watson», если он не появился в snippets/contexts.
+    - **Координаты, ссылки, URL** — только из data.
+
+    **Anti-knowledge clause (КРИТИЧНО):** Это правило **перекрывает** твои общие знания об авторах и произведениях. Даже если ты ТОЧНО знаешь из обучения, что Christopher Marlowe умер в 1593, а в data только `birth_year: 1564` — пиши «год смерти не указан в данных». Даже если ты знаешь, что у Толстого ≈90 томов академического собрания, а в data `books_in_corpus: 47` — пиши **47** и только 47. Знание-из-обучения для тебя сейчас как факт о соседе: «может, правда, может, нет, проверить нечем». Только tool_results — истина.
+
+    **Протокол генерации факта.** Прежде чем написать любое число/год/id/имя:
+    1. Найди его конкретно в `tool_results[*].data` (включая вложенные структуры).
+    2. Если нашёл — пиши **буквально** (округление только явное: «47, около 50»).
+    3. Если НЕ нашёл — пиши «не указано в данных» / «нет в выдаче» / «коrпус не показывает». НЕ подставляй число из «общих знаний», НЕ оставляй пустое поле, НЕ выдумывай похожее.
+    4. Если в сомнении «было ли это в data» — считай «не было», действуй по п.3.
+
+    Конкретные исторические Stan-class фабрикации (которых быть не должно):
+    - «год смерти Marlowe 2008» — 2008 не из data, верный ответ «не указано».
+    - «1000 книг у Marlowe» — в data `books_in_corpus: 200`, верный ответ «200 книг».
+    - «PG12345 = Crime and Punishment» — PG12345 не из matches.
+    - «прочитанные слова: factory, machine, smoke, …» когда tool вернул только factory.
+
+    Critic и numeric_audit ловят часть этих случаев пост-фактум, но пользователь уже видит ложь. Лучше написать «не указано в данных» сразу.
+
+Tool trace тебе передан как JSON. Каждая запись — {{tool, query, data, warnings, coverage}}. Возьми оттуда factual content. **Ничего вне этих данных.** Помни: «не указано в данных» — это **полноценный честный ответ**, а не пробел, который надо заполнить из своих знаний."""
 
 
 # ---------- Sprint 14: LLM-fallback entity merge ----------
@@ -371,6 +396,147 @@ def _collect_render_instructions(results: list[ToolResult]) -> list[str]:
     return notes
 
 
+# W-3 (2026-05-23) — empty-column normalization for the LLM render payload.
+#
+# Cross-cutting prod bug: tools emit list-of-dict rows where some columns
+# are None across ALL rows (e.g. `npmi` when metric=count; `translation_ru`
+# when learning_words ran without enrichment; `cosine_similarity` when v1
+# didn't compute). The LLM, following RENDER_PROMPT rule 18 («array of
+# similar dicts → table»), faithfully renders every key as a column —
+# including the all-None ones, which show up as a column of «—» cells.
+#
+# RENDER_PROMPT rule 19 tells the LLM to hide such columns; this helper
+# enforces it deterministically by stripping all-empty keys from the rows
+# BEFORE sending. The LLM never sees the key, so it cannot render it.
+#
+# Per-row «—» (some rows have the value, some don't) is still allowed and
+# rendered honestly. Only the «entire column is empty» case is stripped.
+#
+# Identity fields (`pg_id`, `id`, `title`, `author`, `word`, `lemma`,
+# `name`, `slug`, `regex`) are protected — they're always meaningful even
+# when missing, and stripping them would break the LLM's understanding of
+# what each row represents.
+
+_IDENTITY_KEYS_NEVER_STRIP = frozenset({
+    "pg_id", "id", "uid", "u_id",
+    "title", "book_title", "name", "author", "author_canonical",
+    "word", "lemma", "token", "ngram",
+    "rank", "position", "emotion", "kind", "label", "key",
+    "regex", "slug", "scope_label",
+})
+
+# Some list-keys carry rows we definitely want to normalize. Others
+# (matches sets, system fields) we leave alone. The walker is conservative:
+# it only normalizes lists where every element is a dict — opaque lists
+# pass through untouched.
+
+
+def _is_value_empty(v) -> bool:
+    """True iff `v` should be considered «no data» for column-hiding."""
+    if v is None:
+        return True
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return True
+        if s.lower() == "none":
+            return True
+        return False
+    if isinstance(v, (list, dict)):
+        return not v
+    # numbers (incl. 0), bools — meaningful, not empty
+    return False
+
+
+def _strip_empty_keys_from_rows(rows: list[dict]) -> list[dict]:
+    """Drop keys that are empty across ALL rows. Returns NEW row dicts
+    (does not mutate originals). Identity keys are never stripped."""
+    if not rows:
+        return rows
+    # Only operate on lists of homogeneous dicts. Otherwise pass through.
+    if not all(isinstance(r, dict) for r in rows):
+        return rows
+    # Build the union of keys actually appearing across rows.
+    all_keys: set[str] = set()
+    for r in rows:
+        all_keys.update(r.keys())
+    drop: set[str] = set()
+    for k in all_keys:
+        if k in _IDENTITY_KEYS_NEVER_STRIP:
+            continue
+        if k.startswith("_"):
+            # Internal markers (e.g. _word_for_filter) — pass through;
+            # they're stripped at the json.dumps layer if needed.
+            continue
+        # Hide the key iff every row has an «empty» value for it.
+        if all(_is_value_empty(r.get(k)) for r in rows):
+            drop.add(k)
+    if not drop:
+        return rows
+    return [{k: v for k, v in r.items() if k not in drop} for r in rows]
+
+
+def _normalize_data_for_render(data):
+    """Walk a tool's `data` dict, strip all-empty columns from any
+    list-of-dict it carries. Returns a NEW dict (deep-ish copy — lists
+    are rebuilt, leaves shared). Non-dict input passes through.
+
+    The walk is shallow on purpose: tools put their rows directly under
+    top-level keys (`top`, `samples`, `matches`, `top_collocates`,
+    `top_unique_a/b`, `timeline`, `series`, `emotions`, ...). Deep
+    recursion would over-fit and could touch fields the LLM relies on
+    (e.g. nested `author1.top_unique`).
+
+    Exception: compare_authors nests `top_unique` inside `author1` /
+    `author2` dicts. We descend one level into dict-valued keys and
+    apply the row-strip there too."""
+    if not isinstance(data, dict):
+        return data
+    out: dict = {}
+    for k, v in data.items():
+        if isinstance(v, list) and v and all(isinstance(x, dict) for x in v):
+            out[k] = _strip_empty_keys_from_rows(v)
+        elif isinstance(v, dict):
+            # Descend one level — covers compare_authors-style nesting
+            # where author1/author2 wraps the actual row list.
+            inner: dict = {}
+            for ik, iv in v.items():
+                if (isinstance(iv, list) and iv
+                        and all(isinstance(x, dict) for x in iv)):
+                    inner[ik] = _strip_empty_keys_from_rows(iv)
+                else:
+                    inner[ik] = iv
+            out[k] = inner
+        else:
+            out[k] = v
+    return out
+
+
+def _normalize_payload_tool_results(summary_payload: dict) -> dict:
+    """Apply `_normalize_data_for_render` to every entry in
+    `summary_payload['tool_results']`. Returns a NEW summary_payload;
+    the original (and the underlying ToolResult.data) is not mutated.
+
+    Called from `_llm_render` right before the JSON serialise step.
+    Tested via test_render_payload_normalize.py."""
+    if not isinstance(summary_payload, dict):
+        return summary_payload
+    tr = summary_payload.get("tool_results")
+    if not isinstance(tr, list):
+        return summary_payload
+    new_tr = []
+    for entry in tr:
+        if not isinstance(entry, dict):
+            new_tr.append(entry)
+            continue
+        e2 = dict(entry)
+        e2["data"] = _normalize_data_for_render(entry.get("data"))
+        new_tr.append(e2)
+    out = dict(summary_payload)
+    out["tool_results"] = new_tr
+    return out
+
+
 # Sprint 18 — retrieval source logging. Which tools surface ranked
 # chunks/books that go into the renderer prompt → log them so we can
 # diagnose «модель плохо ответила» vs «ей дали мусор» separately.
@@ -606,6 +772,14 @@ def _llm_render(question: str, plan: plan_mod.QueryPlan,
         ],
     }
 
+    # W-3 (2026-05-23) — strip all-empty columns from tool_results before
+    # the LLM sees them. RENDER_PROMPT rule 19 reinforces this on the
+    # model side; this pre-pass guarantees it deterministically (the LLM
+    # cannot render a column for a key it never received). Applied BEFORE
+    # the token budget shrink so size estimates reflect what actually
+    # ships. See _normalize_payload_tool_results docstring for scope.
+    summary_payload = _normalize_payload_tool_results(summary_payload)
+
     # Sprint 22+ alpha5 — Token Budget Layer. Adaptive shrink before
     # send to Ollama. Replaces alpha4 hard-capped _truncate_for_render
     # which used magic numbers irrespective of actual ctx pressure.
@@ -766,6 +940,67 @@ def _v5_envelope_extras(envelope, *, intent_label: str | None = None,
 # ---------- Render dispatcher ----------
 
 
+_CONTENT_LIST_KEYS = (
+    "matches", "samples", "top", "rows", "results",
+    "candidates", "items", "series", "timeline",
+    "top_collocates", "top_unique_a", "top_unique_b",
+    "top_authors", "top_books", "top_words",
+)
+
+# Diagnostic / metadata fields that should NOT make a result count as
+# «has useful data» by themselves. If a tool returned ONLY these keys
+# with no real payload, the friendly-error guard should still fire.
+_METADATA_KEYS = frozenset({
+    "query", "word", "author_regex", "scope", "scope_label",
+    "k", "k_rrf", "top_requested", "lexical_n", "semantic_n",
+    "min_corpus_count", "total_occurrences", "reranked_by",
+    "lang", "language", "intent",
+})
+
+
+def _has_useful_data(r: ToolResult) -> bool:
+    """A ToolResult is renderable when it succeeded AND its payload
+    actually carries content the renderer can talk about.
+
+    The renderer-fail path historically lit up when EVERY result was
+    `ok=False` (network errors, etc) — `_friendly_render_error` is the
+    right answer there. But Stan's «примеры слова factory» case is
+    subtler: `hybrid_search` returned `data={'matches':[], 'lexical_n':0,
+    'semantic_n':0}` (ok-True with an empty bag) and the LLM, faced
+    with an envelope it couldn't render, dumped the JSON literal back
+    into chat. Treat «empty matches» as the same failure class so the
+    friendly path catches it too.
+    """
+    if not r.ok or r.data is None:
+        return False
+    data = r.data
+    if isinstance(data, dict):
+        # If the payload declares a collection key, its (non-)emptiness
+        # is the verdict — don't let diagnostic scalars mask an empty
+        # matches bag. Stan «factory» case: matches=[] with lexical_n=0
+        # used to slip past the scalar check below and ship the empty
+        # envelope to the LLM.
+        for k in _CONTENT_LIST_KEYS:
+            if k in data:
+                v = data.get(k)
+                return isinstance(v, list) and bool(v)
+        # Scalar-bearing tools (book_readability, find_book,
+        # enrich_word, word_etymology) — any non-metadata, non-empty
+        # scalar counts. Use `is`-checks to keep numeric 0 / False
+        # from counting as «empty» (a Flesch score of 0 is real).
+        for k, v in data.items():
+            if k.startswith("_") or k in _METADATA_KEYS:
+                continue
+            if v is None:
+                continue
+            if isinstance(v, (str, list, dict, tuple)) and not v:
+                continue
+            return True
+        return False
+    # Non-dict payloads (rare; e.g. plain str) — keep if truthy.
+    return bool(data)
+
+
 def _dispatch_render(
     question: str,
     plan: plan_mod.QueryPlan,
@@ -777,14 +1012,45 @@ def _dispatch_render(
 ) -> tuple[str, dict]:
     """Single render path: `_llm_render` (RENDER_PROMPT + free-form LLM).
 
+    W-6 follow-up (2026-05-24) — guard against the «raw JSON in chat»
+    failure mode (Stan «примеры слова factory» prod): when no tool
+    returned usable rows, short-circuit to `_friendly_render_error`
+    instead of pushing the empty/errored payload through the LLM.
+    qwen3:14b on a bare error envelope frequently dumped the JSON
+    literal back into the answer; the friendly path produces a clean
+    Russian sentence + whatever partial data exists.
+
     Phase 1 (2026-05-22) — the v5 typed renderer / prose-binder branches
     (gated WC_V5_RENDERER / WC_V5_PROSE, never on in prod) were deleted.
     No alternative renderer to dispatch to."""
+    if results and not any(_has_useful_data(r) for r in results):
+        # Build a synthetic exception so `_friendly_render_error` can
+        # pick a human-readable lead. Prefer the first concrete tool
+        # error message — falls back to a generic phrase if every
+        # result was a bare empty.
+        reason = None
+        for r in results:
+            if r.error and r.error.message:
+                reason = f"{r.tool}: {r.error.message}"
+                break
+        if reason is None:
+            reason = ("инструменты вернулись без данных по этому "
+                      "запросу")
+        err = _ToolPipelineEmpty(reason)
+        meta = {"fallback_reason": "tools_returned_no_data"}
+        return _friendly_render_error(err, results), meta
     return _llm_render(
         question, plan, results,
         model=model, ollama_host=ollama_host,
         history=history,
     )
+
+
+class _ToolPipelineEmpty(Exception):
+    """Sentinel exception fed to `_friendly_render_error` when the
+    tool pipeline produced no usable rows. The friendly handler reads
+    the message to pick a lead line — keep it short and in Russian."""
+    pass
 
 
 # ---------- ask() — non-streaming ----------
@@ -1740,6 +2006,15 @@ def _short_render_error_message(err: Exception) -> str:
     """Translate a renderer exception into a human-readable one-liner
     suitable for an SSE `error` event."""
     name = type(err).__name__
+    # W-6 follow-up (2026-05-24) — tool-pipeline returned nothing
+    # usable. The synthetic _ToolPipelineEmpty is raised by
+    # `_dispatch_render` before the LLM gets a chance to dump raw
+    # JSON. Surface a friendly Russian phrasing instead.
+    if isinstance(err, _ToolPipelineEmpty):
+        return ("По этому запросу инструменты не вернули данных — "
+                "возможно, слово/автор не нашлись в корпусе, либо "
+                "сервис поиска не отозвался. Попробуй переформулировать "
+                "или сузить запрос.")
     # Specific friendly variants
     msg = str(err).lower()
     if "timeout" in msg or "timed out" in msg or "readtimeout" in msg:
@@ -1756,27 +2031,89 @@ def _short_render_error_message(err: Exception) -> str:
 
 
 def _friendly_render_error(err: Exception, results: list[ToolResult]) -> str:
-    """Build a user-facing answer string when the renderer LLM fails.
+    """Build a user-facing answer string when the renderer LLM fails OR
+    when the tool pipeline returned nothing usable.
 
-    Surfaces a friendly Russian message + a summary of the tool results
-    that DID succeed, so the user sees value even when Ollama is down.
+    W-6 follow-up (2026-05-24) — previous implementation called
+    `to_llm_string()` on each result and pasted JSON straight into the
+    chat. That IS the «raw JSON in chat» bug Stan reported
+    («примеры слова factory» 2026-05-22). The render path is for
+    end users, not log inspection. Now: short Russian lead + a tight,
+    tool-aware bullet list (counts / warnings / error.message), with
+    NO JSON dump regardless of payload shape.
     """
     short = _short_render_error_message(err)
     lines: list[str] = [f"⚠️ **{short}**", ""]
-    ok_results = [r for r in results if r.ok and r.data]
-    if ok_results:
-        lines.append("Я успел вызвать инструменты ниже — данные есть, но "
-                     "сформулировать связный ответ не получилось:")
-        lines.append("")
-        for r in ok_results[:5]:  # cap at 5 to keep output tractable
-            summary = r.to_llm_string(max_chars=400)
-            lines.append(f"**{r.tool}** — {summary}")
-            lines.append("")
-    else:
+    if not results:
+        # Nothing else to say — but keep the historical «инструменты тоже
+        # не дали» line so callers (test_alpha3_pre_prod_fixes) and users
+        # see explicit acknowledgement that no fallback data is available.
         lines.append("К сожалению, инструменты тоже не дали полезных "
                      "данных. Возможно, запрос невалидный — "
                      "попробуй переформулировать.")
+        return "\n".join(lines).strip()
+
+    ok_with_data = [r for r in results if _has_useful_data(r)]
+    if ok_with_data:
+        lines.append("Я успел вызвать инструменты ниже — данные собраны, "
+                     "но сформулировать связный ответ не получилось:")
+        lines.append("")
+        for r in ok_with_data[:5]:
+            lines.append(f"- **{r.tool}** — {_tool_data_brief(r)}")
+        lines.append("")
+        lines.append("_Попробуй задать вопрос ещё раз — обычно второй прогон "
+                     "проходит чище._")
+        return "\n".join(lines).strip()
+
+    # No usable data — surface the concrete tool-side reason if any.
+    failed = [r for r in results if not r.ok]
+    if failed:
+        lines.append("Что произошло по инструментам:")
+        lines.append("")
+        for r in failed[:5]:
+            reason = (r.error.message if r.error and r.error.message
+                      else "вернулся без данных")
+            # Trim to one short clause; never JSON-dump the details.
+            reason_short = str(reason).strip().splitlines()[0][:200]
+            lines.append(f"- **{r.tool}** — {reason_short}")
+        lines.append("")
+    lines.append("Попробуй переформулировать запрос или сузить его.")
     return "\n".join(lines).strip()
+
+
+def _tool_data_brief(r: ToolResult) -> str:
+    """One-line plain-Russian summary of what a tool result carries.
+
+    Used by `_friendly_render_error` to mention partial successes
+    without leaking JSON. Looks at common list-of-rows keys and reports
+    a count; falls back to a count of populated top-level fields.
+    """
+    data = r.data if isinstance(r.data, dict) else None
+    if data is None:
+        return "данные есть, но в нестандартной форме"
+    for key, label in (
+        ("matches", "найдено совпадений"),
+        ("samples", "сниппетов"),
+        ("top", "записей в топе"),
+        ("rows", "строк"),
+        ("results", "результатов"),
+        ("candidates", "кандидатов"),
+        ("items", "элементов"),
+        ("series", "точек ряда"),
+        ("timeline", "точек таймлайна"),
+        ("top_collocates", "коллокатов"),
+    ):
+        v = data.get(key)
+        if isinstance(v, list):
+            return f"{label}: {len(v)}"
+    # Scalar-payload tools (enrich_word, find_book, book_readability) —
+    # name a couple of present fields.
+    present = [k for k, v in data.items()
+               if not k.startswith("_")
+               and v not in (None, "", [], {})]
+    if present:
+        return f"поля: {', '.join(present[:6])}"
+    return "данные есть, но пустые"
 
 
 _INTRO_PATH = Path(__file__).parent / "intro_text.md"

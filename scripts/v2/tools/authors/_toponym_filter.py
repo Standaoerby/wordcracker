@@ -162,6 +162,27 @@ _CURATED_TOPONYMS: frozenset[str] = frozenset({
 _GEO_NER_LABELS = frozenset({"GPE", "LOC", "FAC"})
 
 
+# Default location where NER-enriched affinity CSVs live in production.
+# Layout: `<author_slug>_affinity_ner.csv`. Built offline by
+# `scripts/ner_filter_affinity.py`. Missing dir → curated-only mode.
+_DEFAULT_NER_DIR = Path("/workspace/spgc/derived")
+
+# mtime-keyed cache so the directory scan doesn't repeat per request.
+_NER_CACHE: dict = {"blocklist": None, "stamps": None}
+
+
+def _discover_ner_csv_paths(ner_dir: Path | None = None) -> list[Path]:
+    """Glob `<dir>/*_affinity_ner.csv`. Returns [] when dir missing —
+    we never crash on a fresh deploy without NER enrichment."""
+    d = ner_dir or _DEFAULT_NER_DIR
+    if not d or not d.exists() or not d.is_dir():
+        return []
+    try:
+        return sorted(d.glob("*_affinity_ner.csv"))
+    except OSError:
+        return []
+
+
 def is_toponym(word: str) -> bool:
     """True iff `word` is a known toponym from the curated list.
 
@@ -177,14 +198,35 @@ def is_toponym(word: str) -> bool:
 def toponym_blocklist(ner_csv_paths: list[Path] | None = None) -> frozenset[str]:
     """Union of curated toponyms + (optional) NER-derived GPE/LOC surfaces.
 
-    `ner_csv_paths` — list of `*_affinity_ner.csv` files (see
-    `scripts/ner_filter_affinity.py`). If provided, rows with
-    `ner_label in {GPE, LOC, FAC}` contribute their lowercased word to
-    the blocklist. Missing files are silently skipped — production
-    deployments may not have run NER enrichment yet.
+    `ner_csv_paths` — explicit list of `*_affinity_ner.csv` files. If
+    None, auto-discover from `_DEFAULT_NER_DIR` (production layout). If
+    [], use curated only. Rows with `ner_label in {GPE, LOC, FAC}` from
+    the discovered/passed files contribute their lowercased word to the
+    blocklist; missing files are silently skipped — fresh deployments
+    may not have run the NER enrichment job yet.
+
+    The discovered-paths case is mtime-cached so we don't re-scan every
+    request: a changed CSV invalidates the cache automatically when its
+    stat().st_mtime moves.
     """
+    if ner_csv_paths is None:
+        # Auto-discover + mtime cache. Cheap: stat() on a handful of files.
+        paths = _discover_ner_csv_paths()
+        stamps = tuple((str(p), p.stat().st_mtime) for p in paths
+                       if p.exists())
+        if _NER_CACHE["blocklist"] is not None and _NER_CACHE["stamps"] == stamps:
+            return _NER_CACHE["blocklist"]
+        out = _read_blocklist(paths)
+        _NER_CACHE["blocklist"] = out
+        _NER_CACHE["stamps"] = stamps
+        return out
+    # Explicit paths — no cache (tests pass synthetic paths).
+    return _read_blocklist(list(ner_csv_paths))
+
+
+def _read_blocklist(paths: list[Path]) -> frozenset[str]:
     out = set(_CURATED_TOPONYMS)
-    for p in (ner_csv_paths or []):
+    for p in paths:
         if not p or not p.exists():
             continue
         try:
@@ -227,4 +269,6 @@ __all__ = [
     "is_toponym",
     "toponym_blocklist",
     "_CURATED_TOPONYMS",
+    "_DEFAULT_NER_DIR",
+    "_discover_ner_csv_paths",
 ]

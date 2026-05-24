@@ -16,6 +16,7 @@ from scripts.v2._types import Coverage, ToolResult, ToolWarning
 from scripts.v2.tools.authors._surname_filter import filter_surnames
 from scripts.v2.tools.authors._corpus_artifacts import filter_corpus_artifacts
 from scripts.v2.tools.authors._toponym_filter import filter_toponyms
+from scripts.v2.tools.authors._propn_dominance import filter_propn_dominance
 from scripts.v2.contracts import v1_contract
 from scripts.v2.contracts.schemas import V1AffinityByAuthor, V1CompareAuthors
 
@@ -146,7 +147,15 @@ def _drop_author_self_name(author_regex: str, words: list[dict]) -> list[dict]:
     # blocklist (wegg/smike/toots/jip/etc) and PROPN blacklist. Bumping
     # wrapper_version invalidates cached results that still carry
     # «burger»/«uitlanders»/Boer-war GPE leakage at Doyle.
-    wrapper_version="v3-phase3-toponym",
+    # W-4 reconciliation (2026-05-24) — added generic PROPN-affinity
+    # dominance heuristic (`filter_propn_dominance`) so rare character /
+    # place names not in the curated blocklist still get caught when
+    # their shape (high affinity + low corpus_count + high exclusivity)
+    # matches a proper-noun dominator. Auto-discover NER GPE/LOC CSVs
+    # so the production blocklist enrichment kicks in without per-call
+    # paths. Bumping wrapper_version invalidates cached rows from
+    # before the heuristic landed.
+    wrapper_version="v4-w4-propn-dominance",
 )
 @v1_contract(v1_fn="scripts.rag_tools.affinity_by_author",
              schema=V1AffinityByAuthor)
@@ -207,12 +216,20 @@ def affinity_by_author(author_regex: str, top: int = 50,
         # lowercased tokens misses them; curated blocklist catches the
         # 19th-c. literary toponym set deterministically.
         rows, toponym_dropped = filter_toponyms(rows)
-        if lit_dropped or surname_dropped or artifact_dropped or toponym_dropped:
+        # W-4 (2026-05-24) — generic PROPN-affinity dominance heuristic.
+        # Catches rare proper nouns NOT in any curated blocklist when
+        # their (high affinity, low corpus_count, high exclusivity) shape
+        # matches a character / minor-place name. Runs LAST so curated
+        # filters get the first pass and the heuristic only sees survivors.
+        rows, propn_dom_dropped = filter_propn_dominance(rows)
+        if (lit_dropped or surname_dropped or artifact_dropped
+                or toponym_dropped or propn_dom_dropped):
             note = (raw.get("proper_noun_filter") or "") if isinstance(raw, dict) else ""
             extra = (f"; v2 literary blacklist dropped {lit_dropped}, "
                       f"v2 surname blocklist dropped {surname_dropped}, "
                       f"v2 corpus-artifact filter dropped {artifact_dropped}, "
-                      f"v2 toponym filter dropped {toponym_dropped}")
+                      f"v2 toponym filter dropped {toponym_dropped}, "
+                      f"v2 propn-dominance heuristic dropped {propn_dom_dropped}")
             if isinstance(raw, dict):
                 raw["proper_noun_filter"] = (note + extra).lstrip("; ")
         # Propagate the filtered list back so the LLM renders only
@@ -382,9 +399,13 @@ def affinity_by_author(author_regex: str, top: int = 50,
     # are now reliably non-empty. Bump to invalidate single-retry cache.
     # E18 (2026-05-22) — E15 added _normalize_compare_shape (nested
     # author1/author2 → flat top_unique_a/b). Phantom burrows_delta
-    # field also dropped. Bump invalidates old cached results that had
-    # flat shape mismatches.
-    wrapper_version="v5-phase2-contract",
+    # field also dropped.
+    # W-3 (2026-05-24) — wrapper now also exposes `raw["entities"]` as
+    # a per-author row list so the LLM-render «Сравнение» table reads
+    # cosine_similarity / shared_high_affinity directly per row (E38
+    # «—»-in-every-cell symptom). Bump invalidates cached results that
+    # lacked the `entities` key.
+    wrapper_version="v6-w3-compare-entities",
 )
 @v1_contract(v1_fn="scripts.rag_tools.compare_authors",
              schema=V1CompareAuthors)
@@ -556,6 +577,38 @@ def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
               "scale": "0+; integer",
               "interpret": "0 shared between distinct genres is normal"},
         ])
+        # W-3 (2026-05-24) — expose a flat per-author `entities` row list
+        # so the LLM render payload has the same shape the typed-view
+        # template uses. Without this, the LLM was inferring a panel
+        # from `cosine_similarity` scalar + `shared_high_affinity` list
+        # + `top_unique_a/b` and frequently rendered «Cosine
+        # Similarity» / «Shared High Affinity» columns with «—» on
+        # every row (E38 prod symptom). With the row list present, the
+        # «Сравнение» table reads each row's `cosine_similarity` and
+        # `shared_high_affinity` directly.
+        cosine_val = raw.get("cosine_similarity")
+        shared_n_for_rows = len(raw.get("shared_high_affinity") or [])
+        author1_name = author1_regex.lstrip("^").rstrip(",").strip()
+        author2_name = author2_regex.lstrip("^").rstrip(",").strip()
+        entities_rows: list[dict] = []
+        for label, name, words_key, regex in (
+                ("author1", author1_name, "top_unique_a", author1_regex),
+                ("author2", author2_name, "top_unique_b", author2_regex)):
+            words = raw.get(words_key) or []
+            signature = [
+                (w.get("word") if isinstance(w, dict) else str(w))
+                for w in words[:30]
+            ]
+            entities_rows.append({
+                "name": name,
+                "regex": regex,
+                "side": label,
+                "cosine_similarity": cosine_val,
+                "shared_high_affinity": shared_n_for_rows,
+                "signature_words_count": len(signature),
+                "signature_words": signature,
+            })
+        raw["entities"] = entities_rows
     # Phase 2 — v1 compare_authors does NOT expose flat books_a/b
     # (V1CompareAuthors contract). Books are buried in the inner
     # affinity_by_author calls and not re-exported. Use -1 (unknown).

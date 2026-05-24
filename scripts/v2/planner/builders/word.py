@@ -70,14 +70,35 @@ def _plan_word_contexts(e: Entities) -> QueryPlan:
     # Renderer must surface ALL surviving facets (skip facets that are
     # genuinely missing — softdegrade-with-note, per Phase 6 view
     # contract — but never silently drop a populated facet).
+    #
+    # W-10 follow-up (2026-05-24) — Stan prod «что значит "ajar"»: the
+    # ETYMOLOGY_BUNDLE landed with translation + pos + definition but
+    # ipa=None and family_chain=[] (v1 enrich path doesn't always fill
+    # them for low-frequency English words). Add `word_etymology` as
+    # an optional parallel step — its `family_chain` covers the
+    # etymology slot when enrich_word leaves it empty. Both tools
+    # share the Wiktionary cache so the second call is ~ms; total
+    # wall-clock impact is bounded.
     notes = [
         "Это запрос о слове («что значит X» / «meaning of X» style). "
         "Бандл объединяет: hybrid_search (корпус-сниппеты с title для "
         "каждого) + enrich_word (translation_ru, ipa, pos, definition_en, "
-        "family_chain). В финальном ответе ОБЯЗАТЕЛЬНО покажи все "
-        "доступные фасеты: перевод, IPA, POS, определение, этимология, "
-        "2-3 корпус-сниппета с названиями книг. Если фасет реально пуст "
-        "в данных — напиши «не указано», но НЕ замалчивай его наличием.",
+        "family_chain) + word_etymology (family_chain fallback). "
+        "В финальном ответе ОБЯЗАТЕЛЬНО покажи все доступные фасеты в "
+        "одном связном блоке: \n"
+        "  • перевод (translation_ru)\n"
+        "  • IPA / транскрипция (ipa)\n"
+        "  • часть речи (pos)\n"
+        "  • определение (definition_en)\n"
+        "  • 2-3 корпус-сниппета с НАЗВАНИЯМИ КНИГ (matches[].title) — "
+        "    book title рядом с цитатой обязателен.\n"
+        "  • этимология (family_chain ИЛИ primary_family из ЛЮБОГО "
+        "    из двух tool'ов: enrich_word / word_etymology — берём то, "
+        "    которое не пустое).\n"
+        "Если конкретный фасет реально пуст в данных — пиши «IPA: "
+        "не указано» / «этимология не извлеклась» одной строкой, "
+        "не повторяй disclaimer'ом, и НЕ опускай молча. Остальные "
+        "фасеты при этом остаются — мягкая деградация, не all-or-nothing.",
     ]
     return QueryPlan(
         intent="word_contexts", entities=e,
@@ -86,11 +107,14 @@ def _plan_word_contexts(e: Entities) -> QueryPlan:
             PlanStep(tool="enrich_word",
                      args={"word": e.word, "target_lang": "ru"},
                      optional=True),
+            PlanStep(tool="word_etymology", args={"word": e.word},
+                     optional=True),
         ],
         expected_cost="medium",
         explain=(f"hybrid_search({e.word}, lang={e.lang_hint or '*'}) "
                  f"— FTS5+Chroma RRF + BGE rerank, "
                  f"+ enrich_word parallel (translation+IPA+POS+etymology) "
+                 f"+ word_etymology parallel (etymology fallback) "
                  f"— W-10 composite word bundle"),
         render_notes=notes,
     )
@@ -358,6 +382,31 @@ def _plan_word_etymology(e: Entities) -> QueryPlan:
         # snippets with titles). Both optional alongside the headline
         # etymology call — if Wiktionary is offline or no corpus hits,
         # the etymology answer still lands.
+        #
+        # W-10 follow-up (2026-05-24) — Stan prod «этимология engine»
+        # surfaced only family_chain because the renderer over-weighted
+        # the intent label and ignored enrich_word / hybrid_search
+        # results that DID land. Add explicit render_notes telling the
+        # LLM to weave ALL facets into one paragraph + corpus snippets
+        # with book titles, instead of «etymology only».
+        notes = [
+            "Это запрос об этимологии слова, но ответ должен быть "
+            "БАНДЛОМ, а не только цепочкой families. Объедини в одном "
+            "связном блоке все доступные фасеты:\n"
+            "  • этимология — family_chain / primary_family из "
+            "    word_etymology ИЛИ enrich_word (то, что не пустое).\n"
+            "  • перевод (translation_ru)\n"
+            "  • IPA / транскрипция (ipa)\n"
+            "  • часть речи (pos)\n"
+            "  • определение (definition_en)\n"
+            "  • 2-3 корпус-сниппета с НАЗВАНИЯМИ КНИГ "
+            "    (matches[].title — title book обязателен рядом с "
+            "    цитатой).\n"
+            "Если конкретный фасет действительно пуст в данных — "
+            "пиши «не указано» одной строкой, остальные фасеты ПОКАЖИ. "
+            "Не all-or-nothing: мягкая деградация одного слота не "
+            "снимает обязательство показать остальные.",
+        ]
         return QueryPlan(
             intent="word_etymology", entities=e,
             steps=[
@@ -375,6 +424,7 @@ def _plan_word_etymology(e: Entities) -> QueryPlan:
             explain=(f"word_etymology({e.word}) + enrich_word({e.word}) + "
                      f"hybrid_search({e.word}, k=6) parallel — full W-10 "
                      f"bundle (etymology + translation/IPA/POS + corpus)"),
+            render_notes=notes,
         )
     return QueryPlan(
         intent="clarify", entities=e, steps=[],

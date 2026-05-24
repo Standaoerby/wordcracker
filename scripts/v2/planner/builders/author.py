@@ -24,6 +24,56 @@ from scripts.v2.planner.builders.book import (
 )
 
 
+# Phase 5 W-5 (2026-05-24) — country tokens recognized for the
+# author_compare → country_compare redirect. Mirrors the entity
+# extractor's COUNTRY_ALIASES coverage but keyed by canonical 2-letter
+# code so we can count distinct countries in one pass. Latin tokens
+# require word boundaries (avoid «german» inside «germanic»); Cyrillic
+# stems substring-match for natural RU morphology.
+_COUNTRY_PROBE_TOKENS: dict[str, str] = {
+    "британск": "GB", "english": "GB", "english-language": "GB",
+    "english language": "GB", "english-speaking": "GB",
+    "english speaking": "GB",
+    "british": "GB", "англия": "GB", "english-language\\b": "GB",
+    "uk": "GB", "брит": "GB", "английск": "GB", "gb": "GB",
+    "американск": "US", "american": "US", "американ": "US",
+    "usa": "US", "us": "US", "amer": "US",
+    "русск": "RU", "russian": "RU", "russia": "RU",
+    "французск": "FR", "french": "FR", "франция": "FR",
+    "немецк": "DE", "german": "DE", "germany": "DE",
+}
+
+
+def _query_mentions_two_countries(text: str) -> bool:
+    """W-5 (2026-05-24) — count distinct country codes named in the
+    raw query text. Used by `_plan_author_compare` to detect a
+    «compare two-countries» phrasing that the entity extractor
+    surfaced only one country for (it returns the FIRST match, not
+    the full set).
+
+    Returns True iff ≥2 distinct country codes are mentioned.
+    """
+    if not text:
+        return False
+    import re as _re
+    s = text.lower()
+    seen: set[str] = set()
+    for token, code in _COUNTRY_PROBE_TOKENS.items():
+        # Cyrillic / non-ASCII stem — substring match (covers
+        # «русск-ий / русск-ого / русск-ие»).
+        if any(ord(ch) > 127 for ch in token):
+            if token in s:
+                seen.add(code)
+            continue
+        # Latin alias — require word boundary so «german» doesn't
+        # match inside «germanic».
+        if _re.search(rf"\b{_re.escape(token)}\b", s):
+            seen.add(code)
+        if len(seen) >= 2:
+            return True
+    return len(seen) >= 2
+
+
 def _plan_top_authors(e: Entities) -> QueryPlan:
     # Honor `top_metric` when user said «по скачиваниям» / «по токенам».
     # Default falls back to «books». Stan's 2026-05-18 demon caught this:
@@ -166,6 +216,20 @@ def _plan_author_compare(e: Entities) -> QueryPlan:
         if books_count >= 2:
             from scripts.v2.planner.builders.book import _plan_book_compare
             return _plan_book_compare(e)
+        # Phase 5 W-5 (2026-05-24) — «compare British and American X»
+        # surfaces as author_compare in the intent classifier when the
+        # English-only country regex didn't catch (covered in
+        # country_compare rule), but if a single country is extracted
+        # AND the query carries a paired-country signal in the raw
+        # text, redirect to country_compare instead of clarify-bounce.
+        # The text-side check picks up the OTHER country adjective the
+        # entity extractor didn't keep (we only carry one `country`
+        # field today). Closes the W-5 «односторонний список» complaint
+        # for compare queries that talk about 2 countries.
+        if e.country and _query_mentions_two_countries(
+                (e.raw_misc or {}).get("raw_text", "")):
+            from scripts.v2.planner.builders.composite import _plan_country_compare
+            return _plan_country_compare(e)
         return QueryPlan(
             intent="clarify", entities=e, steps=[],
             needs_clarify=True,

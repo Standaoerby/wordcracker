@@ -27,6 +27,30 @@ from scripts.v2.contracts import v1_contract
 from scripts.v2.contracts.schemas import V1WordCollocates
 
 
+# W-15 (2026-05-24) — defense-in-depth at the v2 wrapper layer.
+# v1 STOPWORDS (~70 tokens) doesn't include obvious high-rank fillers
+# like off/under/there/all/one. v1 now also filters against
+# _HIGH_FREQ_NEIGHBOR_DROP (rag_tools.py:2033), but the v2 wrapper
+# repeats the check so that:
+#   1) stale cache entries written before the v1 fix get re-filtered
+#      on read (cache key is wrapper_version-scoped);
+#   2) we never re-leak when v1 contract drifts.
+# Import lazily to avoid circular and to pick up live v1 updates.
+def _wrapper_stopword_set() -> frozenset[str]:
+    try:
+        from scripts.rag_tools import STOPWORDS, _HIGH_FREQ_NEIGHBOR_DROP
+        return frozenset(STOPWORDS) | frozenset(_HIGH_FREQ_NEIGHBOR_DROP)
+    except Exception:
+        # Dev box without rag_tools — fallback to the minimal set that
+        # covers the W-15 prod report (off/all/under/there/one).
+        return frozenset({
+            "the", "a", "an", "of", "and", "to", "in", "is", "it",
+            "off", "all", "under", "there", "one", "also", "even",
+            "very", "much", "many", "more", "most", "some", "any",
+            "back", "way", "first", "last", "every", "another",
+        })
+
+
 @tool(
     name="word_collocates",
     category="words",
@@ -55,7 +79,10 @@ from scripts.v2.contracts.schemas import V1WordCollocates
     # (which were dominated by stop-words like «the/of/and» even with
     # exclude_stopwords on). Bump wrapper_version so old npmi=None rows
     # in cache get recomputed.
-    wrapper_version="v3-w15-npmi-default",
+    # W-15 polish (2026-05-24) — wrapper-level stopword filter added
+    # (defense-in-depth over v1 _HIGH_FREQ_NEIGHBOR_DROP). Bump again
+    # so cached top-lists carrying off/under/there get invalidated.
+    wrapper_version="v4-w15-extended-stopwords",
 )
 @v1_contract(v1_fn="scripts.rag_tools.word_collocates",
              schema=V1WordCollocates)
@@ -88,6 +115,24 @@ def word_collocates(scope, word: str, window: int = 4, top: int = 20,
     # Phase 2 — V1WordCollocates canonical key is `top_collocates`
     # (rag_tools.py:1083). The pre-contract fallback to `top` is gone.
     rows = (raw.get("top_collocates") if isinstance(raw, dict) else None) or []
+
+    # W-15 polish (2026-05-24) — wrapper-level stopword filter. Drops
+    # rows whose `word` is in the v1 STOPWORDS ∪ _HIGH_FREQ_NEIGHBOR_DROP
+    # union BEFORE NPMI scoring, so the scoring budget isn't spent on
+    # tokens the user will never want to see (off/under/there/all/one)
+    # and so the count-only fallback path (no marginals) also stays
+    # clean. Skipped when exclude_stopwords=False (caller explicitly
+    # asked for the raw window).
+    if exclude_stopwords:
+        _drop = _wrapper_stopword_set()
+        target_lc = (word or "").strip().lower()
+        rows = [r for r in rows
+                if isinstance(r, dict)
+                and (r.get("word") or "").strip().lower() not in _drop
+                and (r.get("word") or "").strip().lower() != target_lc
+                and len((r.get("word") or "").strip()) >= 2]
+        if isinstance(raw, dict):
+            raw["top_collocates"] = rows
     # Phase 2 — v1 word_collocates does NOT return books_capped /
     # books_total (only scope, word, window, total_occurrences,
     # books_with_hits, top_collocates per V1WordCollocates). Previous

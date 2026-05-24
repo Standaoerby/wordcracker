@@ -255,6 +255,54 @@ def _looks_like_followup(text: str) -> bool:
                 or _is_affirmative_opener_followup(text))
 
 
+# W-1 v2 (2026-05-24): canonical-format reply to author-clarify.
+# Match queries like «Marlowe, Christopher», «Doyle, Arthur Conan»,
+# «Wells, H. G. (Herbert George)». Surname is a single token, then
+# comma, then space, then first/middle name token(s). Used to detect
+# when the user is replying to «Под фамилией «X» в корпусе несколько
+# авторов. Кого ты имеешь в виду? … Уточни — например, «Doyle, Arthur
+# Conan»» — without this hook the bare reply slid past
+# `_looks_like_followup` and the planner asked «не уверен, что ты
+# имеешь в виду» — a UX loop the W-1 spec explicitly calls out.
+_CANONICAL_AUTHOR_REPLY_RE = re.compile(
+    r"^\s*([A-Za-zЀ-ӿ'][A-Za-zЀ-ӿ'-]{1,49})\s*,\s+"
+    r"([A-Za-zЀ-ӿ'][A-Za-zЀ-ӿ'. -]{1,99})\s*[.!?]?\s*$",
+)
+
+
+# Heuristic: prior assistant message looks like an author-clarify if it
+# contains the canonical clarify phrasing emitted by
+# `_ambiguous_author_clarify`. Robust to minor wording changes — the
+# distinctive substring «Под фамилией» is unique to this clarify path.
+_AUTHOR_CLARIFY_PRIOR_RE = re.compile(
+    r"под\s+фамилией|"
+    r"в\s+корпусе\s+несколько\s+авторов|"
+    r"кого\s+ты\s+имеешь\s+в\s+виду",
+    re.IGNORECASE,
+)
+
+
+def _is_canonical_author_reply_to_clarify(
+    text: str, history: list[dict] | None,
+) -> bool:
+    """True iff `text` is a bare «Surname, FirstName» reply AND the
+    immediately preceding assistant turn was an author-clarify. Both
+    conditions matter — without the history check, an out-of-the-blue
+    «Marlowe, Christopher» (fresh first-turn query) shouldn't inherit
+    a random prior intent.
+    """
+    if not text or not history:
+        return False
+    if not _CANONICAL_AUTHOR_REPLY_RE.match(text.strip()):
+        return False
+    for msg in reversed(history):
+        if msg.get("role") == "assistant":
+            content = (msg.get("content") or "").strip()
+            return bool(_AUTHOR_CLARIFY_PRIOR_RE.search(content))
+        # Ignore non-assistant entries while walking back
+    return False
+
+
 def _is_context_swap(text: str) -> bool:
     """True iff this is an author/book swap follow-up («теперь у X»,
     «а у X»). Used to inherit prior intent while overriding entities
@@ -470,6 +518,26 @@ def infer_followup_intent(text: str,
     их по количеству упоминаний» after a fresh `affinity_by_author` table
     used to clarify-out.
     """
+    # W-1 v2 (2026-05-24) — canonical-format reply to author-clarify.
+    # «Marlowe, Christopher» / «Doyle, Arthur Conan» as a bare turn
+    # right after an ambiguous-surname clarify must REPLAY the prior
+    # non-clarify intent. Without this hook the reply slid past
+    # `_looks_like_followup` and the planner asked «не уверен, что ты
+    # имеешь в виду» — exactly the loop W-1 was meant to close.
+    # Handled BEFORE `_looks_like_followup` because the canonical-form
+    # reply has no referring particles / affirmatives — it's just an
+    # author name.
+    if _is_canonical_author_reply_to_clarify(text, history):
+        from scripts.v2.planner.intent import classify as _classify
+        for msg in reversed(history):
+            if msg.get("role") != "user":
+                continue
+            prior_intent = _classify(msg.get("content") or "")
+            if prior_intent.label not in ("clarify", ""):
+                return prior_intent.label
+        # Fall through if no prior non-clarify user turn — caller will
+        # use the default clarify path.
+
     if not _looks_like_followup(text):
         return None
     if _RERANK_PATTERNS.search(text) and history:

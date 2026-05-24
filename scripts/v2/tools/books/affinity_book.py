@@ -17,6 +17,8 @@ from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
 from scripts.v2.tools.authors._surname_filter import filter_surnames
 from scripts.v2.tools.authors._corpus_artifacts import filter_corpus_artifacts
+from scripts.v2.tools.authors._toponym_filter import filter_toponyms
+from scripts.v2.tools.authors._propn_dominance import filter_propn_dominance
 from scripts.v2.contracts import v1_contract
 from scripts.v2.contracts.schemas import V1AffinityByBook
 
@@ -48,7 +50,12 @@ from scripts.v2.contracts.schemas import V1AffinityByBook
     # new retry-step-down logic. Bumping wrapper_version invalidates all
     # stale empty entries; first request after deploy fully re-runs v1
     # with the retry helper.
-    wrapper_version="v4-phase2-contract",
+    # W-4 (2026-05-24) — added toponym + PROPN-dominance filters (parity
+    # with affinity_by_author). Book-scope signature words leaked the
+    # same toponym / character-name classes (Baskerville moor place
+    # names, Hound character surnames). Bumping invalidates cached rows
+    # that still carry them.
+    wrapper_version="v5-w4-toponym-propn",
 )
 @v1_contract(v1_fn="scripts.learning_tools.affinity_by_book",
              schema=V1AffinityByBook)
@@ -112,6 +119,12 @@ def affinity_by_book(pg_id: str, top: int = 50,
     if rows:
         rows, surname_dropped = filter_surnames(rows)
         rows, artifact_dropped = filter_corpus_artifacts(rows)
+        # W-4 (2026-05-24) — parity with affinity_by_author. Book-scope
+        # signature words have the same leak vector: toponym names
+        # (Dartmoor, Grimpen for Baskervilles) and minor character
+        # surnames not in the curated set surface here too.
+        rows, toponym_dropped = filter_toponyms(rows)
+        rows, propn_dom_dropped = filter_propn_dominance(rows)
         if isinstance(raw, dict):
             raw["top"] = rows
             notes = []
@@ -121,6 +134,12 @@ def affinity_by_book(pg_id: str, top: int = 50,
             if artifact_dropped:
                 notes.append(f"v2 corpus-artifact filter dropped "
                               f"{artifact_dropped} markup tokens (e.g. xvth)")
+            if toponym_dropped:
+                notes.append(f"v2 toponym filter dropped {toponym_dropped} "
+                              f"GPE/LOC place names")
+            if propn_dom_dropped:
+                notes.append(f"v2 propn-dominance heuristic dropped "
+                              f"{propn_dom_dropped} rare PROPN dominators")
             if notes:
                 prev = raw.get("_render_note", "")
                 raw["_render_note"] = (prev + " " + "; ".join(notes)).strip()

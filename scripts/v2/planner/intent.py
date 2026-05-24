@@ -934,6 +934,45 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"\b(общие|общая|пересечен\w+)\s+(фирменн\w+\s+)?"
          r"(слов|лексик|вокабуляр)"),
      "author_vocab", 0.85),
+    # Phase 5 W-5 (2026-05-24) — «у X и Y какие слова / какая лексика» and
+    # «какие слова у X и Y» — natural Russian genitive «у автор/-ов»
+    # framings the explicit-trigger rules above miss. Anchor on «слова»
+    # / «лексик» / «вокабуляр» near «у <NAME>» which the entity
+    # extractor already pulls multi_author_regex from. Routes to
+    # author_vocab — fan_out invariant then clones the affinity step.
+    # Confidence 0.78 — below the explicit «фирменные / характерные»
+    # rules (0.85) but above noisy clarify fall-through.
+    (_re(r"\bу\s+[A-ZА-ЯЁ]\w+\s+(и|и\s+|,\s*)\s*"
+         r"[A-ZА-ЯЁ]\w+.{0,30}\b(слов\w*|лексик\w+|вокабуляр\w*)\b"),
+     "author_vocab", 0.78),
+    (_re(r"\b(какие|чьи|какая|whose)\s+(слов\w*|лексик\w+|вокабуляр\w*)"
+         r".{0,30}\bу\s+[A-ZА-ЯЁ]\w+\s+(и|,\s*)\s*[A-ZА-ЯЁ]"),
+     "author_vocab", 0.78),
+    # Phase 5 W-5 — «у X и Y что страшнее / что мрачнее / что эмоциональнее»
+    # multi-author emotional contrast. Routes to word_emotion which fan-outs
+    # by author. Specific emotion («страшн / тревожн / мрачн») biases
+    # toward fear-bucket but the renderer surfaces whichever bucket
+    # emotion_collocates returns.
+    (_re(r"\bу\s+[A-ZА-ЯЁ]\w+\s+и\s+[A-ZА-ЯЁ]\w+"
+         r".{0,30}\b(что|у\s+кого)\s+"
+         r"(страшн\w+|мрачн\w+|тревожн\w+|зловещ\w*|эмоцион\w+)"),
+     "word_emotion", 0.85),
+    (_re(r"\b(что|у\s+кого)\s+(страшн\w+|мрачн\w+|тревожн\w+|зловещ\w*)"
+         r".{0,30}\bу\s+[A-ZА-ЯЁ]\w+\s+(и|,\s*)\s*[A-ZА-ЯЁ]"),
+     "word_emotion", 0.85),
+    # Phase 5 W-5 — «кто пишет проще / сложнее: X или Y» natural multi-author
+    # readability question. Routes to author_compare which surfaces
+    # author_metadata + compare_authors (no per-author readability tool
+    # exists yet; renderer can compare lex_div as a proxy). Distinct from
+    # book_readability_compare (which needs books, not authors).
+    (_re(r"\bкто\s+(пиш\w+|пиш\w+\s+\w+|читается)\s+"
+         r"(проще|сложнее|труднее|легче|архаичнее|современнее|"
+         r"богаче|разнообразнее|проще\s+всего|сложнее\s+всего)\b"
+         r".{0,30}[:?]?\s*[A-ZА-ЯЁ]\w+\s+(или|и|vs)\s+[A-ZА-ЯЁ]"),
+     "author_compare", 0.85),
+    (_re(r"\bу\s+кого\s+\w*\s*(больше|меньше|сложнее|проще|архаичнее)"
+         r".{0,30}\bу\s+[A-ZА-ЯЁ]\w+\s+(или|и)\s+[A-ZА-ЯЁ]"),
+     "author_compare", 0.82),
     (_re(r"\bcommon\s+(signature\s+)?words?\b"), "author_vocab", 0.85),
     (_re(r"\bчто\s+общего\s+у\s+[A-ZА-Я]"), "author_vocab", 0.8),
     (_re(r"\b(intersection|shared)\s+of\s+(signature\s+)?(words?|vocabulary)"),
@@ -1294,17 +1333,26 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     # user saw a clarify-bounce. The pattern requires both adjective
     # stems + a compare verb («сравни / compare») + a nominal target
     # («автор / литератур / корпус / писател / книг»).
+    #
+    # Phase 5 W-5 (2026-05-24) — symmetric country alternation. Previous
+    # version of country2 lacked plain English `american\w*`, so a fully
+    # English compare query («compare British and American authors»)
+    # OR a Russian-verb + English-adjective query («сравни British и
+    # American авторов») dropped into author_compare with 0 steps. Also
+    # added bare country codes (GB/US/UK) for codes-only phrasings
+    # («compare GB and US writers»), and `или / or` as a connector
+    # alongside `и / and`.
     (_re(r"\b(сравни\w*|compare)\b.{1,40}"
-         r"\b(британск\w*|american\w*|brit\w*|"
+         r"\b(британск\w*|american\w*|brit\w*|british\w*|"
          r"русск\w*|русских|french|французск\w*|"
-         r"немецк\w*|german)\w*\b.{1,40}"
-         r"\b(и|and|with|против|vs|versus)\b.{1,40}"
-         r"\b(американск\w*|brit\w*|британск\w*|"
+         r"немецк\w*|german|gb|uk|us|usa)\w*\b.{1,40}"
+         r"\b(и|или|and|or|with|против|vs|versus)\b.{1,40}"
+         r"\b(американск\w*|american\w*|brit\w*|british\w*|британск\w*|"
          r"русск\w*|french|французск\w*|"
-         r"немецк\w*|german)\w*\b.{0,60}"
-         r"\b(автор\w*|writer\w*|писател\w*|"
+         r"немецк\w*|german|gb|uk|us|usa)\w*\b.{0,60}"
+         r"\b(автор\w*|author\w*|writer\w*|писател\w*|"
          r"литератур\w*|literature|корпус\w*|corpus|"
-         r"книг\w*|book|произведен\w*|works?)"),
+         r"книг\w*|book|произведен\w*|works?|novels?|poets?|поэт\w*)"),
      "country_compare", 0.93),
 
     # ===== country_vocab =====
@@ -1363,6 +1411,37 @@ RULES: list[tuple[Pattern[str], str, float]] = [
          r"прилагательн\w+|adjectives?|"
          r"глагол\w+|verbs?)\b"),
      "period_vocab", 0.86),
+    # W-11 follow-up (Phase 5 P2, 2026-05-24) — POS-anchored generic-period
+    # queries. «топ существительных XIX века», «топ существительных эпохи»,
+    # «существительные периода», «топ-100 прилагательных столетия». The
+    # earlier W-11 rules require either an era stem (виктори*/edwardian) OR
+    # an explicit year range like «1837-1901». Phrasings with bare period
+    # words («эпохи», «периода», «века», «столети», «XIX»/«XX») fell to
+    # clarify → LLM-fallback 50s parse-fail.
+    #
+    # The two orderings cover both POS-first («топ существительных XIX
+    # века») and period-first («XIX века существительные»). Pattern
+    # tightened to avoid colliding with author_vocab — POS noun + era word
+    # is the strong signal; we don't fire on bare «эпохи» alone.
+    (_re(r"\b(топ\s*-?\s*\d*\s*)?"
+         r"(существительн\w+|nouns?|"
+         r"прилагательн\w+|adjectives?|"
+         r"глагол\w+|verbs?|"
+         r"наречи\w+|adverbs?|"
+         r"слов\w*|words?|vocab\w*)\b"
+         r".{0,40}\b(эпох\w+|период\w+|века|столети\w+|"
+         r"XIX|XX|XVIII|XVII|"
+         r"19th[\s-]centur\w*|20th[\s-]centur\w*|18th[\s-]centur\w*|"
+         r"18\d\d-?х|19\d\d-?х|1[5-9]\d\d-х)\b"),
+     "period_vocab", 0.82),
+    (_re(r"\b(эпох\w+|период\w+|столети\w+|"
+         r"XIX|XX|XVIII|XVII|"
+         r"19th[\s-]centur\w*|20th[\s-]centur\w*|18th[\s-]centur\w*)\b"
+         r".{0,40}\b(существительн\w+|nouns?|"
+         r"прилагательн\w+|adjectives?|"
+         r"глагол\w+|verbs?|наречи\w+|adverbs?|"
+         r"слов\w*|words?|vocab\w*)\b"),
+     "period_vocab", 0.82),
     (_re(r"женск\w+\s+персонаж\w*|female characters?"), "period_vocab", 0.85),
 
     # ===== vocab_passport =====

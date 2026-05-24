@@ -22,6 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.v2.tools.authors._toponym_filter import (
     _CURATED_TOPONYMS,
+    _DEFAULT_NER_DIR,
+    _discover_ner_csv_paths,
     filter_toponyms,
     is_toponym,
     toponym_blocklist,
@@ -29,6 +31,13 @@ from scripts.v2.tools.authors._toponym_filter import (
 from scripts.v2.tools.authors._surname_filter import (
     _CURATED_CHARACTER_SURNAMES,
     filter_surnames,
+)
+from scripts.v2.tools.authors._propn_dominance import (
+    DEFAULT_AFFINITY_THRESHOLD,
+    DEFAULT_CORPUS_RARITY_CAP,
+    DEFAULT_EXCLUSIVITY_RATIO,
+    filter_propn_dominance,
+    is_propn_dominator,
 )
 from scripts.v2.tools._result_filters import (
     _NULL_AUTHOR_SUBSTRINGS,
@@ -346,6 +355,241 @@ class AffinityFilterChainIntegration(unittest.TestCase):
         # Note string explains every filter
         note = data.get("proper_noun_filter") or ""
         self.assertIn("toponym filter", note)
+
+
+# ---------------------------------------------------------------------------
+# W-4 reconciliation (2026-05-24) — extras
+# ---------------------------------------------------------------------------
+
+
+class NerCsvAutoDiscovery(unittest.TestCase):
+    """toponym_blocklist with ner_csv_paths=None should auto-discover
+    `*_affinity_ner.csv` under the default NER dir and enrich the
+    curated set with GPE/LOC surfaces."""
+
+    def test_default_ner_dir_is_known_path(self):
+        # Sanity — we centralised the location, not scattered it.
+        self.assertEqual(_DEFAULT_NER_DIR.name, "derived")
+
+    def test_discover_returns_empty_when_dir_missing(self):
+        # Fresh dev machine has no NER dir — must not crash, must return [].
+        from pathlib import Path
+        paths = _discover_ner_csv_paths(Path("/nonexistent/totally-not-here"))
+        self.assertEqual(paths, [])
+
+    def test_blocklist_enriched_from_synthetic_ner_csv(self):
+        # Synthesise a CSV with one GPE row and one PERSON row — only
+        # the GPE word should join the blocklist; the PERSON one must
+        # NOT (surname-filter territory, not toponym).
+        import csv
+        import tempfile
+        from pathlib import Path
+        with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", suffix="_affinity_ner.csv",
+                delete=False, newline="") as tmp:
+            w = csv.DictWriter(tmp, fieldnames=["word", "ner_label"])
+            w.writeheader()
+            w.writerow({"word": "totallyfakeplace", "ner_label": "GPE"})
+            w.writerow({"word": "alsofakefacility", "ner_label": "FAC"})
+            w.writerow({"word": "averagehuman", "ner_label": "PERSON"})
+            path = Path(tmp.name)
+        try:
+            out = toponym_blocklist(ner_csv_paths=[path])
+            self.assertIn("totallyfakeplace", out)
+            self.assertIn("alsofakefacility", out)
+            # PERSON label is not a toponym — must not join the set.
+            self.assertNotIn("averagehuman", out)
+            # Curated entries still present.
+            self.assertIn("burger", out)
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_blocklist_skips_short_or_nonalpha_ner_rows(self):
+        # NER produces noise rows — short tokens, digit-suffixed.
+        # Conservative: only ≥3 alpha-only tokens join.
+        import csv
+        import tempfile
+        from pathlib import Path
+        with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", suffix="_affinity_ner.csv",
+                delete=False, newline="") as tmp:
+            w = csv.DictWriter(tmp, fieldnames=["word", "ner_label"])
+            w.writeheader()
+            w.writerow({"word": "ab", "ner_label": "GPE"})       # too short
+            w.writerow({"word": "us2", "ner_label": "GPE"})       # digit
+            w.writerow({"word": "ROME", "ner_label": "GPE"})      # ok
+            path = Path(tmp.name)
+        try:
+            out = toponym_blocklist(ner_csv_paths=[path])
+            self.assertIn("rome", out)         # lowercased on insert
+            self.assertNotIn("ab", out)
+            self.assertNotIn("us2", out)
+        finally:
+            path.unlink(missing_ok=True)
+
+
+class PropnDominanceHeuristic(unittest.TestCase):
+    """Generic shape-based catch for rare PROPN with high author-affinity
+    not yet on any curated list. Covers the long-tail W-4 (2) ask."""
+
+    def test_doyle_toponym_shape_is_dominator(self):
+        # Shape of `burger` from the affinity test fixture: affinity=142,
+        # corpus=60, author=50 → author/corpus≈0.83 → dominator.
+        row = {"word": "burger", "affinity": 142.0,
+               "author_count": 50, "corpus_count": 60}
+        self.assertTrue(is_propn_dominator(row),
+                        msg="rare high-affinity exclusive token must flag")
+
+    def test_dickens_character_shape_is_dominator(self):
+        # `wegg`: affinity=95, corpus=32, author=30 → author/corpus≈0.94.
+        row = {"word": "wegg", "affinity": 95.0,
+               "author_count": 30, "corpus_count": 32}
+        self.assertTrue(is_propn_dominator(row),
+                        msg="Dickens character shape must flag")
+
+    def test_real_stylistic_word_is_not_dominator(self):
+        # `blighter` in Wodehouse: affinity=38, corpus=1430, author=65.
+        # Below affinity threshold AND above corpus rarity cap → keep.
+        row = {"word": "blighter", "affinity": 38.5,
+               "author_count": 65, "corpus_count": 1430}
+        self.assertFalse(is_propn_dominator(row),
+                         msg="real stylistic markers must pass through")
+
+    def test_common_word_is_not_dominator(self):
+        # `magnificent`: affinity=12, corpus=800 — low affinity AND high
+        # corpus_count. Two reasons not to drop. Keep.
+        row = {"word": "magnificent", "affinity": 12.0,
+               "author_count": 80, "corpus_count": 800}
+        self.assertFalse(is_propn_dominator(row))
+
+    def test_high_affinity_but_widely_shared_kept(self):
+        # affinity high BUT exclusivity low (only 10% of corpus uses come
+        # from this author) → keep, it's not author-exclusive.
+        row = {"word": "extraordinary", "affinity": 90.0,
+               "author_count": 20, "corpus_count": 800}
+        # corpus_count above cap, so excluded on cap alone — but also
+        # the exclusivity ratio is 0.025, well below threshold.
+        self.assertFalse(is_propn_dominator(row))
+
+    def test_low_author_count_floor(self):
+        # 1 occurrence — too thin to make a call. Must NOT flag.
+        row = {"word": "obscurenoise", "affinity": 200.0,
+               "author_count": 1, "corpus_count": 1}
+        self.assertFalse(is_propn_dominator(row))
+
+    def test_missing_fields_fail_safe_keep(self):
+        # Defensive: missing or wrong-typed fields → keep (don't crash,
+        # don't drop a row we can't reason about).
+        self.assertFalse(is_propn_dominator({"word": "foo"}))
+        self.assertFalse(is_propn_dominator({"word": "foo",
+                                              "affinity": "not-a-number"}))
+        self.assertFalse(is_propn_dominator({}))
+        self.assertFalse(is_propn_dominator(None))
+
+    def test_filter_drops_only_dominators(self):
+        rows = [
+            {"word": "burger", "affinity": 142.0,
+             "author_count": 50, "corpus_count": 60},      # drop
+            {"word": "magnificent", "affinity": 12.0,
+             "author_count": 80, "corpus_count": 800},     # keep
+            {"word": "wegg", "affinity": 95.0,
+             "author_count": 30, "corpus_count": 32},      # drop
+            {"word": "blighter", "affinity": 38.5,
+             "author_count": 65, "corpus_count": 1430},    # keep
+        ]
+        kept, dropped = filter_propn_dominance(rows)
+        self.assertEqual(dropped, 2)
+        kept_words = {r["word"] for r in kept}
+        self.assertEqual(kept_words, {"magnificent", "blighter"})
+
+    def test_filter_thresholds_are_tunable(self):
+        # Loosening exclusivity ratio should keep formerly-dropped rows.
+        row = {"word": "borderline", "affinity": 100.0,
+               "author_count": 10, "corpus_count": 100}  # ratio 0.1
+        self.assertFalse(is_propn_dominator(row))  # below default 0.5
+        self.assertTrue(is_propn_dominator(row, exclusivity_ratio=0.05))
+
+
+class ExtendedOrgBlocklist(unittest.TestCase):
+    """W-4 reconciliation — additional aggregate authors blocked."""
+
+    def test_w4_additional_orgs_in_tokens(self):
+        for tok in ("world bank", "united nations",
+                    "project gutenberg literary archive foundation",
+                    "encyclopaedia britannica"):
+            self.assertIn(tok, _NULL_AUTHOR_TOKENS,
+                          msg=f"{tok!r} should be in extended org blocklist")
+
+    def test_w4_additional_substrings(self):
+        for sub in ("literary archive foundation", "patent office",
+                    "encyclopaedia", "encyclopedia",
+                    "joint chiefs of staff", "census bureau"):
+            self.assertIn(sub, _NULL_AUTHOR_SUBSTRINGS,
+                          msg=f"{sub!r} should be a substring matcher")
+
+    def test_drop_null_authors_filters_new_aggregates(self):
+        # Realistic PG metadata shapes that previously slipped through.
+        rows = [
+            {"author": "Doyle, Arthur Conan", "tokens": 5_000_000},
+            {"author": "Editors of the Encyclopaedia Britannica",
+             "tokens": 90_000_000},
+            {"author": "World Bank", "tokens": 40_000_000},
+            {"author": "United States. Patent Office",
+             "tokens": 30_000_000},
+            {"author": "U.S. Census Bureau", "tokens": 20_000_000},
+            {"author": "Tolstoy, Leo, graf", "tokens": 8_000_000},
+        ]
+        kept, dropped = drop_null_authors(rows)
+        kept_authors = [r["author"] for r in kept]
+        self.assertIn("Doyle, Arthur Conan", kept_authors)
+        self.assertIn("Tolstoy, Leo, graf", kept_authors)
+        # All four extended aggregates dropped.
+        self.assertEqual(dropped, 4,
+                         msg=f"expected 4 drops, kept={kept_authors!r}")
+
+
+class AffinityByBookGetsToponymAndPropnFilter(unittest.TestCase):
+    """W-4 parity: affinity_by_book previously missed both filters.
+
+    Stan W-4 hits Doyle book scope too («фирменные слова в Hound of
+    Baskervilles» surfaces «baskerville», «grimpen», «dartmoor»).
+    """
+
+    def test_book_toponym_and_character_dropped(self):
+        from unittest.mock import patch
+        from scripts.v2.tools.books import affinity_book as ab
+
+        fake_v1 = {
+            "pg_id": "PG2852",
+            "title": "The Hound of the Baskervilles",
+            "top": [
+                {"word": "baskerville", "book_count": 80,
+                 "corpus_count": 90, "affinity": 180.0},   # toponym + propn
+                {"word": "grimpen",     "book_count": 40,
+                 "corpus_count": 42, "affinity": 150.0},   # toponym
+                {"word": "moor",        "book_count": 30,
+                 "corpus_count": 15000, "affinity": 18.0}, # real
+                {"word": "magnificent", "book_count": 12,
+                 "corpus_count": 800, "affinity": 8.0},    # real
+            ],
+        }
+        with patch("scripts.learning_tools.affinity_by_book",
+                    return_value=fake_v1):
+            result = ab.affinity_by_book(pg_id="PG2852", top=10,
+                                          min_corpus_count=0)
+        self.assertTrue(result.ok)
+        words = {r["word"] for r in (result.data.get("top") or [])}
+        self.assertNotIn("grimpen", words,
+                          msg="W-4: toponym must be filtered from book scope")
+        self.assertIn("moor", words)
+        self.assertIn("magnificent", words)
+        # baskerville is in the curated surname set (Sherlock locales),
+        # so toponym OR surname filter catches it either way.
+        self.assertNotIn("baskerville", words)
+        # Note string mentions both new filters
+        note = (result.data.get("_render_note") or "")
+        self.assertTrue("toponym" in note or "propn-dominance" in note,
+                         msg=f"render note should mention new filters: {note!r}")
 
 
 if __name__ == "__main__":

@@ -80,7 +80,11 @@ _GENERIC_SUBSTRINGS = (
     requires=[],
     cost="medium",
     cacheable=True,
-    wrapper_version="v2-phase2-contract",
+    # W-4 reconciliation (2026-05-24) — extended _NULL_AUTHOR_TOKENS /
+    # _NULL_AUTHOR_SUBSTRINGS to catch World Bank / UN / Patent Office /
+    # encyclopaedia editor aggregates that previously ranked top by token
+    # volume. Bumping invalidates stale topcharts.
+    wrapper_version="v3-w4-orgfilter-extended",
 )
 @v1_contract(v1_fn="scripts.rag_tools.top_authors_by",
              schema=V1TopAuthorsBy)
@@ -174,7 +178,9 @@ def top_authors_by(metric: str = "books", top: int = 10, lang: str = "en",
     requires=["country"],
     cost="medium",
     cacheable=True,
-    wrapper_version="v2-phase2-contract",
+    # W-4 reconciliation (2026-05-24) — same extended org filter; bump
+    # invalidates cached per-country topcharts.
+    wrapper_version="v3-w4-orgfilter-extended",
 )
 @v1_contract(v1_fn="scripts.rag_tools.top_authors_by_country",
              schema=V1TopAuthorsByCountry)

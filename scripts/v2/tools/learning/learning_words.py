@@ -66,9 +66,14 @@ _LITERARY_LOCATION_BLACKLIST = frozenset({
     # from the broken period still poisoned downstream renders.
     # Bumping version busts the stale cache.
     # Phase 3 W-4 (2026-05-22) — wired toponym filter (GPE/LOC) +
-    # extended character-surname blocklist. Bump invalidates cache that
-    # carried Lambton/Shire-class leakage at non-curated scopes.
-    wrapper_version="v4-phase3-toponym",
+    # extended character-surname blocklist.
+    # W-3 (2026-05-24) — wrapper now stamps `_render_columns` +
+    # `_render_note` explaining that this tool emits ONLY word /
+    # lemma / pos / scope_count / corpus_count / affinity / level
+    # (no translation / example / IPA). Stops the LLM from inventing
+    # «Перевод» / «Пример» columns that render «—» on every row.
+    # Bumping invalidates cached rows that lack the new hints.
+    wrapper_version="v5-w3-columns-hint",
 )
 @v1_contract(v1_fn="scripts.learning_tools.learning_words",
              schema=V1LearningWords)
@@ -180,6 +185,35 @@ def learning_words(scope, level: str = "intermediate", top: int = 30,
             raw["_render_note"] = (
                 (existing + " | " if existing else "") + count_note
             )
+
+        # W-3 (2026-05-24) — column contract for the LLM render path.
+        # learning_words rows carry only the keys listed below
+        # (V1LearningWords.__row_keys__ — word, lemma, pos, scope_count,
+        # corpus_count, affinity, score). No translation / example /
+        # IPA / definition. When the user query mentions «перевод» /
+        # «пример», the LLM used to add «Перевод» / «Пример» columns
+        # and render «—» on every row because nothing in the row
+        # carried those values. Surface the exact columns the LLM is
+        # allowed to render so the «column либо заполнена, либо не
+        # показывается» rule (RENDER_PROMPT rule 19) holds even when
+        # the user explicitly asked for translations.
+        raw["_render_columns"] = [
+            "rank", "word", "lemma", "pos",
+            "scope_count", "corpus_count", "affinity", "level",
+        ]
+        cols_note = (
+            "COLUMNS: this tool emits ONLY word/lemma/pos/scope_count/"
+            "corpus_count/affinity/level per row. There is NO translation, "
+            "NO example, NO IPA, NO definition — do NOT render a «Перевод» "
+            "or «Пример» column (it would be «—» on every row). If the "
+            "user asked for translation, append a one-line suggestion: "
+            "«хочешь перевод этих слов? отправь: переведи <первые 5-10 "
+            "слов>» — это вызовет enrich_word pipeline."
+        )
+        existing = raw.get("_render_note") or ""
+        raw["_render_note"] = (
+            (existing + " | " if existing else "") + cols_note
+        )
 
     warnings: list[ToolWarning] = []
     if not rows:

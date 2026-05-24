@@ -56,6 +56,31 @@ _NUMBER_RE = re.compile(
 # `_bio_source: hardcoded` channel, not the audit.
 _YEAR_LO, _YEAR_HI = 1500, 2100
 
+# W-7 (2026-05-24) — bio-event context patterns. Used by `_is_year_like`
+# to detect «год смерти / death year / умер / born» phrasings. Stan prod
+# bug 2026-05-22: rendered «год смерти Marlowe 2008» when data carried
+# only birth_year=1564. Previously the audit trusted any year-in-range,
+# so the fabricated death year went unflagged. Now: if context is a bio
+# event AND the specific year is not in data, the audit falls through
+# to regular matching and the mismatch is flagged.
+_BIO_DEATH_RE = re.compile(
+    r"(?:год\s+смерт|death\s*year|умер|скончал|погиб|died|deceased|"
+    r"умир|"
+    r"годы\s+жизни|years?\s+lived|lifespan|"
+    # year-range «(1564–2008)» / «1564—2008» / «1564-2008» implies a
+    # birth–death pair; both members get bio-context treatment so the
+    # death-side fabrication can be caught.
+    r"\(?\s*\d{3,4}\s*[–—\-]\s*\d{3,4}\s*\)?)",
+    re.IGNORECASE | re.UNICODE,
+)
+_BIO_BIRTH_RE = re.compile(
+    r"(?:год\s+рожден|birth\s*year|родил|был\s+рожд[её]н|born|"
+    r"рожд[её]н|"
+    r"годы\s+жизни|years?\s+lived|lifespan|"
+    r"\(?\s*\d{3,4}\s*[–—\-]\s*\d{3,4}\s*\)?)",
+    re.IGNORECASE | re.UNICODE,
+)
+
 
 @dataclass
 class NumericMismatch:
@@ -268,23 +293,47 @@ def _is_matched(value: float, data_numbers: set[float],
     return matched, nearest, pct
 
 
-def _is_year_like(value: float, context: str) -> bool:
-    """Skip plausible years that are likely from `_bio_source` channel
-    or general timestamps. We trust the `_bio_source` mechanism for bio
-    years."""
+def _is_year_like(value: float, context: str,
+                  data_numbers: set[float] | None = None) -> bool:
+    """Return True iff `value` should be skipped by the audit as a
+    «trusted year-like» (the `_bio_source: hardcoded` channel surfaces
+    real bio years, so an unrestricted year-check would over-flag).
+
+    W-7 (2026-05-24) — bio-year fabrication clause. When `data_numbers`
+    is supplied AND the context references a bio event (death/birth)
+    AND `value` is not in `data_numbers`, fall through to regular
+    matching so the year gets flagged. Stan prod-bug 2026-05-22:
+    «год смерти Marlowe 2008» — 2008 was in [1500, 2100], context said
+    «год смерти», but the only year in data was birth_year=1564. The
+    old trust-all-years logic let it through; this clause closes the
+    gap.
+
+    `data_numbers=None` keeps the old behaviour for callers that
+    haven't been updated. Inside `audit_numbers` we always pass the
+    harvested data_numbers set."""
     if not value.is_integer():
         return False
     iv = int(value)
-    if _YEAR_LO <= iv <= _YEAR_HI:
-        # Year-like in answer; trust unless surrounded by clearly non-year
-        # tokens like «книг», «слов», «раз», «упоминан».
-        bad_words = ("книг", "слов", "раз", "упомин", "books", "words",
-                     "occurrenc", "times")
-        ctx_lc = context.lower()
-        if any(b in ctx_lc for b in bad_words):
-            return False
-        return True
-    return False
+    if not (_YEAR_LO <= iv <= _YEAR_HI):
+        return False
+    ctx_lc = context.lower()
+    # Tokens that argue the number is NOT a year despite shape — counts
+    # / occurrence claims happening to fall in 1500..2100.
+    bad_words = ("книг", "слов", "раз", "упомин", "books", "words",
+                 "occurrenc", "times")
+    if any(b in ctx_lc for b in bad_words):
+        return False
+    # W-7 — bio-year fabrication path. Only kicks in when the caller
+    # supplies data_numbers (so we can check if the specific year is
+    # backed). Skip if the year IS in data (real bio year from
+    # `_bio_source`). Skip if context isn't bio (general timestamp,
+    # publication year reference — those still get trust).
+    if data_numbers is not None and value not in data_numbers:
+        is_bio = (_BIO_DEATH_RE.search(context) is not None or
+                  _BIO_BIRTH_RE.search(context) is not None)
+        if is_bio:
+            return False  # let it through to _is_matched → flagged
+    return True
 
 
 # ----- Audit entry point -----
@@ -333,8 +382,20 @@ def audit_numbers(
         count_report.mismatches = (table_zero_report.mismatches
                                     + count_report.mismatches)
 
-    if not data_numbers and not count_report.mismatches:
-        return AuditReport.trust("(no numbers in tool data)")
+    # W-7 (2026-05-24) — removed the «no data → trust» early-return
+    # bypass. Previously the audit silently skipped when collect_data_
+    # numbers came back empty (e.g. tool returned only string fields,
+    # or only `author_canonical: "..."`). That masked the Stan-class
+    # fabrication «Автор родился в 1850, написал 47 произведений» on
+    # records where data carried no numbers at all — both the year and
+    # the count were free-form invention, yet audit returned trust().
+    #
+    # Now: still audit. Bio-year fabrications are caught via
+    # `_is_year_like(..., data_numbers)` (returns False in bio context
+    # when value not in data, including the data={} case). Non-year
+    # numbers above min_value with empty data → flagged as fabrication
+    # candidates. Non-bio years (publication, general timestamps) keep
+    # trust via `_is_year_like`.
 
     # Sprint 20+ B13 — strip markdown table content before extracting
     # numbers. Table cells are formatted deterministically from tool
@@ -352,10 +413,23 @@ def audit_numbers(
         if value in seen_values:
             continue
         seen_values.add(value)
-        if _is_year_like(value, context):
+        # W-7: pass data_numbers so bio-year fabrications fall through
+        # to regular matching (year not in data + bio context → flagged).
+        if _is_year_like(value, context, data_numbers):
             continue
         if not data_numbers:
-            continue  # nothing to compare against (count-honesty already ran)
+            # W-7: empty data_numbers + reached this point means the
+            # value isn't a trusted year (already filtered above). Flag
+            # as fabrication candidate — no data to back any number.
+            report.mismatches.append(NumericMismatch(
+                value=value, formatted=formatted,
+                context=context.strip(),
+                nearest_in_data=None,
+                nearest_distance_pct=None,
+            ))
+            if len(report.mismatches) >= 3:
+                break
+            continue
         matched, nearest, pct = _is_matched(value, data_numbers, tol=tol)
         if matched:
             continue

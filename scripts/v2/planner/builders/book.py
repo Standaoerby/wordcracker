@@ -201,6 +201,17 @@ def _plan_book_vocab(e: Entities) -> QueryPlan:
 
 @_with_copyright_check
 def _plan_book_readability(e: Entities) -> QueryPlan:
+    # Phase 5 W-5 (2026-05-24) — when the extractor surfaced ≥2 books,
+    # the user wants comparison even when the intent classifier kept us
+    # in single-book readability. «уровень сложности Dracula и
+    # Frankenstein» phrasing has no explicit «сложнее ... или» marker
+    # the book_readability_compare rules require, but the two-book
+    # presence is itself a strong compare signal. Redirect so both books
+    # actually surface in the answer (W-5 acceptance).
+    multi_count = sum(1 for pg in e.multi_book_ids if pg) + sum(
+        1 for t in e.multi_book_titles if t)
+    if multi_count >= 1 and (e.book_id or e.book_title):
+        return _plan_book_readability_compare(e)
     # Sprint 19+ — corpus-wide aggregation request misroutes here when
     # «Flesch» / «readability» keyword fires book_readability but the
     # user actually wants «распределение по корпусу». Redirect to the
@@ -307,9 +318,23 @@ def _plan_book_recommendation(e: Entities) -> QueryPlan:
     exclude_archaic. Since we don't have a per-book archaic-density
     column yet, exclude_archaic surfaces as a plan-level render note
     that asks the renderer to disclose the limitation honestly rather
-    than silently returning Pliny / Roman Stoicism for «B2 без архаизмов»."""
+    than silently returning Pliny / Roman Stoicism for «B2 без архаизмов».
+
+    Phase 5 W-9 (2026-05-24) — stable disclosures for every declared
+    filter that `top_books_by_downloads` cannot honor at the v1 layer:
+    `level`, `country`, `year_from`/`year_to`. Before this, queries like
+    «что почитать на B2 без архаизмов» extracted level=intermediate AND
+    exclude_archaic=True but only the archaic side got disclosed —
+    level was silently dropped and the answer showed plain top-by-
+    downloads as if no level constraint was given. Per R-2 acceptance,
+    each declared filter is either really applied or consistently
+    disclosed; never silently ignored.
+    """
     lang = e.lang_hint or "en"
     notes: list[str] = []
+    # top_n: top_books_by_downloads accepts `top`, so the user's hint
+    # is the one filter we can actually honor on this builder.
+    top = e.top_n or 20
     if e.exclude_archaic:
         # Stamp a render-time note so the renderer warns the user honestly
         # that we don't filter by archaic content automatically (B9). When
@@ -322,13 +347,59 @@ def _plan_book_recommendation(e: Entities) -> QueryPlan:
             "Pliny/Бэкон/Шекспир заведомо архаичны, исключи их вручную». "
             "НЕ замалчивай это ограничение."
         )
+    if e.level:
+        # CEFR filter not implemented at top_books_by_downloads — the
+        # tool only knows downloads/lang. Without disclosure the user
+        # gets «топ книг по downloads» and assumes B2 was respected.
+        notes.append(
+            f"Пользователь просил уровень {e.level!r}, но top_books_by_downloads "
+            f"не имеет per-book CEFR-фильтра (BookProfile pipeline ещё не "
+            f"онлайн). DISCLOSE честно: «отсортировал по популярности без "
+            f"проверки CEFR — для оценки уровня каждой книги используй "
+            f"book_readability (Flesch+CEFR за <2с)». НЕ замалчивай "
+            f"ограничение, НЕ говори «отфильтровал по {e.level}»."
+        )
+    if e.country:
+        # top_books_by_downloads honors `lang` (corpus language) but not
+        # `country` (author origin). «британская классика» surfaces as
+        # country=GB AND lang_hint=en — lang is propagated, country is
+        # not — and the answer would silently ignore the country axis.
+        notes.append(
+            f"Пользователь указал страну ({e.country}), но top_books_by_downloads "
+            f"фильтрует по языку корпуса (lang={lang}), не по country автора. "
+            f"DISCLOSE: «выдача отсортирована по lang={lang} без отдельного "
+            f"country-фильтра; для строгого country-среза используй "
+            f"top_authors_by_country(country={e.country}) и далее "
+            f"top_books_by_downloads(author_regex=...) per author». "
+            f"НЕ замалчивай ограничение."
+        )
+    if e.year_from or e.year_to:
+        notes.append(
+            f"Пользователь сузил период ({e.year_from or '?'}-"
+            f"{e.year_to or '?'}), но top_books_by_downloads сортирует по "
+            f"downloads глобально (year-фильтр у этого тула не подключён). "
+            f"DISCLOSE: «отсортировал по downloads без year-фильтра — для "
+            f"строгого среза по периоду пройдись вручную по top списку и "
+            f"отфильтруй по pub_year (есть в выдаче)»."
+        )
+    flagged_bits = []
+    if e.exclude_archaic:
+        flagged_bits.append("exclude_archaic")
+    if e.level:
+        flagged_bits.append(f"level={e.level}")
+    if e.country:
+        flagged_bits.append(f"country={e.country}")
+    if e.year_from or e.year_to:
+        flagged_bits.append(f"year={e.year_from or '?'}-{e.year_to or '?'}")
+    flagged = (f" [disclosed unimplemented: {', '.join(flagged_bits)}]"
+               if flagged_bits else "")
     return QueryPlan(
         intent="book_recommendation", entities=e,
         steps=[PlanStep(tool="top_books_by_downloads",
-                        args={"top": 20, "lang": lang})],
+                        args={"top": top, "lang": lang})],
         expected_cost="medium",
-        explain=(f"popular books (lang={lang}) → user filters by readability"
-                 + (" [exclude_archaic flagged]" if e.exclude_archaic else "")),
+        explain=(f"popular books (lang={lang}, top={top}) → user filters by "
+                 f"readability{flagged}"),
         render_notes=notes,
     )
 

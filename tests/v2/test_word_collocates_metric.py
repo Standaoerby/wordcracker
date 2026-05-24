@@ -32,11 +32,14 @@ class WordCollocatesMetric(unittest.TestCase):
         }
 
     def test_explicit_metric_count_unchanged_passthrough(self):
-        """metric='count' (explicit) → wrapper returns v1 result unchanged.
+        """metric='count' (explicit) → wrapper passes v1 ordering through
+        without rerank, but still applies the W-15 stopword filter so
+        the count-only path doesn't surface noise.
 
-        W-15 (2026-05-23) — the default flipped to 'npmi', so this
-        passthrough check now needs explicit metric='count' to exercise
-        the v1-passthrough branch.
+        W-15 (2026-05-23) — the default flipped to 'npmi'.
+        W-15 polish (2026-05-24) — wrapper-level stopword filter drops
+        'the' (in v1 STOPWORDS) even on the count path. The signal rows
+        ('thick'/'morning'/'city') stay in their original v1 order.
         """
         from scripts.v2.tools.words.collocates import word_collocates
         with mock.patch("scripts.rag_tools.word_collocates",
@@ -45,8 +48,21 @@ class WordCollocatesMetric(unittest.TestCase):
                                  metric="count")
         self.assertTrue(r.ok)
         words = [c["word"] for c in r.data["top_collocates"]]
-        self.assertEqual(words, ["thick", "morning", "city", "the"])
+        # 'the' filtered by wrapper (STOPWORDS); signal order preserved.
+        self.assertEqual(words, ["thick", "morning", "city"])
         self.assertNotIn("metric", r.data)
+
+    def test_explicit_metric_count_no_filter_when_stopwords_off(self):
+        """When the caller disables stopword filtering, metric=count
+        truly passes through — including 'the'. Locks the
+        exclude_stopwords=False contract."""
+        from scripts.v2.tools.words.collocates import word_collocates
+        with mock.patch("scripts.rag_tools.word_collocates",
+                        return_value=self.v1_raw):
+            r = word_collocates({"author": "^X,"}, "fog", top=4,
+                                 metric="count", exclude_stopwords=False)
+        words = [c["word"] for c in r.data["top_collocates"]]
+        self.assertEqual(words, ["thick", "morning", "city", "the"])
 
     def test_w15_default_metric_is_npmi(self):
         """W-15 acceptance: calling word_collocates with no `metric` kwarg

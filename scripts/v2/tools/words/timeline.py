@@ -52,7 +52,10 @@ _PERIOD_RE = re.compile(r"^\s*(\d{3,4})\s*-\s*(\d{3,4})\s*$")
     requires=["word"],
     cost="medium",
     cacheable=True,
-    wrapper_version="v2-phase2-contract",
+    # W-2 (2026-05-24) — bump bust caches keyed on the old shape
+    # (`period: "1825-1849"`, missing freq_per_million alias). After the
+    # bump cached results re-normalize through the wrapper.
+    wrapper_version="v3-w2-render-row-shape",
 )
 @v1_contract(v1_fn="scripts.rag_tools.word_freq_timeline",
              schema=V1WordFreqTimeline)
@@ -67,6 +70,23 @@ def word_freq_timeline(word: str, bucket_years: int = 25,
 
     buckets = (raw.get("timeline") if isinstance(raw, dict) else None) or []
 
+    # W-2 (2026-05-24) — railway/telegraph/steam «None–None» repro.
+    # Normalize v1 bucket rows once at wrapper boundary so the LLM
+    # render payload (r.data.timeline) and the typed view's series
+    # both carry display-ready period labels and a populated
+    # freq_per_million column. The LLM no longer sees the ASCII-hyphen
+    # v1 shape (`period: "1825-1849"`) — it sees the en-dash label
+    # alongside renderer-friendly aliases, so a hallucinated column
+    # name still hits a real value. Replaces in-place so the rest of
+    # this function (auto-fallback, view emission) operates on the
+    # canonical shape.
+    if isinstance(raw, dict):
+        rows, malformed_initial = _normalize_timeline_rows(buckets)
+        raw["timeline"] = rows
+        buckets = rows
+    else:
+        malformed_initial = 0
+
     # Sprint 20 — Stan 2026-05-19: LLM-planner emitted basis='pub_year',
     # which has ~4 books coverage. Result: 1 bucket "2000-2024" with 0
     # occurrences, renderer correctly cited it and said «не охватывают
@@ -79,11 +99,18 @@ def word_freq_timeline(word: str, bucket_years: int = 25,
                  or all((b.get("occurrences", 0) == 0) for b in buckets))):
         raw_auto = _v1(word=word, bucket_years=bucket_years, basis="auto")
         if isinstance(raw_auto, dict) and not raw_auto.get("error"):
-            buckets_auto = raw_auto.get("timeline") or []
-            if len(buckets_auto) >= 3 or any(
-                    b.get("occurrences", 0) > 0 for b in buckets_auto):
+            buckets_auto_raw = raw_auto.get("timeline") or []
+            if len(buckets_auto_raw) >= 3 or any(
+                    b.get("occurrences", 0) > 0 for b in buckets_auto_raw):
+                # Normalize fallback rows the same way so the LLM/view
+                # don't see one shape in the primary branch and another
+                # after auto-fallback.
+                buckets_auto, malformed_fallback = (
+                    _normalize_timeline_rows(buckets_auto_raw))
+                raw_auto["timeline"] = buckets_auto
                 raw = raw_auto
                 buckets = buckets_auto
+                malformed_initial = malformed_fallback
                 auto_fallback_used = True
                 raw["basis_originally_requested"] = "pub_year"
                 raw["basis_fallback_reason"] = (
@@ -112,6 +139,17 @@ def word_freq_timeline(word: str, bucket_years: int = 25,
             code="basis_auto_fallback",
             message=("pub_year coverage was ~4 books → fell back to "
                       "birth_plus_30 for usable timeline"),
+        ))
+    if malformed_initial:
+        # Surface period-shape failure loudly so the prod path doesn't
+        # quietly render «?–?» without anyone noticing (W-2).
+        warnings.append(ToolWarning(
+            code="period_unparseable",
+            message=(
+                f"{malformed_initial} bucket(s) had unparseable period "
+                f"boundaries; rendered as «?–?». Expect v1 shape "
+                f"'YYYY-YYYY'."
+            ),
         ))
 
     # v1 word_freq_timeline doesn't expose a books_total — coverage stays
@@ -282,16 +320,43 @@ def _parse_period(period) -> tuple[int | None, int | None]:
         return None, None
 
 
-def _build_timeline_series(buckets) -> tuple[list[dict], int]:
-    """Convert v1 timeline buckets to view-layer series.
+def _normalize_timeline_rows(buckets) -> tuple[list[dict], int]:
+    """Normalize v1 timeline rows to the canonical wrapper shape.
 
-    Returns (series, malformed_count). Each series entry has keys
-    bucket_start, bucket_end (int|None), freq_per_million (float|None),
-    count (int|None). Rows are sorted ascending by bucket_start so the
-    chart axis is always monotonic — defensive against v1 returning
-    out-of-order rows.
+    Single source of truth for both the LLM render payload
+    (`r.data["timeline"]`) and the typed view's `series`. Each output
+    row preserves v1's documented row keys (period, books, total_tokens,
+    occurrences, per_million) AND surfaces renderer-friendly fields:
+
+      * period            — display-ready label with en-dash («1825–1849»);
+                             ASCII-hyphen v1 shape is replaced so the LLM
+                             never has a reason to invent a different one.
+      * bucket_start/end  — int | None, parsed from the v1 period string
+                             via the strict `_PERIOD_RE`. None when the
+                             string fails the shape — those rows count
+                             toward `malformed`.
+      * freq_per_million  — RECOMPUTED from occurrences/total_tokens × 1e6
+                             so the «Частота на 1M слов» column is robust
+                             against v1 dropping the field; identical to
+                             v1's per_million when v1 supplies it. Falls
+                             back to v1's per_million when counts are
+                             missing / total_tokens is zero.
+      * count             — alias for occurrences («Вхождений» header).
+
+    Rows are sorted ascending by bucket_start so a v1 returning out-of-
+    order buckets never poisons the leading edge of the chart. Returns
+    `(rows, malformed_count)`; the caller surfaces malformed as a
+    ToolWarning so the prod path can't quietly emit «?–?» rows.
+
+    W-2 (2026-05-24): railway/telegraph/steam produced «None–None» in
+    every period cell and an empty per-million column in prod. Two
+    structural causes covered here — (a) the wrapper used to pass v1's
+    `per_million` straight through, so a missing/null v1 value left the
+    column blank; (b) the LLM render payload kept the v1 ASCII-hyphen
+    `period`, leaving room for the renderer to invent bucket_start /
+    bucket_end column names with None values. Both close here.
     """
-    series: list[dict] = []
+    rows: list[dict] = []
     malformed = 0
     for b in (buckets or []):
         if not isinstance(b, dict):
@@ -300,36 +365,82 @@ def _build_timeline_series(buckets) -> tuple[list[dict], int]:
         bucket_start, bucket_end = _parse_period(b.get("period"))
         if bucket_start is None or bucket_end is None:
             malformed += 1
-        series.append({
+        occurrences = b.get("occurrences")
+        total_tokens = b.get("total_tokens")
+        # Recompute per-million from counts. round(2) matches v1's
+        # rag_tools.py:1253 formula so a sweep diff stays zero on
+        # well-shaped v1 rows; a v1 row that dropped per_million now
+        # still gets one — the canonical fix for the empty «Частота»
+        # column. Falls through to v1's per_million when counts can't
+        # support recomputation (total_tokens missing / zero).
+        if (isinstance(occurrences, (int, float))
+                and isinstance(total_tokens, (int, float))
+                and total_tokens > 0):
+            freq_per_million = round(
+                1_000_000.0 * float(occurrences) / float(total_tokens), 2,
+            )
+        else:
+            v1_pm = b.get("per_million")
+            freq_per_million = (
+                float(v1_pm) if isinstance(v1_pm, (int, float)) else None
+            )
+        if bucket_start is not None and bucket_end is not None:
+            period_label = f"{bucket_start}–{bucket_end}"
+        else:
+            period_label = "?–?"
+        rows.append({
+            # v1 row keys — preserved for the V1WordFreqTimeline
+            # __row_keys__ contract and any downstream cache rows that
+            # still address columns by v1's names.
+            "period": period_label,           # display-ready (was "1825-1849")
+            "books": b.get("books"),
+            "total_tokens": total_tokens,
+            "occurrences": occurrences,
+            "per_million": freq_per_million,  # recomputed, consistent with the alias
+            # Renderer-friendly aliases — both the LLM (which sees this
+            # dict in r.data) and the typed renderer's series builder
+            # read these directly.
             "bucket_start": bucket_start,
             "bucket_end": bucket_end,
-            "freq_per_million": b.get("per_million"),
-            "count": b.get("occurrences"),
+            "freq_per_million": freq_per_million,
+            "count": occurrences,
         })
-    # Sort ascending; None starts go last so they don't poison the axis.
-    series.sort(key=lambda s: (s["bucket_start"] is None,
-                                s["bucket_start"] or 0))
-    return series, malformed
+    # Ascending by bucket_start; None starts go last so an unparseable
+    # row never lands at the leading edge.
+    rows.sort(key=lambda r: (r["bucket_start"] is None,
+                              r["bucket_start"] or 0))
+    return rows, malformed
 
 
-def _attach_timeline_view(result, buckets, *, word: str, basis: str) -> None:
+def _build_timeline_series(rows) -> list[dict]:
+    """Project normalized timeline rows to the typed-view series shape.
+
+    Kept separate from `_normalize_timeline_rows` so the view payload
+    only carries the keys `build_timeline_chart` documents — adding
+    new keys here would broaden the typed-renderer contract silently.
+    """
+    return [{
+        "bucket_start": r.get("bucket_start"),
+        "bucket_end": r.get("bucket_end"),
+        "freq_per_million": r.get("freq_per_million"),
+        "count": r.get("count"),
+    } for r in (rows or [])]
+
+
+def _attach_timeline_view(result, rows, *, word: str, basis: str) -> None:
+    """Build and attach the TIMELINE_CHART view from normalized rows.
+
+    `rows` come from `_normalize_timeline_rows` — caller has already
+    counted malformed entries and emitted the `period_unparseable`
+    warning (so this function is purely a view projection now and
+    can't double-count). Errors during view emission stay confined
+    to the typed-renderer path; the LLM render path keeps working
+    because r.data.timeline is already normalized.
+    """
     try:
         from scripts.v2 import view_builders as vb
         from scripts.v2.view_types import DataValidity
-        # Phase 2 — V1WordFreqTimeline rows carry: period, books,
-        # total_tokens, occurrences, per_million. The bucketizer pins
-        # the period shape so a v1 row missing/mis-shaping it doesn't
-        # silently render "None–None" (W-2, 2026-05-23).
-        series, malformed = _build_timeline_series(buckets)
-        if malformed and getattr(result, "warnings", None) is not None:
-            result.warnings.append(ToolWarning(
-                code="period_unparseable",
-                message=(
-                    f"{malformed} bucket(s) had unparseable period "
-                    f"boundaries; rendered as «?–?». Expect v1 shape "
-                    f"'YYYY-YYYY'."
-                ),
-            ))
+        series = _build_timeline_series(rows)
         view = vb.build_timeline_chart(
             word=word,
             series=series,

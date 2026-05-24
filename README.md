@@ -150,11 +150,110 @@ docker compose exec -T gutenberg-lab python -u /workspace/tests/v2/test_all_tool
 python tests/v2/bench_v2.py --runs 1 --out bench.md
 ```
 
+## Pre-deploy gate (W-18)
+
+Две проверки, гоняющиеся ПЕРЕД каждым деплоем — обе блокирующие.
+Источник текстов проб и PASS/FAIL-критериев — внешний файл
+`docs/test_external_claude_2026-05-22_error_taxonomy_probe_suite.md`.
+
+1. **Mandatory version-bump** — `scripts/v2/__version__.ANALYTICS_VERSION`
+   обязан отличаться от той версии, что висит в baseline / в предыдущем
+   коммите. Закрывает класс «деплой состоялся, но строка версии не
+   сдвинулась — пришлось проверять прогоном» (наблюдалось 2026-05-24).
+2. **12-probe error-taxonomy suite** — по одной пробе на класс ошибки
+   E1–E12 против живого `/api/chat`. Деплой блокируется при любом
+   переходе **PASS→FAIL** относительно предыдущего baseline.
+
+### Одна команда на деплой-хосте
+
+```bash
+# Полный гейт (bump + 12 проб vs baseline) — POSIX wrapper:
+./scripts/predeploy_gate.sh
+
+# Локальный таргет (контейнер на 127.0.0.1):
+WC_PROBE_BASE_URL=http://127.0.0.1:8890 ./scripts/predeploy_gate.sh
+
+# Только bump-проверка, без живых проб (CI или smoke):
+./scripts/predeploy_gate.sh --no-probes
+
+# Запечь текущий результат как новый baseline (wrapper передаёт флаг
+# вниз; baseline записывается только если прогон чистый: 12/12 PASS,
+# регрессий нет, версия бампнута):
+./scripts/predeploy_gate.sh --update-baseline
+```
+
+### Отдельные шаги (для отладки / CI)
+
+```bash
+# (1) Bump-чекер — stdlib-only, не требует endpoint'а:
+python scripts/check_version_bump.py --against baseline    # vs predeploy_baseline.json
+python scripts/check_version_bump.py --against git --git-ref origin/main  # vs PR base
+python scripts/check_version_bump.py --against file --file /tmp/prev_version.py
+
+# (2) 12-probe runner — стучится в /api/chat:
+python scripts/predeploy_probe_suite.py                                # прод
+python scripts/predeploy_probe_suite.py --base-url http://127.0.0.1:8890
+python scripts/predeploy_probe_suite.py --probes P12                   # subset
+python scripts/predeploy_probe_suite.py --update-baseline              # запечь baseline
+```
+
+Сначала залей тексты проб и PASS/FAIL-условия из источника в
+`scripts/predeploy_probes.json` (поля `question` со значением
+`__FILL_FROM_SOURCE__` и пустые `pass_when` — это слоты для заполнения;
+универсальные гарды в `universal_pass_when` уже работают).
+
+### Exit codes (общий контракт двух инструментов)
+
+| Код | Значение | Деплой |
+|---:|---|---|
+| 0 | все пробы PASS, версия бампнута, регрессий нет | OK |
+| 1 | ошибка конфигурации (нет файла, кривой JSON, git недоступен) | блок |
+| 2 | хотя бы одна регрессия PASS→FAIL vs baseline | **блок** |
+| 3 | `ANALYTICS_VERSION` не сдвинулся (требование W-18) | **блок** |
+| 4 | `/health` не поднялся за 60 с — таргет недоступен | **блок** |
+| 5 | в `predeploy_probes.json` есть `__FILL_FROM_SOURCE__`-слоты | блок |
+
+`scripts/predeploy_gate.sh` пробрасывает exit-код первого упавшего шага
+наверх, так что вызывающий деплой-скрипт может матчить кодом, не разбирая
+вывод.
+
+### CI
+
+`.github/workflows/predeploy.yml` запускает на каждом PR в `main`:
+
+- **version-bump** — `check_version_bump.py --against git --git-ref origin/<base>`;
+  PR без бампа `ANALYTICS_VERSION` фейлит CI.
+- **probe-config sanity** — юнит-тесты раннера + конфиг 12 проб должен
+  быть валидным (12 проб, без дубликатов P-ID, `repeat=3` на P12).
+- **test-collect** — `pytest tests/v2 --collect-only` должен пройти без
+  ошибок коллекции (R10).
+
+Live 12-probe прогон — на деплой-хосте через `predeploy_gate.sh`: у CI
+runner'а нет доступа к чат-API.
+
+### Baseline
+
+`scripts/predeploy_baseline.json` появляется после первого зелёного
+прогона с `--update-baseline`. Структура:
+
+```json
+{
+  "version": "2.6.13",
+  "recorded_at": "2026-05-24T12:00:00+00:00",
+  "verdicts": {"P1": "PASS", "P2": "PASS", "...": "..."}
+}
+```
+
+Дальнейшие прогоны сверяются с этим snapshot'ом — pre-deploy ловит
+ровно момент, когда что-то, работавшее на прошлой версии, сломалось на
+этой. Без baseline'а первый деплой пропускается с предупреждением.
+
 ## Roadmap
 
 См. [wordcracker/wordcracker_v2_roadmap_next.md](https://github.com/Standaoerby/wordcracker) (Obsidian).
 
-Текущий статус: **v2.3.1 stable**. Open items:
+Текущий статус: **v2.6.11 stable** (W-11/W-12 follow-up: POS+period intents + words_appearing acceptance, 2026-05-24).
+Open items:
 - `build_country_affinity.py` — настоящий per-corpus lemma diff для Q40-стиля (сейчас approximation через top-leader-per-country)
 - `find_words_by_etymology` family caches (Wiktionary top-50 words per family)
 - Cache warm-up на restart (pre-load top-10 author profiles)

@@ -221,7 +221,11 @@ def _live_scan_author_richness(top: int, lang: str,
     requires=[],
     cost="heavy",
     cacheable=True,
-    wrapper_version="v1-phase3-lexical-richness",
+    # W-4 reconciliation (2026-05-24) — extended _NULL_AUTHOR_TOKENS /
+    # _NULL_AUTHOR_SUBSTRINGS with additional government / aggregate
+    # buckets (World Bank, UN, Patent Office, encyclopaedia editors).
+    # Bumping invalidates cached topcharts where these still ranked.
+    wrapper_version="v2-w4-orgfilter-extended",
 )
 def lexical_richness_authors(top: int = 20, lang: str = "en",
                               include_generic: bool = False,

@@ -1048,7 +1048,14 @@ def word_collocates(scope: dict | str, word: str, window: int = 4,
                         continue
                     if nb == word_lc:
                         continue
-                    if exclude_stopwords and nb in STOPWORDS:
+                    # W-15 (2026-05-24) — mirror emotion_collocates: also
+                    # filter against _HIGH_FREQ_NEIGHBOR_DROP. STOPWORDS
+                    # alone (~70 tokens) misses high-rank noise like
+                    # off/under/there/all/one that dominated the «steam»
+                    # collocates top in prod. Single source of truth =
+                    # the union of both sets.
+                    if exclude_stopwords and (nb in STOPWORDS or
+                                              nb in _HIGH_FREQ_NEIGHBOR_DROP):
                         continue
                     local[nb] += 1
             return local, local_hits, local_hits > 0
@@ -2042,6 +2049,16 @@ _HIGH_FREQ_NEIGHBOR_DROP = {
     "said", "say", "made", "make", "make", "went", "came", "got", "gone",
     "great", "little", "good", "own", "much", "many", "long", "old",
     "well", "right", "left",
+    # W-15 (2026-05-24) — prod-feedback leakers for «collocates of steam»:
+    # off / under / there / back / way / first / last / every / another /
+    # while / though / really. These are not in STOPWORDS (≈70 tokens)
+    # and slipped past emotion_collocates's filter too. Adding here so
+    # word_collocates (mirroring emotion_collocates) drops them at v1.
+    "off", "under", "there", "back", "way", "first", "last", "few", "every",
+    "another", "while", "though", "really", "always", "almost", "perhaps",
+    "rather", "quite", "indeed", "however", "nor", "neither", "either",
+    "before", "after", "while", "during", "though", "until", "since",
+    "above", "below", "beyond", "across", "around", "behind", "beside",
 }
 
 

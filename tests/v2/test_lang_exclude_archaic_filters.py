@@ -89,10 +89,29 @@ class ExcludeArchaicExtraction(unittest.TestCase):
 class BookRecommendationPlan(unittest.TestCase):
 
     def test_default_lang_en(self):
+        # Sanity: bare «посоветуй книгу для B2» has level=intermediate
+        # extracted, and post-W-9 the builder stamps a level-disclosure
+        # render note (top_books_by_downloads has no CEFR arg). The
+        # default lang=en is the part this test actually guards; the
+        # disclosure was added in 2.6.10 for filter-stability (W-9).
         e = extract("посоветуй книгу для B2")
         plan = _plan_book_recommendation(e)
         self.assertEqual(plan.steps[0].args["lang"], "en")
-        # No exclude_archaic note when flag is false
+        # exclude_archaic is False, but level=intermediate is now
+        # consistently disclosed (W-9 stability).
+        joined = " ".join(plan.render_notes).lower()
+        self.assertNotIn("архаизм", joined,
+                         msg="exclude_archaic disclosure leaked without the flag")
+        self.assertIn("intermediate", joined,
+                      msg="W-9: level=intermediate must be disclosed")
+
+    def test_neutral_query_has_no_render_notes(self):
+        # The truly-empty filter case — no level, no archaic, no country,
+        # no year. Render notes must stay empty so we don't noise-up
+        # answers with disclosures the user never invited.
+        e = extract("посоветуй книгу про любовь")
+        plan = _plan_book_recommendation(e)
+        self.assertEqual(plan.steps[0].args["lang"], "en")
         self.assertEqual(plan.render_notes, [])
 
     def test_explicit_english(self):

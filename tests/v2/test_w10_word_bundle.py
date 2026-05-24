@@ -228,5 +228,74 @@ class EndToEndStanTestBenchCases(unittest.TestCase):
                       msg="etymology query must bundle hybrid_search for corpus titles")
 
 
+# ---------------------------------------------------------------------------
+# W-10 follow-up (2026-05-24) — etymology fallback + soft-degrade
+# ---------------------------------------------------------------------------
+
+
+class WordContextsBundleHasEtymologyFallback(unittest.TestCase):
+    """W-10 follow-up: when v1 enrich_word doesn't fill family_chain
+    for a given word (Stan prod for «ajar»), word_etymology must be
+    in the plan as an explicit fallback so the etymology facet is
+    still surfaced."""
+
+    def test_word_etymology_step_in_word_contexts_plan(self):
+        e = extract('что значит "ajar"')
+        plan = _plan_word_contexts(e)
+        tools = [s.tool for s in plan.steps]
+        self.assertIn("word_etymology", tools,
+                       msg=("W-10 follow-up: word_contexts plan must "
+                            "include word_etymology as a fallback for "
+                            "etymology so «ajar»-class queries don't "
+                            "lose the family chain when enrich_word "
+                            "is empty"))
+
+    def test_word_etymology_step_is_optional(self):
+        e = extract('что значит "ajar"')
+        plan = _plan_word_contexts(e)
+        step = next(s for s in plan.steps if s.tool == "word_etymology")
+        self.assertTrue(step.optional,
+                         msg=("word_etymology is a fallback, not the "
+                              "headline — must be optional so it doesn't "
+                              "kill the plan if Wiktionary is offline"))
+
+
+class WordEtymologyBundleHasRenderNotes(unittest.TestCase):
+    """W-10 follow-up: the word_etymology builder used to ship the
+    bundle steps without any render_notes, so the LLM weighted the
+    intent name and surfaced ONLY the family chain. The new
+    render_notes explicitly demand all surviving facets are bundled."""
+
+    def test_render_notes_present(self):
+        e = extract("этимология слова engine")
+        plan = _plan_word_etymology(e)
+        self.assertTrue(plan.render_notes,
+                         msg=("word_etymology plan must carry "
+                              "render_notes — without them the LLM "
+                              "surfaces only family_chain"))
+
+    def test_render_notes_mention_all_facets(self):
+        e = extract("этимология слова engine")
+        plan = _plan_word_etymology(e)
+        joined = " ".join(plan.render_notes).lower()
+        for facet in ("перевод", "ipa", "pos", "определение",
+                       "title", "этимолог"):
+            self.assertIn(facet, joined,
+                           msg=f"render_notes must mention {facet!r}")
+
+    def test_render_notes_describe_soft_degrade(self):
+        """A missing slot (e.g. no IPA for «ajar») must NOT cancel
+        the others — the bundle is best-effort per-facet."""
+        e = extract("этимология слова engine")
+        plan = _plan_word_etymology(e)
+        joined = " ".join(plan.render_notes).lower()
+        self.assertTrue(
+            any(s in joined for s in ("не указано", "мягк", "пуст",
+                                       "не all-or-nothing",
+                                       "остальные фасеты")),
+            msg=f"render_notes must describe soft-degrade. Got:\n{joined}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

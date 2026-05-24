@@ -344,5 +344,155 @@ class W2ParsePeriod(unittest.TestCase):
         self.assertEqual(_parse_period(123), (None, None))
 
 
+# =====================================================================
+# W-2 (2026-05-24) — render-row shape: r.data.timeline carries the
+# canonical fields the renderer (LLM and typed) needs so the prod
+# «None–None» / empty per-million columns can't recur. Pinning the
+# in-data shape complements the view-side tests above.
+# =====================================================================
+
+
+class W2ComputeFreqFromCounts(unittest.TestCase):
+    """The wrapper recomputes freq_per_million from
+    occurrences/total_tokens × 1e6 — robust against v1 dropping the
+    field and the structural fix for prod's empty «Частота» column
+    (railway/telegraph/steam, 2026-05-24)."""
+
+    def test_freq_recomputed_matches_formula(self):
+        from scripts.v2.tools.words.timeline import word_freq_timeline
+        with mock.patch("scripts.rag_tools.word_freq_timeline",
+                          return_value=_v1_railway_realistic()):
+            r = word_freq_timeline("railway", bucket_years=25, basis="auto")
+        for row in r.data["timeline"]:
+            expected = round(
+                1_000_000.0 * row["occurrences"] / row["total_tokens"], 2,
+            )
+            self.assertEqual(row["freq_per_million"], expected, msg=row)
+            # The v1 row key stays in sync so the V1WordFreqTimeline
+            # __row_keys__ contract isn't violated by callers reading
+            # `per_million` directly.
+            self.assertEqual(row["per_million"], expected, msg=row)
+
+    def test_freq_survives_v1_missing_per_million(self):
+        # v1 dropped per_million from a row — wrapper still surfaces
+        # freq from counts, so the LLM column doesn't go empty.
+        from scripts.v2.tools.words.timeline import word_freq_timeline
+        v1 = {
+            "word": "railway", "bucket_years": 25, "basis": "auto",
+            "axis_basis": "",
+            "timeline": [
+                # per_million intentionally absent
+                {"period": "1825-1849", "books": 50, "total_tokens": 1_000_000,
+                 "occurrences": 20},
+            ],
+        }
+        with mock.patch("scripts.rag_tools.word_freq_timeline",
+                          return_value=v1):
+            r = word_freq_timeline("railway")
+        row = r.data["timeline"][0]
+        self.assertEqual(row["freq_per_million"], 20.0)
+        self.assertEqual(row["per_million"], 20.0)
+        self.assertEqual(row["count"], 20)
+
+
+class W2DataTimelineShape(unittest.TestCase):
+    """r.data.timeline (the LLM render payload) carries renderer-ready
+    fields. Pins each row to a shape the LLM can't render as
+    «None–None» even if it hallucinates view-side field names."""
+
+    def test_period_is_display_ready_en_dash(self):
+        from scripts.v2.tools.words.timeline import word_freq_timeline
+        with mock.patch("scripts.rag_tools.word_freq_timeline",
+                          return_value=_v1_railway_realistic()):
+            r = word_freq_timeline("railway")
+        for row in r.data["timeline"]:
+            # Display label uses en-dash «–», not ASCII hyphen «-»
+            self.assertIn("–", row["period"], msg=row)
+            self.assertNotIn("None", row["period"], msg=row)
+            # And the raw int bounds are surfaced too, for the typed
+            # renderer + any downstream column-aware consumers.
+            self.assertIsInstance(row["bucket_start"], int)
+            self.assertIsInstance(row["bucket_end"], int)
+            self.assertGreaterEqual(row["bucket_end"], row["bucket_start"])
+
+    def test_renderer_aliases_populated(self):
+        # `freq_per_million` and `count` are the renderer-friendly
+        # aliases. Their values are populated from raw counts so the
+        # LLM column for «Частота на 1M слов» is never empty.
+        from scripts.v2.tools.words.timeline import word_freq_timeline
+        with mock.patch("scripts.rag_tools.word_freq_timeline",
+                          return_value=_v1_railway_realistic()):
+            r = word_freq_timeline("railway")
+        for row in r.data["timeline"]:
+            self.assertIsInstance(row["freq_per_million"], (int, float))
+            self.assertIsInstance(row["count"], int)
+
+    def test_data_timeline_sorted_ascending(self):
+        from scripts.v2.tools.words.timeline import word_freq_timeline
+        out_of_order = dict(_v1_railway_realistic())
+        out_of_order["timeline"] = list(reversed(out_of_order["timeline"]))
+        with mock.patch("scripts.rag_tools.word_freq_timeline",
+                          return_value=out_of_order):
+            r = word_freq_timeline("railway")
+        starts = [row["bucket_start"] for row in r.data["timeline"]]
+        self.assertEqual(starts, sorted(starts))
+
+
+class W2RailwayGrowthShape(unittest.TestCase):
+    """Acceptance criterion mirror — «частота слова railway по эпохам»
+    sees a populated period column, populated freq column, and an
+    ascending freq curve toward the end of the 19th century."""
+
+    def test_railway_acceptance_shape(self):
+        from scripts.v2.tools.words.timeline import word_freq_timeline
+        with mock.patch("scripts.rag_tools.word_freq_timeline",
+                          return_value=_v1_railway_realistic()):
+            r = word_freq_timeline("railway", bucket_years=25, basis="auto")
+        rows = r.data["timeline"]
+        # Periods all labelled, no «None» anywhere.
+        labels = [row["period"] for row in rows]
+        self.assertTrue(all("None" not in lbl for lbl in labels), msg=labels)
+        self.assertEqual(labels, ["1825–1849", "1850–1874", "1875–1899"])
+        # Freq column is populated and ascending — the visible-growth
+        # signal the acceptance criterion calls out.
+        freqs = [row["freq_per_million"] for row in rows]
+        self.assertEqual(freqs, sorted(freqs))
+        self.assertGreater(freqs[-1], freqs[0])
+
+
+class W2LLMRenderPayloadNoNone(unittest.TestCase):
+    """The shrinking normalize path used by _llm_render must not strip
+    period column or leave None bounds. Locks the prod failure where
+    the LLM saw a payload that licensed a «None–None» rendering."""
+
+    def test_payload_normalize_keeps_period_and_freq(self):
+        from scripts.v2.tools.words.timeline import word_freq_timeline
+        from scripts.v2.rag_v2 import _normalize_data_for_render
+        with mock.patch("scripts.rag_tools.word_freq_timeline",
+                          return_value=_v1_railway_realistic()):
+            r = word_freq_timeline("railway")
+        normalized = _normalize_data_for_render(r.data)
+        # Every row keeps period as a real string and freq as a real number.
+        for row in normalized["timeline"]:
+            self.assertNotIn(row.get("period"), (None, "", "None", "?–?"))
+            self.assertIsInstance(row.get("freq_per_million"), (int, float))
+            # Not stripped to empty value
+            self.assertIsNotNone(row.get("freq_per_million"))
+
+    def test_payload_serialized_has_no_none_none(self):
+        # End-to-end belt + suspenders: serialize what the LLM would
+        # see and assert «None–None» does not appear textually.
+        import json
+        from scripts.v2.tools.words.timeline import word_freq_timeline
+        from scripts.v2.rag_v2 import _normalize_data_for_render
+        with mock.patch("scripts.rag_tools.word_freq_timeline",
+                          return_value=_v1_railway_realistic()):
+            r = word_freq_timeline("railway")
+        normalized = _normalize_data_for_render(r.data)
+        as_json = json.dumps(normalized, ensure_ascii=False, default=str)
+        self.assertNotIn("None–None", as_json)
+        self.assertNotIn("\"None\"", as_json)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

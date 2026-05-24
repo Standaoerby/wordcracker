@@ -187,7 +187,12 @@ def _translate_topic(topic: str) -> tuple[str, str | None]:
     # bibliography / catalogue / mythology / textbook / anthology entries
     # from recommendation results. R-23 Tier 0: bump wrapper_version so
     # cached results recompute through the extended blocklist.
-    wrapper_version="v4-w13-latency-budget",
+    # W-14 follow-up (Phase 5 P2, 2026-05-24) — META filter moved from
+    # post-truncate to pre-dedup so it cannot get squeezed out by a
+    # META-heavy top of the v1 rank (the actual Дракула case). Cached
+    # results from before this change can include a META-only topN under
+    # the old order; bump invalidates them.
+    wrapper_version="v5-w14-pre-trunc-meta",
 )
 def find_book_by_topic(
     topic: str,
@@ -275,6 +280,24 @@ def find_book_by_topic(
             or ch["rerank_score"] >= min_rerank_score
         ]
 
+    # W-14 follow-up (Phase 5 P2, 2026-05-24) — drop META chunks BEFORE
+    # the pg_id dedup truncates to `top`. Pre-fix order was: dedup-and-
+    # truncate → dedup duplicates → META blocklist. When v1 ranked META-
+    # docs at the top (Stan's «Дракула» case: PG-Gutenberg-index at
+    # rerank=1.000 plus a bookseller's catalogue + Greek-myths textbook
+    # right behind), the top-N truncation grabbed all META rows first
+    # and fiction never made it into `seen` — META blocklist then
+    # dropped everything, leaving an empty recommendation list. Filtering
+    # at the chunk level fixes the squeeze: META chunks never compete
+    # for a slot in the top-N. Cheap — `_is_meta_title` is a frozenset
+    # substring check over a ~50-phrase list, near-instant even at the
+    # per_retriever=30 candidate pool.
+    meta_chunks_dropped = 0
+    if chunks:
+        before_meta = len(chunks)
+        chunks = [ch for ch in chunks if not _is_meta_title(ch.get("title"))]
+        meta_chunks_dropped = before_meta - len(chunks)
+
     # Dedup by pg_id — keep the best-scored chunk per book. Chunks are
     # already ordered by rrf_score (and rerank_score if reranker ran).
     seen: dict[str, dict] = {}
@@ -309,16 +332,17 @@ def find_book_by_topic(
             lambda r: dedup_by_key(r, key="snippet"),
             dedup_book_editions,
         ], books)
-    # E26 (2026-05-22) — META blocklist. Drop bibliography/catalogue/
-    # encyclopedia entries that are valid corpus items but useless as
-    # recommendations.
-    meta_dropped = 0
+    # E26 (2026-05-22) — META blocklist defence-in-depth. Most META
+    # rows already dropped at the chunk level above; this second pass
+    # catches anything that survived (e.g., a title that only revealed
+    # its META nature after edition-dedup merged a subtitle).
+    meta_dropped = meta_chunks_dropped
     if books:
         before = len(books)
         books = [b for b in books if not _is_meta_title(b.get("title"))]
-        meta_dropped = before - len(books)
-        if meta_dropped:
-            filter_drops["meta_blocklist"] = meta_dropped
+        meta_dropped += before - len(books)
+    if meta_dropped:
+        filter_drops["meta_blocklist"] = meta_dropped
     warnings = list(sub.warnings) if sub.warnings else []
     if len(books) < top:
         warnings.append(ToolWarning(
