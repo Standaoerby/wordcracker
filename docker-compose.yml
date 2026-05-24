@@ -1,6 +1,10 @@
 services:
   gutenberg-lab:
-    image: wordcracker-textlab
+    # ADR-B1: image tag templated for deploy-by-SHA. The `:-latest`
+    # fallback keeps current behaviour (deploys without WC_IMAGE_TAG
+    # set continue to use :latest, same as before). Once phase 3
+    # lands, the fallback is removed and WC_IMAGE_TAG becomes required.
+    image: wordcracker-textlab:${WC_IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: Dockerfile
