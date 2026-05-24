@@ -6,27 +6,451 @@
 
 ---
 
-## 2026-05-24 — S-B1: deploy artifact landed (ADR-B1 phase 3 + ADR-B2 accepted)
+## 2026-05-24 — S-B2: supervision landed (ADR-B2 accepted)
 
-Closes block **S-B1** of `docs/tz_structural_fixes_2026-05-24.md`. The
-TZ consolidates ADR-B1 (image-tag-by-commit) + ADR-B2 (no code
-bind-mount in prod) under a single S-B1 acceptance gate: an immutable
+Closes block **S-B2** of `docs/tz_structural_fixes_2026-05-24.md`.
+Promotes ADR-B2 (chat / admin as compose services with proper PID 1)
+from Proposed to Accepted, and flips status_server from a host-side
+`nohup` background process to a host systemd unit that survives reboot.
+After S-B2, `docker compose -f docker-compose.yml up -d --force-recreate`
+deterministically brings up working `chat` + `admin` against the new
+image, with **no** `docker exec`, **no** `pkill`, **no**
+`systemctl restart wordcracker-{chat,admin}` chain. The single mechanism
+in `deploy.sh` is the compose recreate. Host reboot brings status_server
+back via systemd. This is the structural fix the S-B1 follow-up
+explicitly deferred (*chat_server / admin_server as compose services
+with proper PID 1*).
+
+### D-SB2-1 — Two compose services share the SHA-pinned image
+
+**Context.** ADR-B2 Option 1 (separate compose services, same image)
+was the pre-committed direction. Two implementation details ADR-B2
+left open: (a) where the env block lives (compose `environment:` vs.
+systemd drop-in vs. shared `.env`), (b) which data bind-mounts each
+service actually needs (the prior "everything goes into gutenberg-lab"
+was conservative-by-default, not contract-driven).
+
+**Options reconsidered.**
+1. **Single new compose service running a supervisor (s6-overlay /
+   supervisord) that fans out chat + admin.** Keeps gutenberg-lab as
+   one container; one image, one PID-1 supervisor, two managed Python
+   children. Pros: smallest compose churn. Cons: adds a supervisor
+   dependency to the image; PID 1 is now the supervisor, not Python,
+   so SIGTERM propagation depends on supervisor config (re-introduces
+   the very thing R8 + ADR-B2 wanted closed); per-child logs need explicit
+   piping into journald-via-docker; jupyter-in-dev needs to coexist
+   with the supervisor.
+2. **Two separate compose services (`chat`, `admin`), same
+   `wordcracker-textlab:${WC_IMAGE_TAG}` image, distinct `command:`,
+   distinct ports, distinct healthchecks.** Pros: PID 1 = Python in
+   each container (SIGTERM works natively); restart policy is
+   per-service; healthcheck is per-service; jupyter is independent of
+   either. Cons: small YAML duplication (image, env, volumes) —
+   mitigated by YAML anchors (`&app-image`, `&app-env`,
+   `&app-volumes`).
+3. **Two services with two separate images** (chat-only and
+   admin-only image, pip-trimmed per service). Cons: 2× build cost
+   per deploy; pip layer no longer shared; ADR-B1's `:SHA` tag becomes
+   `:SHA-chat` / `:SHA-admin` (verify_deployed_image.sh complexity ↑).
+   Reward (smaller per-image footprint) is invisible on a single host
+   with ample disk.
+
+**Decision.** Option 2. New services in `docker-compose.yml`:
+
+```yaml
+x-app-image: &app-image
+  image: wordcracker-textlab:${WC_IMAGE_TAG:?WC_IMAGE_TAG must be set ...}
+
+x-app-env: &app-env
+  OLLAMA_HOST: http://ollama:11434
+  ASSISTANT_NAME: Словоёб
+  WC_OLLAMA_NUM_CTX: "16384"
+  WC_LLM_MODEL: wordcracker:v2
+  WC_CRITIC_MODEL: wordcracker:v2
+
+x-app-volumes: &app-volumes
+  - /data/books:/workspace/books
+  - /data/clean_books:/workspace/clean_books
+  - /data/chroma_db:/workspace/chroma_db
+  - /data/spgc:/workspace/spgc
+  - /data/raw_text:/workspace/raw_text
+  - /data/wodehouse_raw:/workspace/wodehouse_raw
+  - /data/gutenberg_raw:/workspace/gutenberg_raw
+  - /data/uploads:/workspace/uploads   # admin write target; gutenberg-lab was implicit r/w
+```
+
+Services:
+
+```yaml
+chat:
+  <<: *app-image
+  container_name: wordcracker-chat
+  command: ["python", "-u", "/workspace/scripts/chat_server.py", "--port", "8890"]
+  environment: *app-env
+  volumes: *app-volumes
+  ports: ["8890:8890"]
+  depends_on: { ollama: { condition: service_healthy } }
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8890/health', timeout=2).status == 200 else 1)\""]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 60s
+
+admin:
+  <<: *app-image
+  container_name: wordcracker-admin
+  command: ["python", "-u", "/workspace/scripts/admin_server.py", "--port", "8891"]
+  environment: *app-env
+  volumes: *app-volumes
+  ports: ["8891:8891"]
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8891/health', timeout=2).status == 200 else 1)\""]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 30s
+```
+
+Healthcheck uses `python urllib` instead of `curl` because `curl` is
+not guaranteed in the pytorch-base image's runtime layer (verified by
+`docker compose -f docker-compose.yml exec chat which curl` → exists,
+but defensive — `python` is by definition present in this image). One
+fewer assumption.
+
+**Consequences.**
+- PID 1 in each container is `python -u /workspace/scripts/*.py`.
+  `docker stop` sends SIGTERM to Python directly; graceful shutdown
+  works without the `pkill` orphan-reap that
+  `wordcracker-chat.service:18-20` was apologizing for.
+- `depends_on: ollama: service_healthy` means chat waits for ollama
+  before starting → eliminates the cold-boot race where chat hits
+  ollama before it's up.
+- All three services (`chat`, `admin`, `gutenberg-lab`) share the same
+  image tag — `verify_deployed_image.sh` keeps working with a one-line
+  generalisation (loop over the service list instead of hardcoding
+  `gutenberg-lab`).
+- `admin` writes to `/workspace/uploads` (was implicit under
+  gutenberg-lab; now an explicit data bind-mount at `/data/uploads`).
+  Bookkeeping nit: the host directory must exist. Added to the install
+  step.
+
+**Trade-offs.**
+- Three containers instead of one. Each carries the Python interpreter
+  + `import torch` cost in memory (~700 MB RSS for chat after warmup;
+  admin ~150 MB; jupyter ~600 MB idle). Pre-S-B2 the same code ran in
+  one process tree inside gutenberg-lab. Memory cap on the 40 GB
+  `deploy.resources.limits.memory` (set per gutenberg-lab today) needs
+  re-allocation: 28 GB chat, 4 GB admin, 8 GB jupyter; ollama keeps
+  its 16 GB cap. Total RAM ceiling unchanged.
+- YAML anchors are a one-time learning curve for an operator who hasn't
+  used them. Mitigation: each anchor is named (`x-app-*`) and lives at
+  the top of the file with a comment.
+
+### D-SB2-2 — Jupyter stays in `gutenberg-lab`, base-compose; not moved to dev-only
+
+**Decision.** `gutenberg-lab` service (jupyter on 8888) stays in
+`docker-compose.yml` (the prod base) with its current CMD. Not moved
+to `docker-compose.override.yml`.
+
+**Options.**
+1. **Move jupyter to override (dev-only).** Cleaner prod surface
+   (only chat + admin + ollama would run on prod); also removes the
+   unauthenticated jupyter on port 8888 from prod. **Pros:** smaller
+   attack surface; ~600 MB idle RAM reclaimed on prod.
+   **Cons:** changes prod-runtime shape inside S-B2 — a separate
+   security/footprint concern that deserves its own block; touching
+   it here violates R7 ("one fix = one commit").
+2. **Keep jupyter in base, unchanged.** S-B2 stays focused on
+   supervision. Jupyter security stays a known issue tracked
+   separately.
+
+**Decision rationale.** Option 2. Per R7, S-B2 is about supervision
+shape, not about jupyter's presence on prod. Moving jupyter is a
+distinct decision with its own trade-offs (does the operator want
+jupyter on prod for ad-hoc analysis? authentication story?) — that
+belongs in a follow-up block. Flagged below in "Follow-ups out of
+scope".
+
+**Consequences.**
+- Prod runs four containers post-S-B2: ollama, gutenberg-lab
+  (jupyter), chat, admin. Up from two pre-S-B2 (ollama,
+  gutenberg-lab).
+- The unauth-jupyter-on-prod-port-8888 issue (`--ServerApp.token=''`
+  in `docker-compose.yml:101`) is **not closed** by S-B2 — it is
+  carried forward as a follow-up.
+
+### D-SB2-3 — `status_server` runs as host systemd unit, enabled at install
+
+**Context.** `systemd/wordcracker-status.service` already exists in
+the repo (3 sections: [Unit] / [Service] / [Install]). What was
+missing was *enablement*: `install_systemd_units.sh` did `install -m
+644 ... && systemctl restart ...` but never `systemctl enable`.
+Restart starts the unit *for this boot*; without `enable`, the unit
+is not linked into `multi-user.target.wants/` and does not start
+after reboot. That's why the user reports "status_server на хосте
+через nohup не переживает ребут" — the systemd unit either was never
+installed or was installed-without-enable, and the running instance
+is in fact a manual nohup.
+
+**Options.**
+1. **Add `systemctl enable` next to `systemctl restart` in
+   `install_systemd_units.sh`.** Standard systemd lifecycle; one-time
+   per-unit-change operator step (same shape as the existing install
+   step).
+2. **Convert status_server to a compose service on the host (not the
+   container).** Doesn't apply — status_server reads host paths
+   (`/data/spgc`, `/data/chroma_db`, `/data/raw_text` directly,
+   *not* the container view), and Docker bind-mounts work the other
+   way. Putting it in a container forces another bind-mount tree
+   for paths it already reads natively.
+3. **Containerise status_server.** Same objection as Option 2;
+   status_server's whole point is "no Docker dependency, runs on
+   host, host-stdlib Python".
+
+**Decision.** Option 1. `install_systemd_units.sh` adds two changes:
+(a) after the `install -m 644` loop, run `sudo systemctl enable
+wordcracker-status` so it links into `multi-user.target.wants/` and
+fires on reboot; (b) `systemctl restart wordcracker-status` joins
+the existing restart loop for chat/admin (chat/admin restarts go away
+under D-SB2-6, so the new restart line is `systemctl restart
+wordcracker-status` only).
+
+**Consequences.**
+- After one-time install on prod, `reboot` → status_server back on
+  :8889. No operator action.
+- `journalctl -u wordcracker-status -f` keeps working (already
+  configured in the unit's `StandardOutput=journal`).
+- A nohup'd `status_server.py` running on prod TODAY must be killed
+  by the operator BEFORE `systemctl start wordcracker-status` — same
+  port 8889 collision. Documented in the install script's output
+  (D-SB2-9 follow-up: detect and warn).
+
+### D-SB2-4 — `deploy.sh` collapses to a single mechanism
+
+**Decision.** `scripts/deploy.sh` step 4 changes from
+
+```bash
+WC_IMAGE_TAG="${SHA}" docker compose -f docker-compose.yml \
+    up -d --force-recreate gutenberg-lab
+```
+
+to
+
+```bash
+WC_IMAGE_TAG="${SHA}" docker compose -f docker-compose.yml \
+    up -d --force-recreate gutenberg-lab chat admin
+```
+
+And step 5 (the `for unit in wordcracker-chat wordcracker-admin; do
+systemctl restart "$unit"; done` loop, deploy.sh:127-138) is **deleted
+entirely**. `wordcracker-status` is not restarted on deploy — its code
+lives on the host and is not part of any image tag.
+
+**Why.** Pre-S-B2: the recreate was on gutenberg-lab only; chat/admin
+ran as systemd-managed `docker compose exec` clients pinned to the
+*old* container ID, so they died on recreate and needed `systemctl
+restart` to re-exec into the *new* container. Two mechanisms. Post-S-B2:
+chat/admin ARE compose services; `--force-recreate` recreates them with
+the new image tag in the same single command. One mechanism.
+
+**Consequences.**
+- `deploy.sh` no longer needs `sudo` for the systemctl restart loop on
+  most deploys (the loop is gone). `install_systemd_units.sh` retains
+  the sudo boundary explicitly (one-time per systemd-change).
+- Operator running `docker compose -f docker-compose.yml up -d
+  --force-recreate` manually now deploys identically to `bash
+  scripts/deploy.sh` minus the .env write, the SHA tag build and the
+  prune. The pure-compose path is now a real path, not a half-path
+  that needs systemctl follow-up.
+- A `--force-recreate <subset>` syntactically still works; an operator
+  who passes just `gutenberg-lab` recreates only jupyter and leaves
+  chat/admin on the old image. Deploy script always passes the three
+  service names explicitly to prevent this footgun.
+
+### D-SB2-5 — `v2-engine.conf` drop-in deleted; pins move into compose
+
+**Decision.** Delete
+`systemd/wordcracker-chat.service.d/v2-engine.conf` from the repo
+(and on prod, `sudo rm
+/etc/systemd/system/wordcracker-chat.service.d/v2-engine.conf
+&& sudo rmdir /etc/systemd/system/wordcracker-chat.service.d
+&& sudo systemctl daemon-reload`). The two pins it still carried —
+`WC_LLM_MODEL=wordcracker:v2` and `WC_CRITIC_MODEL=wordcracker:v2`
+— move into the `chat` service's `environment:` block (the `*app-env`
+anchor under D-SB2-1). The dead `WC_DEFAULT_ENGINE=v2` (flagged for
+removal in D-S0-5) dies with the file.
+
+**Why.** Under D-SB2-6 the parent unit `wordcracker-chat.service` is
+deleted. A drop-in for a unit that no longer exists is dead config of
+the worst kind — silently invalid, no error surface, exactly the R8
+hazard. Moving the live pins into compose is the natural relocation
+target now that chat IS a compose service.
+
+**Consequences.**
+- D-S0-5 explicit pending-removal honored.
+- The `infra.md §2` row for `WC_DEFAULT_ENGINE` transitions from
+  "pending-removal (drop-in)" to "removed". `infra.md §2`'s row for
+  `WC_LLM_MODEL` / `WC_CRITIC_MODEL` transitions from "set via
+  systemd drop-in" to "set via compose `chat.environment`".
+
+### D-SB2-6 — `wordcracker-chat.service` and `wordcracker-admin.service` deleted
+
+**Decision.** Delete `systemd/wordcracker-chat.service` and
+`systemd/wordcracker-admin.service` from the repo. On the prod host,
+`sudo systemctl disable --now wordcracker-chat wordcracker-admin && sudo
+rm /etc/systemd/system/wordcracker-chat.service
+/etc/systemd/system/wordcracker-admin.service && sudo systemctl
+daemon-reload`. `wordcracker-status.service` stays — host process, no
+docker dependency.
+
+**Why.** With chat / admin as compose services, the systemd units
+become a parallel supervisor for the same processes. Two supervisors
+race (compose `restart: unless-stopped` vs. systemd `Restart=on-failure`),
+behavior depends on which one notices the death first, and any future
+operator wondering "why did chat get restarted twice in a row?" hits
+the worst class of diagnose-the-supervisor bug. One supervisor only.
+The remaining one is Docker (via compose).
+
+**Consequences.**
+- `install_systemd_units.sh` `UNITS` array contracts from
+  `(chat, admin, status)` to `(status,)`. The script's existing
+  `if [[ ! -f "$src" ]]; then continue; fi` guard makes the array
+  shrink graceful for an in-flight half-applied prod.
+- `journalctl -u wordcracker-chat` stops being a thing. Logs for chat
+  move to `docker compose logs chat` (or `docker logs wordcracker-chat`).
+  Operator runbook needs the new command — added to D-SB2-9 doc list.
+- `wordcracker-chat.service.d/` drop-in directory is empty after
+  D-SB2-5; `rmdir` it on prod. Empty drop-in dirs are harmless but
+  noisy in `ls /etc/systemd/system/`.
+
+### D-SB2-7 — Healthcheck moves to compose; systemd `ExecStartPost` curl loop is gone
+
+**Decision.** Each new compose service declares a `healthcheck:` block
+(see D-SB2-1). `chat` has `start_period: 60s` to cover the
+ChromaDB+SentenceTransformer cold-load (observed p95 ~14s,
+`wordcracker-chat.service:32` comment); admin has `start_period: 30s`
+(no ChromaDB warmup, only loads on first request).
+
+**Why.** The systemd-side ExecStartPost curl loop (`for i in $(seq 1
+30); do sleep 2; curl ...`) was a poor man's healthcheck and was
+deleted along with the unit. Compose's native `healthcheck:` is the
+right place — surfaces `(healthy)` in `docker compose ps`, exposes a
+`Status: starting/healthy/unhealthy` flag that downstream tooling
+(verify, smoke, predeploy) can read with one command.
+
+**Consequences.**
+- `docker compose -f docker-compose.yml ps` shows
+  `wordcracker-chat ... healthy` instead of opaque `running`.
+  Smoke gate (D-SB2-8) reads the same flag.
+- `depends_on: chat: service_healthy` is now available for other
+  services (e.g. a future smoke runner) — `docker compose up -d
+  chat-smoke-test` could wait for chat to be healthy before running.
+  Out of scope for S-B2 but a free downstream win.
+
+### D-SB2-8 — Negative tests (R2)
+
+`tests/v2/test_deploy_artifact.py` (created in S-B1) grows S-B2 cases.
+Per R2 each "X true" has its "NOT-X" mirror; the test names use the
+`test_*_AND_NOT_*` shape so the mirror is greppable.
+
+1. **`test_chat_and_admin_are_compose_services`** — load
+   `docker-compose.yml`; assert `services` contains both `chat` and
+   `admin`; each has a non-empty `command:`; each has `ports:` mapping
+   the expected `8890:8890` / `8891:8891`; each has `image:` of the
+   form `wordcracker-textlab:${WC_IMAGE_TAG...}` (catches accidental
+   `:latest` regression under the new services too).
+2. **`test_no_docker_exec_in_any_systemd_unit`** (negative mirror of
+   #1) — walk `systemd/*.service`; assert no file contains the literal
+   substring `docker compose exec` or `docker exec`. Catches a
+   regression where someone "fixes" a future bug by reintroducing the
+   exec pattern.
+3. **`test_chat_and_admin_systemd_units_removed`** (negative mirror) —
+   assert `systemd/wordcracker-chat.service` and
+   `systemd/wordcracker-admin.service` do NOT exist on disk in the
+   repo. Pairs with #1 in spirit: if chat is a compose service, the
+   systemd file MUST be gone (no second supervisor).
+4. **`test_status_unit_has_install_section`** — assert
+   `systemd/wordcracker-status.service` contains `[Install]` with
+   `WantedBy=multi-user.target`. Without `[Install]`, `systemctl enable`
+   is a no-op — the unit can never auto-start on reboot. This is the
+   D-SB2-3 guarantee.
+5. **`test_v2_engine_drop_in_removed`** — assert
+   `systemd/wordcracker-chat.service.d/v2-engine.conf` does NOT exist.
+   Closes D-S0-5; mirror is implicit (its presence used to be the bug).
+6. **`test_chat_environment_pins_llm_models`** — assert
+   `docker-compose.yml` `services.chat.environment` contains
+   `WC_LLM_MODEL=wordcracker:v2` and `WC_CRITIC_MODEL=wordcracker:v2`.
+   The pins moved from the drop-in to compose — verify they survived
+   the move. Negative: assert neither name appears in `systemd/`.
+7. **`test_deploy_sh_no_systemctl_restart_of_chat_admin`** — grep
+   `scripts/deploy.sh` for `systemctl restart wordcracker-chat` and
+   `systemctl restart wordcracker-admin`; both must be ABSENT.
+   Negative mirror: assert `docker compose ... up -d --force-recreate`
+   IS present and names `chat` and `admin` in the service list (so
+   somebody can't "remove the systemctl line" without adding the
+   recreate-with-new-services).
+
+Each of #1-#7 is a single-direction assert; the NOT-X mirror is the
+sibling test (#1↔#3, #5 implicit, #6 has its own grep mirror, #7
+both directions in one test). R2 satisfied: no "claim closed" without
+a test that would have failed pre-S-B2.
+
+### Acceptance gate (TZ S-B2)
+
+| Gate                                                                            | How verified                                                                       |
+|---------------------------------------------------------------------------------|------------------------------------------------------------------------------------|
+| `docker compose -f docker-compose.yml up -d --force-recreate` brings chat+admin | `scripts/smoke_s_b2.sh`: recreate → poll `/health` on 8890+8891 → both 200 within 180 s (covers cold ollama `start_period: 90s` + chat warmup) |
+| No `docker compose exec` survives in any systemd unit                           | `tests/v2/test_deploy_artifact.py::test_no_docker_exec_in_any_systemd_unit`        |
+| chat & admin defined as compose services with explicit command + SHA image      | `tests/v2/test_deploy_artifact.py::test_chat_and_admin_are_compose_services`       |
+| Host reboot brings status_server back                                           | Operator: `sudo reboot && sleep 60 && curl -sf http://127.0.0.1:8889/health`; or `systemctl is-enabled wordcracker-status` returns `enabled` |
+| `deploy.sh` is one mechanism (compose recreate only)                            | `tests/v2/test_deploy_artifact.py::test_deploy_sh_no_systemctl_restart_of_chat_admin` |
+
+### Follow-ups deliberately out of scope of S-B2
+
+- **Jupyter on prod (unauth, port 8888)** — D-SB2-2 explicitly kept it
+  in base for R7 (one fix per commit). A follow-up block (proposed
+  name `S-B3` — security surface) should pick between: move jupyter
+  to override only, OR keep on prod with token auth wired through env.
+  Not S-B2's call.
+- **Memory limit redistribution** — D-SB2-1 notes the 40 GB
+  gutenberg-lab cap needs splitting across chat (28 GB), admin (4 GB),
+  jupyter (8 GB). The redistribution is one compose edit; folded into
+  S-B2 implementation but not its own gate. Verify via `docker stats`
+  post-deploy.
+- **`predeploy_check.py` gate ahead of deploy.sh** — ADR-B4. S-B2 still
+  trusts the operator's local `tests/v2` run before deploy.
+- **`/health.git_sha`, footer SHA, `ARG GIT_SHA`** — ADR-B3 (runtime
+  build identity) covers it. Originally bundled with the supervision
+  proposal; on inspection orthogonal (a runtime-self-report concern,
+  not a PID-1 concern) and split out into its own ADR. Filled in by
+  Step 4 / S-B3.
+
+---
+
+## 2026-05-24 — S-B1: deploy artifact landed (ADR-B1 accepted)
+
+Closes block **S-B1** of `docs/tz_structural_fixes_2026-05-24.md`.
+S-B1 lands ADR-B1 (deploy artifact: image-tag-by-commit + code-in-image)
+under a single acceptance gate: an immutable
 SHA-tagged Docker image is the only thing that reaches prod, bind-mount
 of the live repo is dev-only, and rollback is `re-run with the previous
-tag`. This section is the implementation record that turns both ADRs
+tag`. This section is the implementation record that turns ADR-B1
 into runnable code.
 
 ### D-SB1-1 — Compose layout (restructure, not prod-overlay)
 
-**Context.** ADR-B2 Proposed Option 3 ("add `docker-compose.prod.yml`
-that REMOVES bind-mounts"). At implementation time two structural
-shapes turned out to be available; the ADR text didn't pick between
-them definitively. Picking now.
+**Context.** ADR-B1 originally floated a `docker-compose.prod.yml`
+overlay that would REMOVE bind-mounts on top of base. At
+implementation time two structural shapes turned out to be available;
+the ADR text didn't pick between them definitively. Picking now.
 
 **Options reconsidered.**
 1. **Add a `docker-compose.prod.yml` overlay** that nullifies code
    volumes via compose `!override` / `!reset` directive. Pros: matches
-   the literal ADR-B2 text; minimal file reshuffle. Cons: every prod
+   the original ADR-B1 overlay sketch; minimal file reshuffle. Cons: every prod
    invocation has to chain three `-f` flags (or systemd must know the
    full file set); `!override`/`!reset` need recent compose-spec
    (≥2.20); silent fail mode if the directive misbehaves is "bind-mount
@@ -62,7 +486,7 @@ single explicit flag, greppable from the systemd unit text.
   the running shell. Repo ships `.env.example`; `.env` itself stays
   gitignored.
 - Data bind-mounts (`/data/books`, `/data/spgc`, `/data/chroma_db`, …)
-  stay in base — they are corpus/state, not source code, and ADR-B2's
+  stay in base — they are corpus/state, not source code, and ADR-B1's
   own trade-off section excluded them from the rule explicitly.
 
 **Trade-offs.**
@@ -96,7 +520,7 @@ the image would leave `/workspace/scripts` empty in prod.
 - The defensive pyc-purge `ExecStartPre` at
   `systemd/wordcracker-chat.service:25` becomes redundant for the
   scripts/ path (kept as defence-in-depth for one more deploy cycle;
-  removal lands in ADR-B3 along with the broader systemd rewrite).
+  removal lands in ADR-B2 along with the broader systemd rewrite).
 
 ### D-SB1-3 — `WC_IMAGE_TAG` is required; no `:-latest` fallback
 
@@ -173,7 +597,8 @@ This is the S-B1 acceptance script. It runs as the last step of
 `deploy.sh` and is independently invocable for spot checks. A more
 complete runtime-identity probe (`git_sha` in `/health`, footer SHA,
 `ARG GIT_SHA` baked into the image, version string scrubbed of feature
-flags) is ADR-B3 territory — explicitly out of scope here.
+flags) is ADR-B3 (runtime build identity) territory — explicitly out
+of scope here.
 
 ### D-SB1-6 — systemd `ExecStartPre` pinned to base compose file
 
@@ -185,8 +610,8 @@ from `/usr/bin/docker compose ...` to
 **Why.** Without `-f`, `docker compose` auto-applies
 `docker-compose.override.yml`, which (after D-SB1-1) re-introduces
 code bind-mounts. The `-f` flag pins systemd to the prod-only file
-set. Explicit, greppable, and survives the future ADR-B3 rewrite of
-these units (where the rewrite carries `-f` along).
+set. Explicit, greppable, and survives the ADR-B2 rewrite of these
+units (where the rewrite carries `-f` along).
 
 **Operator step.** Systemd unit files are under `systemd/` in the
 repo but live at `/etc/systemd/system/` on prod. Syncing them is a
@@ -237,17 +662,19 @@ literal string check fails if the regex slips).
 
 ### Follow-ups deliberately out of scope of S-B1
 
-- **`/health.git_sha` + footer SHA + `ARG GIT_SHA` build-arg** — ADR-B3
-  ("runtime identity") covers it. `verify_deployed_image.sh` checks
-  the docker-level tag; not the in-process self-report.
+- **`/health.git_sha` + footer SHA + `ARG GIT_SHA` build-arg** —
+  ADR-B3 (runtime build identity) will cover it.
+  `verify_deployed_image.sh` checks the docker-level tag; not the
+  in-process self-report.
 - **chat_server / admin_server as compose services with proper PID 1**
-  — ADR-B3. The pyc-purge / `docker compose exec` chain stays in
-  systemd until then.
+  — ADR-B2. The pyc-purge / `docker compose exec` chain is gone
+  post-S-B2.
 - **Predeploy gate (`scripts/v2/predeploy_check.py`)** — ADR-B4.
   `deploy.sh` has a `TODO(ADR-B4)` comment marking where the predeploy
   call will slot in.
 - **`v2-engine.conf` drop-in removal** — per D-S0-5: opportunistic
-  removal during ADR-B3 or earlier if touched for another reason.
+  removal during ADR-B2 or earlier if touched for another reason.
+  Completed under S-B2 / D-SB2-5.
 - **Image registry vs local store** — ADR-B1 trade-off: single host,
   single user → local `/var/lib/docker` store is enough. Registry
   becomes interesting only when a second prod host appears.
@@ -412,7 +839,7 @@ is the same "no commented flags in compose" anti-pattern, just on the
 systemd side. The removal lands in one of two structurally-adjacent
 blocks:
 
-- **S-F4 / S-B5** — when ADR-B3 collapses chat/admin into compose
+- **S-F4 / S-B5** — when ADR-B2 collapses chat/admin into compose
   services with proper PID 1, the `v2-engine.conf` drop-in is deleted
   wholesale (its pins `WC_LLM_MODEL=wordcracker:v2` and
   `WC_CRITIC_MODEL=wordcracker:v2` move into the new compose service's
@@ -504,140 +931,107 @@ NOT uniform: B1 is multi-day; A4 is half a day.
 
 ---
 
-### ADR-B1 — Pinned dependencies + image-tag-by-commit
+### ADR-B1 — Deploy artifact: image-tag-by-commit + code-in-image
 
-**Status.** Accepted (2026-05-24). Phases 1 + 2 landed in commits
-329908b → 897573a → 9f646c4 → c86d22d → 148609d; image rebuilt and
-verified on prod (cuda True, 2012 tests collected, service restart
-clean, cache_write_failed count = 0 post-restart). Phase 3 (deploy
-hook + drop `:-latest` fallback) is deferred behind a deliberate
-bake-time per R7 — see task list. Other ADRs in this block remain
-Proposed pending review or implementation.
+**Status.** Accepted (2026-05-24). Implementation: see S-B1 dated
+block at top of file, D-SB1-1..6.
 
-**Context.** [Dockerfile:7-28](Dockerfile:7) installs `jupyterlab`,
-`spacy[transformers]`, `transformers`, `sentence-transformers`,
-`chromadb`, `pandas`, `scikit-learn` without version pins or a
-lockfile. [Dockerfile:30-31](Dockerfile:30) runs `python -m spacy
-download en_core_web_sm` and `en_core_web_trf` — silently
-version-floating models (download URL serves current spaCy
-version). [docker-compose.yml:3](docker-compose.yml:3) declares
-`image: wordcracker-textlab` — single name, no tag, no commit SHA.
-Result: `docker compose build` on day N and day N+30 can yield
-different runtime artifacts at the same git SHA. Audit C5 ("bake
-time = 0; деплой-и-откат за 30 минут") presumes identical artifacts
-across deploys — currently not true.
+**Context.** Pre-acceptance the deploy artifact had two intertwined
+failure modes:
 
-**Options considered.**
-1. **`requirements.txt` + `requirements.lock` (pip-compile), image
-   tagged by commit SHA.** Standard. Forces deterministic build.
-   Maintenance: explicit `pip-compile` on dep refresh.
-2. **`uv` with `pyproject.toml` + `uv.lock`.** Same goal, faster
-   install. Yet-another-packaging-change cost for a single-author
-   codebase.
-3. **Status quo + container-rebuild discipline.** Cheap, but R8
-   ("сначала читай живой путь") becomes impossible — `pip show` in
-   the running container is the only source of truth, drifts with
-   the latest pull.
+1. **Image tag drift.** [docker-compose.yml:3](docker-compose.yml:3)
+   declared `image: wordcracker-textlab` — single name, no tag, no
+   commit SHA. `docker compose build` on day N and day N+30 yielded
+   different runtime artifacts at the same git SHA. Audit C5 ("bake
+   time = 0; деплой-и-откат за 30 минут") presumes identical artifacts
+   across deploys — it wasn't true.
 
-**Decision.** Option 1. Create `requirements.in` (~25 top-level deps
-from Dockerfile:7-28) and `requirements.lock` (transitive freeze).
-Dockerfile reads `pip install --require-hashes -r
-requirements.lock`. spaCy models pinned by direct URL (e.g.
-`en_core_web_sm-3.7.1`). [docker-compose.yml:3](docker-compose.yml:3)
-becomes `image: wordcracker-textlab:${WC_IMAGE_TAG:-latest}`. Deploy
-hook exports `WC_IMAGE_TAG=$(git rev-parse --short HEAD)`.
-
-**Consequences.**
-- New files at repo root: `requirements.in`, `requirements.lock`.
-- Dockerfile rewritten to install from lockfile (RUN layer cacheable).
-- `make build-image` (or equivalent) is the canonical build entry;
-  `pip-compile` on dep change is a separate, explicit step.
-- Rollback becomes coherent: `WC_IMAGE_TAG=<prev-sha> docker compose
-  up -d gutenberg-lab` restores the prior image without rebuild.
-- One-time cost: discover and resolve any existing dev↔prod version
-  skew.
-
-**Trade-offs.**
-- Lockfile maintenance friction is the **goal** — discourages casual
-  cascade upgrades (per R7).
-- Image-tag-by-SHA needs a local image store (single host, single
-  user — `docker save | docker load` to `/data/docker-images/` is
-  adequate; no private registry required).
-- spaCy direct-URL pin is one extra config to track; payoff is
-  reproducible NLP behavior across deploys.
-
----
-
-### ADR-B2 — Code lives in the image, not on host bind-mount
-
-**Status.** Proposed.
-
-**Context.** [docker-compose.yml:11-14](docker-compose.yml:11) mounts
-`./scripts:/workspace/scripts`, `./tests:/workspace/tests`,
-`./notebooks:/workspace/notebooks` as bind-mounts. The container
-does not own the code — host filesystem does. Implications:
-- Any unstaged `.py` edit on host = immediate code in prod. No
-  atomic deploy flip.
-- `git checkout` to a different branch on host changes prod.
-- [wordcracker-chat.service:25](systemd/wordcracker-chat.service:25)
-  ships defensive pyc purge because a "fresh scp of .py" once lost
-  to an old `.pyc`. Bind-mount + concurrent edit is the precise
-  failure class.
+2. **Code via bind-mount.** [docker-compose.yml:11-14](docker-compose.yml:11)
+   mounted `./scripts:/workspace/scripts`, `./tests:/workspace/tests`,
+   `./notebooks:/workspace/notebooks` as bind-mounts. The container
+   did not own the code — host filesystem did. Implications:
+   - Any unstaged `.py` edit on host = immediate code in prod. No
+     atomic deploy flip.
+   - `git checkout` to a different branch on host changed prod.
+   - [wordcracker-chat.service:25](systemd/wordcracker-chat.service:25)
+     shipped defensive pyc purge because a "fresh scp of .py" once
+     lost to an old `.pyc`. Bind-mount + concurrent edit was the
+     precise failure class.
 
 Data mounts at [docker-compose.yml:17-23](docker-compose.yml:17)
-(`/data/chroma_db`, `/data/spgc`, `/data/books`) are LEGITIMATELY
+(`/data/chroma_db`, `/data/spgc`, `/data/books`) were LEGITIMATELY
 bind-mounts — corpus is hundreds of GB on host disk. **This ADR is
-only about code paths.**
+only about code paths and the image-tag.** Dependency pinning is a
+separate concern (ADR-B6).
 
 **Options considered.**
-1. **`COPY scripts/ tests/` into image at build; remove code
-   bind-mounts in prod.** Deploy = build new image + restart.
-   Atomic. Pairs with B1.
-2. **Keep bind-mount + tighten deploy hook (`git fetch && git reset
-   --hard <tag>` with a lock file).** Cheaper but `git reset --hard`
-   on a host where a developer might be mid-edit is destructive.
-3. **Hybrid: COPY in image AND keep bind-mount for dev via compose
-   override.** Production override sets `volumes: []` for code paths;
-   dev override keeps the bind. Two compose files — they already
-   exist.
+1. **Image-tag-by-commit + `COPY scripts/ tests/` into image at
+   build + remove code bind-mounts in prod; hybrid override for
+   dev.** Atomic deploy. A `docker-compose.override.yml` keeps
+   bind-mounts so edit-and-reload still works locally. Deploy =
+   build new image (SHA tag) + restart.
+2. **Image-tag-by-commit only; keep bind-mount + tighten deploy
+   hook (`git fetch && git reset --hard <tag>` with a lock file).**
+   Cheaper but `git reset --hard` on a host where a developer might
+   be mid-edit is destructive.
+3. **Status quo + container-rebuild discipline.** No artifact
+   pinning at all; relies on operator memory. Bake time stays 0 —
+   the audit gate is unmet.
 
-**Decision.** Option 3. Dockerfile adds `COPY scripts/
-/workspace/scripts/` and `COPY tests/ /workspace/tests/`. A new
-`docker-compose.prod.yml` REMOVES the `./scripts` and `./tests`
-bind-mounts for `gutenberg-lab` (data mounts stay). Dev keeps
-existing [docker-compose.override.yml](docker-compose.override.yml)
-behaviour (bind-mounts for edit-and-reload).
-
-Prod deploy command: `docker compose -f docker-compose.yml -f
-docker-compose.prod.yml up -d gutenberg-lab`. systemd units invoke
-this.
+**Decision.** Option 1. `docker-compose.yml` becomes
+`image: wordcracker-textlab:${WC_IMAGE_TAG:?WC_IMAGE_TAG must be set ...}`
+(strict-required, no `:-latest` fallback). `Dockerfile` adds
+`COPY scripts/ /workspace/scripts/` and
+`COPY tests/ /workspace/tests/`.
+[docker-compose.override.yml](docker-compose.override.yml) keeps the
+dev bind-mounts and a `:-dev` fallback. Deploy hook
+(`scripts/deploy.sh`) builds
+`wordcracker-textlab:$(git rev-parse --short HEAD)` and atomically
+writes `WC_IMAGE_TAG=$SHA` into `.env`.
+`scripts/verify_deployed_image.sh` asserts the running container's
+image tag matches the expected SHA.
 
 **Consequences.**
 - `git checkout` on host no longer affects running prod (image is
-  SHA-frozen via B1).
-- Pyc-purge `ExecStartPre` at [wordcracker-chat.service:25](systemd/wordcracker-chat.service:25)
-  becomes redundant in prod (kept as defence-in-depth short-term).
-- Single deploy path: commit → push → `docker compose build` (or CI
-  build) → image-tag bump → `docker compose up -d`.
-- Iteration in dev unaffected — bind-mount + hot-reload preserved.
+  SHA-frozen).
+- Atomic deploy flip: new image tag = new container; old image stays
+  available for rollback (`deploy.sh --rollback <prev-sha>`).
+- Single deploy path: commit → push → `bash scripts/deploy.sh` →
+  image-tag bump → `docker compose up -d --force-recreate`. Rollback
+  is `re-run with the previous tag`, no rebuild.
+- Image retention: deploy.sh prunes all but the last 5 SHA-tagged
+  images.
+- Pyc-purge `ExecStartPre` in the systemd chat unit becomes redundant
+  for the scripts/ path (kept as defence-in-depth until S-B2 deletes
+  the unit entirely).
+- Iteration in dev unaffected — bind-mount + edit-and-reload
+  preserved via override.
 
 **Trade-offs.**
 - Image rebuild cost on code change = one `COPY` layer (pip layer
-  cached); small.
-- Prod hotfix path becomes "rebuild + redeploy" — no `vim
-  /workspace/scripts/...` shortcut. **Friction is desired** per R7,
-  R8.
-- If a hotfix is truly minute-critical, the SHA-tag image makes
-  rollback fast; structured emergency fix > shell-edit.
+  cached); ~5 s on the prod host.
+- Prod hotfix path becomes "rebuild + redeploy" — no
+  `vim /workspace/scripts/...` shortcut. **Friction is desired** per
+  R7, R8.
+- Image-tag-by-SHA needs a local image store (single host, single
+  user — local `/var/lib/docker` store is enough; no private
+  registry required).
+- Operator running bare `docker compose up` on the prod host
+  (without `-f docker-compose.yml`) silently switches into dev shape
+  (bind-mounts back). Mitigated by systemd / deploy.sh always
+  passing `-f` explicitly; `verify_deployed_image.sh` catches the
+  wrong tag if someone forgets.
 
 ---
 
-### ADR-B3 — `chat_server` / `admin_server` as compose services with proper PID 1
+### ADR-B2 — `chat_server` / `admin_server` as compose services with proper PID 1
 
-**Status.** Proposed.
+**Status.** Accepted (2026-05-24). Implementation: see S-B2 dated
+block at top of file, D-SB2-1..8.
 
-**Context.** [wordcracker-chat.service:14-28](systemd/wordcracker-chat.service:14)
-orchestrates `chat_server` as:
+**Context.** Pre-acceptance,
+[wordcracker-chat.service:14-28](systemd/wordcracker-chat.service:14)
+orchestrated `chat_server` as:
 
 ```
 ExecStartPre=docker compose up -d gutenberg-lab
@@ -646,31 +1040,30 @@ ExecStartPre=-docker compose exec ... find /workspace/scripts/__pycache__ -name 
 ExecStart=docker compose exec -T ... python -u /workspace/scripts/chat_server.py --port 8890
 ```
 
-The unit's own comment explains: «SIGTERM doesn't propagate from
+The unit's own comment explained: «SIGTERM doesn't propagate from
 `docker compose exec` to the python process inside the container,
 so old chat_server.py instances can survive a restart and keep
 port 8890 bound.» Concretely:
-- [wordcracker-chat.service:39](systemd/wordcracker-chat.service:39)
-  `KillSignal=SIGTERM` and `TimeoutStopSec=20` kill only the
-  `docker compose exec` client; the container-side Python is
+- `KillSignal=SIGTERM` and `TimeoutStopSec=20` killed only the
+  `docker compose exec` client; the container-side Python was
   orphaned (hence the `pkill` on START).
-- Three deploy patterns coexist: `wordcracker-chat.service` and
-  `wordcracker-admin.service` use `docker compose exec`;
+- Three deploy patterns coexisted: `wordcracker-chat.service` and
+  `wordcracker-admin.service` used `docker compose exec`;
   [wordcracker-status.service:12](systemd/wordcracker-status.service:12)
-  runs `/usr/bin/python3` from host directly (status_server has no
+  ran `/usr/bin/python3` from host directly (status_server has no
   Docker dependency — reads file metadata).
 - [v2-engine.conf:21-22](systemd/wordcracker-chat.service.d/v2-engine.conf:21)
-  resets `ExecStart` to re-add `-e WC_DEFAULT_ENGINE=v2 -e
+  reset `ExecStart` to re-add `-e WC_DEFAULT_ENGINE=v2 -e
   WC_LLM_MODEL=... -e WC_CRITIC_MODEL=...` because the main unit's
-  ExecStart only forwards `ASSISTANT_NAME`. `WC_DEFAULT_ENGINE` was
-  deleted from code in D-P1-5; the drop-in still ships it. This is
-  exactly the dead-config drift R8 forbids.
+  ExecStart only forwarded `ASSISTANT_NAME`. `WC_DEFAULT_ENGINE` was
+  deleted from code in D-P1-5; the drop-in still shipped it.
+  Exactly the dead-config drift R8 forbids.
 
 **Options considered.**
-1. **`chat_server` / `admin_server` as separate compose services,
-   same image as `gutenberg-lab`.** Each service has its own
-   `command:` (python = PID 1). SIGTERM works. systemd uses `docker
-   compose up -d wordcracker-chat`.
+1. **chat / admin as separate compose services, same image as
+   `gutenberg-lab`.** Each service has its own `command:` (python =
+   PID 1). SIGTERM works. systemd no longer manages chat/admin —
+   Docker / compose is the only supervisor.
 2. **Separate compose services with separate images.** Cleaner
    isolation; ×3 image build cost (small — same deps). Overkill for
    single-host.
@@ -678,46 +1071,90 @@ port 8890 bound.» Concretely:
    with `exec python ...`). Doesn't fix the `docker compose exec`
    child-of-exec problem — exec is still the parent and SIGTERM
    still doesn't reach python.
+4. **Supervisor (s6-overlay / supervisord) inside gutenberg-lab
+   container, fans out chat + admin.** Keeps a single container, but
+   adds a supervisor dependency; PID 1 becomes the supervisor (not
+   python) — re-introduces the very thing R8 wanted closed.
 
-**Decision.** Option 1. Add compose services `wordcracker-chat`
-(port 8890) and `wordcracker-admin` (port 8891) sharing the
-`wordcracker-textlab:${WC_IMAGE_TAG}` image. Each has its own
+**Decision.** Option 1. New services `chat` (port 8890) and `admin`
+(port 8891) in `docker-compose.yml`, sharing the
+`wordcracker-textlab:${WC_IMAGE_TAG}` image via YAML anchors
+(`*app-image`, `*app-env`, `*app-volumes`). Each has its own
 `command: ["python", "-u", "/workspace/scripts/chat_server.py",
-"--port", "8890"]` and `environment:` block (Phase 1 toggles +
-`WC_LLM_MODEL` / `WC_CRITIC_MODEL` from the retiring drop-in). 
-systemd units become `ExecStart=/usr/bin/docker compose up
-wordcracker-chat` (foreground) or `up -d` with explicit health
-watch via `healthcheck:` in compose.
+"--port", "8890"]` and `environment:` block (the `WC_LLM_MODEL` /
+`WC_CRITIC_MODEL` pins from the retiring drop-in move here). Native
+`healthcheck:` in compose replaces the curl-loop `ExecStartPost`.
+Systemd units for chat / admin are deleted from the repo.
 
 **Consequences.**
 - `docker compose exec`, `pkill -9`, and pyc-purge `ExecStartPre`s
-  removed from `wordcracker-chat.service` and
-  `wordcracker-admin.service`. (Pyc-purge already redundant under
-  ADR-B2.)
-- SIGTERM propagates: systemd → docker → python. Graceful shutdown
+  removed — the systemd units are gone entirely.
+- SIGTERM propagates: `docker stop` → python. Graceful shutdown
   works for the first time.
 - [v2-engine.conf](systemd/wordcracker-chat.service.d/v2-engine.conf)
   deleted. Its still-meaningful pins (`WC_LLM_MODEL`,
-  `WC_CRITIC_MODEL`) move into the compose service `environment:`
-  alongside Phase 1 toggles already at
-  [docker-compose.override.yml:42-50](docker-compose.override.yml:42).
+  `WC_CRITIC_MODEL`) move into the `chat` service `environment:`
+  block.
 - `healthcheck:` in compose replaces the curl-loop `ExecStartPost`
-  at [wordcracker-chat.service:33](systemd/wordcracker-chat.service:33).
+  (D-SB2-7).
 - Three deploy patterns collapse to two: compose services
   (gutenberg-lab + ollama + chat + admin) and host-python
   (status_server, which intentionally stays host-side to read host
   files).
+- `scripts/deploy.sh` collapses to one mechanism
+  (`compose up --force-recreate`); no more parallel
+  `systemctl restart` loop for chat/admin.
+- Host reboot brings status_server back via
+  `systemctl enable wordcracker-status` (D-SB2-3).
 
 **Trade-offs.**
-- ChromaDB cold-load (~12 s per [chat_server.py:1204-1224](scripts/chat_server.py:1204))
-  now lives in the chat service's process — same cost, different
-  process. admin_server doesn't touch ChromaDB, so it's faster.
+- ChromaDB cold-load (~12 s per
+  [chat_server.py:1204-1224](scripts/chat_server.py:1204)) now lives
+  in the chat service's process — same cost, different process.
+  admin_server doesn't touch ChromaDB, so it's faster.
 - jupyter on 8888 stays inside `gutenberg-lab` (unchanged) — chat /
   admin no longer share a Python interpreter with notebooks. The
-  sharing was incidental, never load-bearing.
-- Implementation cost: ~30 lines in compose + 3-line edits in two
-  systemd units. Net code reduction (drop pkill, drop pyc-find,
-  drop drop-in file).
+  sharing was incidental, never load-bearing. (Jupyter
+  prod-disposition is a separate follow-up — see S-B2 follow-ups
+  out of scope.)
+- Implementation cost: ~30 lines in compose + 3 systemd files
+  deleted (chat, admin, v2-engine.conf drop-in). Net code reduction.
+- Three containers instead of one for the app: chat (~28 GB cap),
+  admin (~4 GB), jupyter (~8 GB); total RAM ceiling unchanged from
+  the pre-S-B2 single 40 GB gutenberg-lab cap, just split.
+
+---
+
+### ADR-B3 — Runtime build identity (`/health.git_sha` + footer SHA + `ARG GIT_SHA`)
+
+**Status.** Proposed. Placeholder slot for Step 4 / **S-B3**.
+
+**Context.** ADR-B1 ships the docker-level guarantee that the
+running container is from a known image tag
+(`verify_deployed_image.sh` reads `docker inspect` → image tag =
+expected SHA). That's the *infrastructure* identity. There is no
+corresponding *runtime self-report* — the chat process inside the
+container has no `/health.git_sha`, no footer SHA in the UI, no
+`ARG GIT_SHA` baked into the image and surfaced via `os.environ`.
+Drift between "what docker thinks is running" and "what the process
+inside thinks it is running" stays invisible.
+
+Originally bundled with the chat/admin supervision proposal (now
+ADR-B2); on inspection orthogonal to supervision (a runtime
+self-report concern, not a PID-1 concern), so split out into its own
+ADR. To be fleshed out by Step 4 / S-B3.
+
+**Options considered.** TBD by Step 4. Candidate directions:
+1. `ARG GIT_SHA` build-arg → `ENV GIT_SHA=$GIT_SHA` in Dockerfile;
+   chat exposes `/health.git_sha` from `os.environ`; footer of chat
+   HTML renders the SHA.
+2. Read SHA from `/workspace/.git_sha` file written at image build
+   time by `deploy.sh`.
+3. Probe at request time via
+   `subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=...)`
+   — not viable, no `.git` in the image.
+
+**Decision.** Deferred to S-B3.
 
 ---
 
@@ -867,8 +1304,8 @@ import WC_CRITIC; if WC_CRITIC.is_on(): ...`. Predeploy
 
 The `v2-engine.conf` drop-in is **deleted** as part of this ADR.
 Its still-relevant pins (`WC_LLM_MODEL`, `WC_CRITIC_MODEL`) move
-into the new `wordcracker-chat` compose service from ADR-B3 — same
-place as the Phase 1 toggle comments at
+into the `chat` compose service from ADR-B2 — same place as the
+Phase 1 toggle comments at
 [docker-compose.override.yml:42-50](docker-compose.override.yml:42).
 
 **Consequences.**
@@ -889,6 +1326,69 @@ place as the Phase 1 toggle comments at
 - Operator running a one-off `WC_X=foo python ...` is still
   possible — registry can warn ("env observed at runtime that
   isn't in registry") but cannot forbid. Acceptable.
+
+---
+
+### ADR-B6 — Pinned dependencies (lockfile + hash-verified install)
+
+**Status.** Accepted (2026-05-24). Phases 1 + 2 landed in commits
+329908b → 897573a → 9f646c4 → c86d22d → 148609d; image rebuilt and
+verified on prod (cuda True, 2012 tests collected, service restart
+clean, cache_write_failed count = 0 post-restart). Pairs with ADR-B1
+(image-tag-by-commit) — the SHA-tagged image is now deterministic in
+both code and deps.
+
+**Context.** Pre-acceptance [Dockerfile:7-28](Dockerfile:7) installed
+`jupyterlab`, `spacy[transformers]`, `transformers`,
+`sentence-transformers`, `chromadb`, `pandas`, `scikit-learn` without
+version pins or a lockfile. [Dockerfile:30-31](Dockerfile:30) ran
+`python -m spacy download en_core_web_sm` and `en_core_web_trf` —
+silently version-floating models (download URL serves current spaCy
+version). Result: `docker compose build` on day N and day N+30 could
+yield different runtime artifacts at the same git SHA. Audit C5
+("bake time = 0") presumed identical artifacts across deploys — it
+wasn't true.
+
+This is the *dependency* half of the deploy-artifact concern; the
+*tag* and *code* halves live in ADR-B1.
+
+**Options considered.**
+1. **`requirements.in` + `requirements.lock` (pip-compile),
+   hash-verified install.** Standard. Forces deterministic build.
+   Maintenance: explicit `pip-compile` on dep refresh.
+2. **`uv` with `pyproject.toml` + `uv.lock`.** Same goal, faster
+   install. Yet-another-packaging-change cost for a single-author
+   codebase.
+3. **Status quo + container-rebuild discipline.** Cheap, but R8
+   ("сначала читай живой путь") becomes impossible — `pip show` in
+   the running container is the only source of truth, drifts with
+   the latest pull.
+
+**Decision.** Option 1. Create `requirements.in` (~25 top-level deps
+from Dockerfile:7-28) and `requirements.lock` (transitive freeze,
+hash-verified). Dockerfile reads
+`pip install --require-hashes -r requirements.lock`. spaCy models
+pinned by direct URL
+(`en_core_web_sm-3.8.0`, `en_core_web_trf-3.8.0`).
+
+**Consequences.**
+- New files at repo root: `requirements.in`, `requirements.lock`.
+- Dockerfile rewritten to install from lockfile (RUN layer
+  cacheable).
+- `pip-compile` on dep change is a separate, explicit step.
+- Any tampered or unexpected wheel = build failure with a clear
+  message (`--require-hashes` fails loudly).
+- Pairs with ADR-B1: a SHA-tagged image is now BOTH deterministic
+  in code AND deterministic in deps.
+
+**Trade-offs.**
+- Lockfile maintenance friction is the **goal** — discourages casual
+  cascade upgrades (per R7).
+- spaCy model wheels are published on GitHub Releases, not PyPI, so
+  they sit outside the hashed lock set. The version embedded in the
+  URL IS the pin — a tampered model would require a different URL.
+  A follow-up ADR can fold the GitHub-Releases sha256 sidecar values
+  into a hashed extension of the lock.
 
 ---
 
@@ -1032,9 +1532,10 @@ most-frequent recent queries are derivable.
   applies.
 
 **Trade-offs.**
-- Up to +60 s startup time. ADR-B3 (graceful restarts via proper PID
-  1) makes graceful restarts routine, so the cost lands on planned
-  restarts rather than crash-loops.
+- Up to +60 s startup time. ADR-B2 (chat/admin supervision —
+  graceful restarts via proper PID 1) makes graceful restarts
+  routine, so the cost lands on planned restarts rather than
+  crash-loops.
 - Outlier queries still pay cold. By design — we warm the head, not
   the tail.
 - Observability persistence: current
