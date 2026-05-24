@@ -93,13 +93,58 @@ else
         exit 5
     fi
 
-    # Dirty-tree guard.
-    if [[ -n "$(git status --porcelain)" ]]; then
+    # --- pre-flight dirty-check, scoped to image-relevant paths (D-SB1-8) ---
+    # Block when the working tree could diverge from the deployed image:
+    #   (a) ANY modified/staged tracked file (`git diff HEAD --`) — these
+    #       are part of any future commit and would silently diverge prod
+    #       from the SHA the build is tagged with.
+    #   (b) Untracked files INSIDE paths the Dockerfile actually COPYs
+    #       into the image (parsed from Dockerfile, not hardcoded). An
+    #       untracked file outside the COPY-set does not enter the image
+    #       and cannot diverge prod — so it does not block.
+    # --allow-dirty stays the escape hatch and tags the build <sha>-dirty.
+    # Algorithm mirror: tests/v2/test_deploy_artifact.py D-SB1-8 cases.
+
+    # Parse COPY sources from Dockerfile (line-based; no continuations).
+    # `COPY [--flag=...] src1 [src2 ...] dest` → emit src1, src2, ...
+    mapfile -t COPY_SOURCES < <(awk '
+        /^COPY[[:space:]]/ {
+            for (i = 2; i < NF; i++) {
+                if ($i ~ /^--/) continue
+                print $i
+            }
+        }
+    ' Dockerfile)
+
+    if [[ "${#COPY_SOURCES[@]}" -eq 0 ]]; then
+        echo "ERROR: parsed zero COPY sources from Dockerfile; refusing to skip dirty-check" >&2
+        exit 7
+    fi
+
+    dirty_blockers=()
+
+    # (a) modified/staged tracked anywhere
+    if ! git diff --quiet HEAD --; then
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && dirty_blockers+=("modified/staged: $line")
+        done < <(git diff --name-only HEAD --)
+    fi
+
+    # (b) untracked inside COPY paths only
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && dirty_blockers+=("untracked in COPY scope: $line")
+    done < <(git ls-files --others --exclude-standard -- "${COPY_SOURCES[@]}")
+
+    if [[ "${#dirty_blockers[@]}" -gt 0 ]]; then
         if [[ "$ALLOW_DIRTY" == "1" ]]; then
             SHA="${SHA}-dirty"
-            echo "[deploy] WARN: dirty tree, tagging as ${SHA}"
+            echo "[deploy] WARN: image-relevant paths are dirty (${#dirty_blockers[@]} blocker(s)), tagging as ${SHA}" >&2
+            printf '[deploy]   %s\n' "${dirty_blockers[@]}" >&2
         else
-            echo "ERROR: working tree is dirty. Commit, stash, or pass --allow-dirty." >&2
+            echo "ERROR: image-relevant paths are dirty (would diverge prod from HEAD):" >&2
+            printf '  %s\n' "${dirty_blockers[@]}" >&2
+            echo "Commit, stash, or pass --allow-dirty (tags <sha>-dirty)." >&2
+            echo "Scope: COPY sources from Dockerfile = ${COPY_SOURCES[*]}" >&2
             exit 6
         fi
     fi

@@ -701,6 +701,130 @@ auto-attaches it; opt-in is greppable.
   `.env.example` line being right there in plain sight on `cp
   .env.example .env`.
 
+### D-SB1-8 — `deploy.sh` dirty-check scoped to image-relevant paths
+
+**Context.** D-SB1-4 step 1 included a coarse dirty-tree guard:
+
+```bash
+if [[ -n "$(git status --porcelain)" ]]; then
+    if [[ "$ALLOW_DIRTY" == "1" ]]; then SHA="${SHA}-dirty"; ...
+    else echo "ERROR: working tree is dirty. ..."; exit 6; fi
+fi
+```
+
+`git status --porcelain` returns one line per change of any kind —
+modified tracked, staged, deleted, **and any untracked file
+anywhere**. Operationally that means an untracked `notes.md` at
+repo root, a scratch `/tmp` file the operator forgot about, or a
+locally-generated `requirements.in.tmp` blocks deploy. None of
+these enter the image. The operator's reflex becomes
+`--allow-dirty` → builds the SHA-tagged `<sha>-dirty` artifact →
+ships into prod with the `-dirty` suffix silently signalling
+"untrusted lineage". The opposite of the integrity gate D-SB1-3
+and D-SB1-5 set up.
+
+**Decision (addendum, 2026-05-24).** Scope the untracked check to
+**exactly** the paths Dockerfile actually COPYs into the image,
+parsed dynamically from Dockerfile (no hardcode). Tracked changes
+keep blocking unconditionally — they would land in any future
+commit and silently diverge prod from the SHA the build is tagged
+with. `--allow-dirty` stays the escape hatch (still tags
+`<sha>-dirty`).
+
+**Algorithm.**
+
+```bash
+# 1. Parse COPY sources from Dockerfile (line-based, no continuations).
+#    Format: `COPY [--flag=…] src1 [src2 …] dest` → emit src1, src2, …
+mapfile -t COPY_SOURCES < <(awk '
+    /^COPY[[:space:]]/ {
+        for (i = 2; i < NF; i++) {
+            if ($i ~ /^--/) continue
+            print $i
+        }
+    }
+' Dockerfile)
+
+dirty_blockers=()
+
+# 2. (a) tracked changes anywhere → block
+if ! git diff --quiet HEAD --; then
+    while IFS= read -r line; do
+        dirty_blockers+=("modified/staged: $line")
+    done < <(git diff --name-only HEAD --)
+fi
+
+# 2. (b) untracked inside COPY scope → block
+while IFS= read -r line; do
+    dirty_blockers+=("untracked in COPY scope: $line")
+done < <(git ls-files --others --exclude-standard -- "${COPY_SOURCES[@]}")
+
+# 3. block / --allow-dirty / clean
+```
+
+`git ls-files --others --exclude-standard -- <paths>` is the exact
+"untracked, respecting .gitignore, scoped to these paths" git
+primitive. Files outside `${COPY_SOURCES[@]}` are not enumerated.
+
+**Why this is the right scope.**
+- A file enters the image ⇔ Dockerfile COPYs its path. Any untracked
+  file inside such a path diverges prod from HEAD silently → block.
+- A file outside the COPY-set cannot enter the image. The image is
+  byte-identical to one built from HEAD even if such files exist →
+  no block.
+- Tracked modifications (any path) are not safe to ignore: they will
+  ship in any future commit and the deployed SHA "from this branch"
+  would diverge from HEAD's tree.
+
+**Consequences.**
+- `notes.md`, scratch files at root, untouched `requirements.in`,
+  locally-generated logs — no longer block deploy. Operators stop
+  reaching for `--allow-dirty` reflexively.
+- An untracked `scripts/new_module.py` (the load-bearing case) still
+  blocks — exactly as before.
+- An untracked `requirements.lock` at root would block (the file IS
+  COPY'd; an unstaged regenerated lock would silently diverge image
+  deps from HEAD's deps).
+- `--allow-dirty` keeps the `-dirty` suffix on the tag, which
+  `verify_deployed_image.sh` will then expect — so a `-dirty` image
+  in prod is still visible at the docker-tag layer.
+- The COPY parser is line-based and skips `--flag=…` tokens; multi-
+  line `COPY foo \\` continuations are NOT handled. If a future
+  Dockerfile uses them, the parser must be widened (and the test
+  `test_copy_sources_parsed_from_dockerfile` will surface the gap by
+  failing on the new expected source).
+
+**Negative tests (R2).**
+`tests/v2/test_deploy_artifact.py` carries five cases that mirror
+this algorithm and pin deploy.sh to it:
+
+| Case | What it asserts | Pre-D-SB1-8 status |
+|---|---|---|
+| `test_copy_sources_parsed_from_dockerfile` | Parser finds `requirements.lock`, `scripts/`, `tests/`. | Parser didn't exist. |
+| `test_dirty_check_scope_blocks_untracked_in_scripts` | `scripts/new_module.py` in scope → would block. | Always blocked (porcelain). |
+| `test_dirty_check_scope_passes_untracked_at_root` | `notes.md`, `scratch.py`, `requirements.in` at root → NOT in scope, would NOT block. | **All blocked (porcelain) — the R2-failing case.** |
+| `test_dirty_check_scope_blocks_untracked_requirements_lock` | `requirements.lock` at root IS in scope → would block. | Blocked (also caught by porcelain). |
+| `test_deploy_sh_uses_scoped_dirty_check` | deploy.sh uses `git diff --quiet HEAD`, `git ls-files --others --exclude-standard --`, an awk on `/^COPY/`, and does NOT use the pre-fix bare `git status --porcelain` guard. | Failed: bare porcelain guard present. |
+
+The Python helper `_copy_sources_from_dockerfile` /
+`_is_in_copy_scope` is a deliberate algorithmic mirror of the bash
+in deploy.sh. The `test_deploy_sh_uses_scoped_dirty_check` grep is
+the anti-drift pin between the two.
+
+**Trade-offs.**
+- Two source-of-truth shapes (bash in deploy.sh, Python in the test
+  helper). Mitigated by the grep test and the parser's small size
+  (~10 lines each).
+- A future Dockerfile change that adds `COPY` of a path not
+  previously scanned (e.g., a new `COPY config/` directive) requires
+  no deploy.sh change — the parser is dynamic. The test set may
+  want a positive case for the new path.
+- A multi-line `COPY src \\\n    dest` form is not supported by the
+  current line-based parser. Acceptable for the current Dockerfile
+  (no continuations); will surface as a parser-finds-zero-sources
+  error (`exit 7`) if the Dockerfile changes shape, never as a
+  silent false-negative.
+
 ### Negative tests
 
 `tests/v2/test_deploy_artifact.py` (new) closes R2:

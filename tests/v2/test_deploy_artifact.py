@@ -429,6 +429,170 @@ def test_deploy_sh_no_systemctl_restart_of_chat_admin():
     )
 
 
+# --- D-SB1-8: deploy.sh dirty-check scoped to image-relevant paths ---
+#
+# Pre-D-SB1-8 deploy.sh used `git status --porcelain` and blocked on ANY
+# untracked file anywhere (including notes.md, scratch.py, /tmp clutter).
+# False-positives nudged operators toward `--allow-dirty` (which silently
+# ships a `-dirty`-tagged build). D-SB1-8 scopes the untracked-check to
+# exactly the paths Dockerfile COPYs into the image. The helpers below
+# mirror the bash logic in deploy.sh; the grep test
+# `test_deploy_sh_uses_scoped_dirty_check` pins the deploy.sh side so
+# the two cannot drift silently.
+
+
+def _copy_sources_from_dockerfile(dockerfile: Path) -> list[str]:
+    """Parse `COPY src1 [src2 ...] dest` lines, return source paths.
+
+    Mirror of the awk block in scripts/deploy.sh (D-SB1-8). Line-based
+    (no Dockerfile-continuations). Skips `--chown=…` / `--from=…` flags.
+    """
+    sources: list[str] = []
+    for line in dockerfile.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("COPY "):
+            continue
+        tokens = line.split()
+        # tokens[0] = "COPY", tokens[-1] = destination; the rest are sources.
+        for tok in tokens[1:-1]:
+            if tok.startswith("--"):
+                continue
+            sources.append(tok)
+    return sources
+
+
+def _is_in_copy_scope(path: str, copy_sources: list[str]) -> bool:
+    """True if `path` matches an exact COPY source or is under a COPY directory.
+
+    Mirror of `git ls-files --others --exclude-standard -- <COPY_SOURCES>`
+    scoping in deploy.sh. Normalizes a single leading `./` and trailing
+    slashes.
+    """
+    p = path.lstrip("./").rstrip("/")
+    for src in copy_sources:
+        s = src.rstrip("/")
+        if p == s or p.startswith(s + "/"):
+            return True
+    return False
+
+
+def test_copy_sources_parsed_from_dockerfile():
+    """Sanity: parser finds the current Dockerfile's COPY set.
+
+    If Dockerfile changes (new COPY line, removed COPY line), this test
+    surfaces the change at parser-time — the dirty-check scope follows.
+    """
+    sources = _copy_sources_from_dockerfile(REPO_ROOT / "Dockerfile")
+    # Current Dockerfile (lines 39, 62, 63 at time of writing).
+    assert "requirements.lock" in sources, (
+        f"requirements.lock should be in the COPY set; got {sources}"
+    )
+    assert "scripts/" in sources, (
+        f"scripts/ should be in the COPY set; got {sources}"
+    )
+    assert "tests/" in sources, (
+        f"tests/ should be in the COPY set; got {sources}"
+    )
+
+
+def test_dirty_check_scope_blocks_untracked_in_scripts():
+    """R2-positive: an untracked file under scripts/ is in image scope.
+
+    scripts/ is COPYed into the image (Dockerfile:62). An untracked
+    `.py` there would silently diverge the deployed image's
+    /workspace/scripts/ from the committed scripts/ — the dirty-check
+    MUST flag it.
+    """
+    sources = _copy_sources_from_dockerfile(REPO_ROOT / "Dockerfile")
+    assert _is_in_copy_scope("scripts/new_module.py", sources), (
+        f"scripts/new_module.py must be in COPY scope; got sources={sources}"
+    )
+    # Nested directory case too.
+    assert _is_in_copy_scope("scripts/v2/new_thing.py", sources), (
+        f"scripts/v2/new_thing.py must be in COPY scope; got sources={sources}"
+    )
+
+
+def test_dirty_check_scope_passes_untracked_at_root():
+    """R2-negative (NOT-X mirror): untracked at repo root is NOT in scope.
+
+    A scratch file at repo root does not enter the image. Pre-D-SB1-8
+    deploy.sh blocked on this case (`git status --porcelain` returned
+    `?? notes.md` → block). Post-D-SB1-8 the scope is image-relevant
+    paths only.
+    """
+    sources = _copy_sources_from_dockerfile(REPO_ROOT / "Dockerfile")
+    assert not _is_in_copy_scope("notes.md", sources), (
+        f"Root-level notes.md must NOT block deploy; got sources={sources}"
+    )
+    assert not _is_in_copy_scope("scratch.py", sources), (
+        f"Root-level scratch.py must NOT block deploy; got sources={sources}"
+    )
+    # requirements.in is the SOURCE of requirements.lock; only the lock
+    # is COPYed, so an untracked .in at the root is dev-relevant but
+    # not prod-relevant.
+    assert not _is_in_copy_scope("requirements.in", sources), (
+        f"requirements.in is not COPYed (only requirements.lock is); "
+        f"got sources={sources}"
+    )
+
+
+def test_dirty_check_scope_blocks_untracked_requirements_lock():
+    """R2-positive variant: requirements.lock is in scope (Dockerfile:39).
+
+    If an untracked requirements.lock somehow ends up unstaged at repo
+    root (e.g. a local pip-compile rerun), it WOULD diverge the image's
+    /tmp/requirements.lock from HEAD's. Must block.
+    """
+    sources = _copy_sources_from_dockerfile(REPO_ROOT / "Dockerfile")
+    assert _is_in_copy_scope("requirements.lock", sources), (
+        f"requirements.lock IS COPYed; got sources={sources}"
+    )
+
+
+def test_deploy_sh_uses_scoped_dirty_check():
+    """Pin the deploy.sh side so the helper above cannot drift silently.
+
+    The helper mirrors deploy.sh's algorithm. The grep below asserts
+    deploy.sh uses the matching primitives:
+      * `git diff --quiet HEAD` (or equivalent) for tracked changes
+      * `git ls-files --others --exclude-standard --` for untracked,
+        scoped by `${COPY_SOURCES[@]}`
+      * AWK on /^COPY/ to extract COPY paths
+      * NO bare `git status --porcelain` for the blocking decision
+        (pre-D-SB1-8 anti-pattern).
+    """
+    text = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+
+    # Must use scoped primitives.
+    assert "git diff --quiet HEAD" in text, (
+        "deploy.sh must call `git diff --quiet HEAD` for tracked-change check (D-SB1-8)"
+    )
+    assert "git ls-files --others --exclude-standard --" in text, (
+        "deploy.sh must call `git ls-files --others --exclude-standard --` "
+        "scoped to COPY_SOURCES for untracked-check (D-SB1-8)"
+    )
+    assert "COPY_SOURCES" in text, (
+        "deploy.sh must build a COPY_SOURCES array from Dockerfile (D-SB1-8)"
+    )
+    assert re.search(r"awk[\s\S]{0,200}\^COPY", text), (
+        "deploy.sh must parse Dockerfile COPY lines via awk (D-SB1-8)"
+    )
+
+    # Must NOT block on bare porcelain. (The pre-fix anti-pattern.)
+    # A future occurrence inside a comment or harmless context is OK;
+    # the danger is using its output as the blocking decision. Pin via
+    # the precise pre-fix pattern.
+    assert 'git status --porcelain' not in text or (
+        # If it appears, it must not be in the dirty-tree guard form.
+        not re.search(
+            r'if \[\[ -n "\$\(git status --porcelain\)" \]\]; then',
+            text,
+        )
+    ), (
+        "deploy.sh must NOT block on bare `git status --porcelain` (D-SB1-8)"
+    )
+
+
 # --- Sanity: deploy / verify scripts exist and are not empty ---
 
 @pytest.mark.parametrize("script_relpath", [
