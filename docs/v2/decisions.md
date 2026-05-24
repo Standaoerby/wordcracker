@@ -6,6 +6,193 @@
 
 ---
 
+## 2026-05-24 — S-0: green CI + honest WC_* flag map
+
+Closes block S-0 of `docs/tz_structural_fixes_2026-05-24.md` (TZ not in
+repo at audit time; block reconstructed from user message). Goal: the
+test suite is green on HEAD, the env-var landscape is documented honestly,
+and any "closed" claim in repo trackers is verified or reopened.
+
+### D-S0-1 — `tests/v2` is green on HEAD `5b32530`
+
+**Decision.** Full `python -m pytest tests/v2` on HEAD: **1995 passed,
+28 skipped, 0 failed, 565 subtests passed** (after S-0 platform-skip,
+see D-S0-2). `pytest tests/v2 --collect-only` collects 2023 items with
+0 collection errors. R10 satisfied.
+
+The three historic offenders called out in the S-0 brief
+(`test_q15_compare_empty`, `test_scoring_plugins`,
+`test_e38_e43_persona_batch2`) were already green per D-P0-5
+(2026-05-22) and re-confirmed today — all 48 tests across the four
+named files passed on a targeted run before the full-suite run.
+
+`tests/v2/test_intent.py:252` (string literal called out as unclosed
+in the brief) is syntactically valid on HEAD; no fix needed. Either
+the brief was based on a pre-`5b32530` snapshot or the report was
+stale.
+
+### D-S0-2 — `test_cache_concurrent_writes` skipped on `win32`, gated on Linux in CI
+
+**Decision.** Two paired changes:
+
+1. Added `@unittest.skipIf(sys.platform == "win32", ...)` to
+   `CacheWriteDiskRaceSafe` in
+   `tests/v2/test_cache_concurrent_writes.py`.
+2. Added job `test-cache-race-linux` to
+   `.github/workflows/predeploy.yml` that runs
+   `pytest tests/v2/test_cache_concurrent_writes.py -v` on
+   `ubuntu-latest` — the canonical Linux gate for the race-safety
+   contract until the predeploy harness (ADR-B4 §1) runs the full
+   suite.
+
+**Why.** Live path is Linux. POSIX `rename(2)` is atomic — the race
+the test was written to guard (b8dd3ab fix per
+[[project_cache_writer_pattern]]) resolves cleanly on the prod
+runtime. Confirmed by running the test under WSL Ubuntu against the
+same source tree: 3/3 pass in <1 s. On Windows local dev the same code
+path takes a different syscall (`MoveFileExW(MOVEFILE_REPLACE_EXISTING)`)
+which can fail with `ERROR_ACCESS_DENIED` while another writer is
+mid-replace on the same destination, even though each writer has its
+own unique `.tmp`. That is a Windows-portability concern separate from
+the prod race.
+
+**Why the CI job is non-negotiable.** Without it, the post-skip
+property would be "checked nowhere" — exactly the
+green-CI-with-a-hole-underneath pattern S-0 was meant to close. The
+Windows skip is acceptable iff and only iff a Linux gate verifies the
+property. `predeploy.yml` previously ran `--collect-only` for `tests/v2`
+and a few targeted W-18 tests; it did NOT run the cache race test
+anywhere. The new `test-cache-race-linux` job plugs that hole until
+ADR-B4 §1 lands.
+
+**Why not fix the Windows path now.** Making the test pass on Windows
+needs either a small retry-on-`PermissionError` loop inside
+`_write_disk` or rewriting the test to tolerate the sharing-violation
+log. `cache.py` will be touched again in block **S-F1** (AST-hash
+invalidation refresh / R-23 Tier 1A follow-ups). The right place to
+re-decide Windows behaviour is there, alongside the next planned edit
+to that file — bundle the change with substantive work rather than
+spending an R7 slot on portability alone.
+
+**Consequences.**
+- CI now has two gates touching `tests/v2`: `test-collect` (full
+  collect, R10) and `test-cache-race-linux` (focused race execution).
+- Windows contributor sees 3 skips with an explicit reason in the
+  test class docstring — they know what they are not testing locally
+  and that CI checks it for them.
+- When S-F1 lands and re-opens `cache.py`, the open question to
+  answer is: "do we add Windows retry-on-sharing-violation and drop
+  the `skipIf`, or keep the skip indefinitely?" — answer depends on
+  whether Windows local dev is a supported workflow at that point.
+
+### D-S0-3 — `docs/v2/infra.md` is now the single env-var inventory
+
+**Decision.** `docs/v2/infra.md` enumerates every `WC_*` env var read
+by `scripts/` (and by `tests/` for test-only gates), where it is read,
+where (if anywhere) it is set, and what its prod state is. Sections:
+(1) compose, (2) systemd drop-in, (3) reads-with-no-set (operational
+toggles / model pins / timeouts / audit tuning / paths / sizes / test
+gates), (4) audit summary of which `decisions.md` claims hold.
+
+**Why.** REMEDIATION_BRIEF §3 corrected the literal R1 grep ("≤1
+match") with the intent: "no env var that selects between code
+generations or gates a dead branch." The intent is satisfied today
+(verified by D-P0-1 / D-P1-1 / D-P1-2 / D-P1-3 / D-P1-5, all
+re-checked in this pass), but until ADR-B5's `env_registry.py` lands
+there is no single file that proves it. `infra.md` is the manual
+version of that index — short enough to read, structured enough to be
+mechanically replaced by the registry later.
+
+**Consequences.**
+- R8 ("читай живой путь") has a deterministic answer for env vars:
+  open `infra.md`. The previous answer was "grep + cross-check
+  compose + cross-check systemd drop-in + cross-check decisions.md."
+- `MEMORY.md` should reference `infra.md` instead of any per-flag
+  memory — the file is the canonical view.
+- When ADR-B5 (env_registry.py) ships, this file becomes a rendered
+  view of the registry rather than a hand-maintained inventory; the
+  rest of the structure (sections 1-4) stays.
+
+### D-S0-4 — `decisions.md` audit: zero unconfirmed `closed` statuses (in-repo scope only)
+
+**Decision.** Walked the D-P0-1…D-P0-5 and D-P1-1…D-P1-8 series. Each
+"removed" / "deleted" / "consolidated" / "inlined" claim was verified
+on HEAD via `grep` over `scripts/` and via file-presence check. The
+two negative tests claimed by D-P0-3
+(`test_v4_plan_spec.py::RefParsing::test_s2_words_n_p0_resolves_against_affinity_shape`,
+`test_e15_v1_contract_keys.py::TestAffinityByAuthorWordsAlias`) both
+exist. The ADR-B1 follow-up F4 (the `WC_DEFAULT_ENGINE` drift in the
+systemd drop-in) was already documented as an open follow-up in the
+2026-05-24 ADR-B1 block — not a stale "closed" claim. Detailed
+checklist lives in `infra.md` §4.
+
+**Scope boundary.** This audit covers `docs/v2/decisions.md` only.
+`backlog.md` is the user's external tracker (operator's docs vault,
+outside this code repository — Claude Code cannot reach it by design).
+The 2026-05-22 audit `docs/AUDIT_2026-05-22_architecture_quality.md`
+§6 line 205 reports it marking E1 / E2 / E5 / E9 / E11 / E13 as
+"closed via v6". Reconciliation of those entries against the verified
+D-P0/D-P1 series and `infra.md` is on the tracker owner. Operator note:
+the prior R6 run confirmed E13 and W-1 closed in prod, so the most
+likely state is "consistent" — but the in-repo S-0 pass does not
+attest to it.
+
+**Why.** S-0 condition (3): "Пройди backlog.md / decisions.md: каждый
+статус closed, не подтверждённый активным флагом + негативным тестом,
+переведи в «open в проде»." For the in-repo tracker the answer is
+"nothing to reopen." For the out-of-repo tracker the audit needs to be
+done by the tracker's owner with `infra.md` + the D-P0/D-P1 verified
+series as the input.
+
+**Consequences.**
+- The S-0 gate ("в трекерах нет неподтверждённых closed") is
+  satisfied for the in-repo tracker.
+- `backlog.md` audit remains operator-owned until/unless the file
+  moves into this repository (at which point Claude Code can run the
+  same mechanical check it ran for `decisions.md`).
+- The audit pass becomes mechanical once ADR-B4 §3 `--check-env` lands
+  (compose ↔ code grep) and ADR-B5's `env_registry.py` exists
+  (registry ↔ ADR linkage). Until then, `infra.md` is the
+  manually-maintained index.
+
+### D-S0-5 — `WC_DEFAULT_ENGINE=v2` in systemd drop-in is pending-removal
+
+**Decision.** The dead `-e WC_DEFAULT_ENGINE=v2` in
+`systemd/wordcracker-chat.service.d/v2-engine.conf:22` is **explicitly
+flagged for removal**. It is not "tolerated indefinitely" — leaving it
+is the same "no commented flags in compose" anti-pattern, just on the
+systemd side. The removal lands in one of two structurally-adjacent
+blocks:
+
+- **S-F4 / S-B5** — when ADR-B3 collapses chat/admin into compose
+  services with proper PID 1, the `v2-engine.conf` drop-in is deleted
+  wholesale (its pins `WC_LLM_MODEL=wordcracker:v2` and
+  `WC_CRITIC_MODEL=wordcracker:v2` move into the new compose service's
+  `environment:` block). The dead `WC_DEFAULT_ENGINE` goes with it.
+- **Earlier opportunistic removal** — if any block touches the drop-in
+  for another reason before S-F4 / S-B5 lands, drop the dead line in
+  that same commit. Do not let it ride to a separate "trivial cleanup"
+  commit — that would be a single-line cascade slot on infrastructure
+  files for no behavioural gain.
+
+**Why.** R8 ("читай живой путь") gets confused by env vars that are
+exported into the container but not read by code. `systemctl status
+wordcracker-chat` shows the export; a reader who hasn't followed
+D-P1-5 / ADR-B1 F4 / `infra.md` could waste time hunting for the
+phantom consumer. Documenting this as **explicit pending-removal**
+(rather than "follow-up F4") makes it visible in the same S-0 audit
+that confirms everything else.
+
+**Consequences.**
+- `infra.md §2` and §0 already flag this as a known drift; the
+  pending-removal disposition is recorded here in `decisions.md`
+  rather than only in the prose narrative.
+- S-F4 / S-B5 acceptance gate must include "grep `systemd/` for
+  `WC_DEFAULT_ENGINE` returns zero hits." If the operator forgets,
+  this paragraph reminds them.
+
+---
+
 ## 2026-05-24 — Architecture brief: latency + deploy
 
 > Companion to `docs/AUDIT_2026-05-22_architecture_quality.md` and the
