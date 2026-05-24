@@ -153,7 +153,7 @@ fewer assumption.
 
 **Decision.** `gutenberg-lab` service (jupyter on 8888) stays in
 `docker-compose.yml` (the prod base) with its current CMD. Not moved
-to `docker-compose.override.yml`.
+to `docker-compose.dev.yml`.
 
 **Options.**
 1. **Move jupyter to override (dev-only).** Cleaner prod surface
@@ -456,7 +456,8 @@ the ADR text didn't pick between them definitively. Picking now.
    (≥2.20); silent fail mode if the directive misbehaves is "bind-mount
    survives" — exactly the dark-code class S-B1 is meant to close.
 2. **Restructure: prod-relevant config in base, dev-only conveniences
-   in `docker-compose.override.yml`.** Pros: standard docker-compose
+   in `docker-compose.dev.yml` (renamed from override.yml under
+   D-SB1-7).** Pros: standard docker-compose
    convention; prod opts out of override with a single `-f
    docker-compose.yml` flag; no fragile YAML-spec directives; the dev
    path (`docker compose up`) keeps auto-applying override and still
@@ -475,13 +476,14 @@ single explicit flag, greppable from the systemd unit text.
 - `docker-compose.yml` is the prod source of truth: ollama service,
   gutenberg-lab env block, image tag without fallback, data bind-mounts
   for corpus/state.
-- `docker-compose.override.yml` is dev-only and auto-applied to bare
-  `docker compose up`: code bind-mounts (`./scripts`, `./tests`,
-  `./notebooks`, `./data`, `./raw_books`) and a `WC_IMAGE_TAG=dev`
-  default (set via the same file's `environment:` is not enough — the
-  fallback lives at the `image:` line).
-- Prod path: `docker compose -f docker-compose.yml up -d` (skips
-  override). Dev path: `docker compose up -d` (picks up both).
+- `docker-compose.dev.yml` (renamed from `docker-compose.override.yml`
+  under D-SB1-7) is dev-only and **not** auto-applied: code bind-mounts
+  (`./scripts`, `./tests`, `./notebooks`, `./data`, `./raw_books`) and
+  a `WC_IMAGE_TAG=dev` default at the `image:` line.
+- Prod path: `docker compose -f docker-compose.yml up -d` (or `bash
+  scripts/deploy.sh`). Dev path: explicit opt-in via `docker compose -f
+  docker-compose.yml -f docker-compose.dev.yml up -d`, or set
+  `COMPOSE_FILE=docker-compose.yml:docker-compose.dev.yml` in `.env`.
 - `.env` at repo root is the canonical place to pin `WC_IMAGE_TAG` for
   the running shell. Repo ships `.env.example`; `.env` itself stays
   gitignored.
@@ -530,11 +532,13 @@ The `${VAR:?msg}` substitution fails at `docker compose config` time
 when the variable is unset, printing the explanatory message — no
 silent `latest` ever ships to prod.
 
-Dev: `docker-compose.override.yml` overrides the same `image:` line
-with `wordcracker-textlab:${WC_IMAGE_TAG:-dev}`, so `docker compose up`
-without `-f` (i.e. dev) picks up the override and uses `dev` if the
-env is unset. Prod path (`-f docker-compose.yml`) does NOT pick up
-override, so the strict `${VAR:?}` form takes effect.
+Dev: `docker-compose.dev.yml` overrides the same `image:` line with
+`wordcracker-textlab:${WC_IMAGE_TAG:-dev}`. Per D-SB1-7 this file is
+not auto-applied; dev opts in via `-f docker-compose.yml -f
+docker-compose.dev.yml` or `COMPOSE_FILE=...:docker-compose.dev.yml`,
+and only then does the `:-dev` fallback take effect. Bare `docker
+compose up` on any host loads only the base file, where the strict
+`${VAR:?}` form refuses to start without `WC_IMAGE_TAG` set.
 
 **Why.** Phase 1's `:-latest` fallback was explicitly marked
 "temporary; drop in phase 3" in ADR-B1. The S-B1 acceptance gate
@@ -607,11 +611,13 @@ of scope here.
 from `/usr/bin/docker compose ...` to
 `/usr/bin/docker compose -f docker-compose.yml ...`.
 
-**Why.** Without `-f`, `docker compose` auto-applies
+**Why.** At D-SB1-6 drafting time, `docker compose` auto-applied
 `docker-compose.override.yml`, which (after D-SB1-1) re-introduces
-code bind-mounts. The `-f` flag pins systemd to the prod-only file
-set. Explicit, greppable, and survives the ADR-B2 rewrite of these
-units (where the rewrite carries `-f` along).
+code bind-mounts; pinning `-f docker-compose.yml` closed that hole
+for systemd-driven invocations. D-SB1-7 later removed the auto-apply
+by renaming the file to `docker-compose.dev.yml`, but the `-f` flag
+stays anyway as the explicit-greppable form. It survives the ADR-B2
+rewrite of these units (where the rewrite carries `-f` along).
 
 **Operator step.** Systemd unit files are under `systemd/` in the
 repo but live at `/etc/systemd/system/` on prod. Syncing them is a
@@ -629,6 +635,72 @@ manually by the operator after `deploy.sh` lands a commit that
 touches `systemd/`. (Folding it into `deploy.sh` would require sudo on
 every deploy — operator chose to keep that boundary explicit.)
 
+### D-SB1-7 — `docker-compose.override.yml` renamed to `docker-compose.dev.yml` (safe-default prod)
+
+**Decision (addendum, 2026-05-24, post-S-B2).** Rename the dev overlay
+file from `docker-compose.override.yml` to `docker-compose.dev.yml`.
+After the rename, bare `docker compose up` on the prod host loads only
+`docker-compose.yml` (the safe default). Dev opts in explicitly via
+`docker compose -f docker-compose.yml -f docker-compose.dev.yml up`
+or by setting `COMPOSE_FILE=docker-compose.yml:docker-compose.dev.yml`
+in `.env`.
+
+**Why.** D-SB1-1 trade-off note flagged: *"Operator running bare
+`docker compose up` on the prod host (without `-f`) silently switches
+into dev shape (bind-mounts back)."* The compose convention of
+auto-applying `docker-compose.override.yml` made the dev shape the
+default on every host — and S-B1 mitigation was "systemd uses `-f`
+explicitly". That mitigation holds for systemd / deploy.sh but not for
+an interactive `docker compose up` typed by an operator on prod for an
+ad-hoc debug or restart. The rename removes the auto-merge magic. The
+filename now SAYS what it is (`dev.yml`); the loader no longer
+auto-attaches it; opt-in is greppable.
+
+**Prod safety (verified before landing).**
+- `scripts/deploy.sh` uses `-f docker-compose.yml` explicitly ✓
+- `scripts/verify_deployed_image.sh` uses `-f docker-compose.yml` ✓
+- `scripts/install_systemd_units.sh` does not touch compose ✓
+- `scripts/smoke_s_b2.sh` calls `bash scripts/deploy.sh HEAD` (which
+  uses `-f docker-compose.yml`) ✓
+- `scripts/ollama_gpu_watcher.sh` updated in the same commit: was
+  invoking `-f docker-compose.yml -f docker-compose.override.yml` for
+  no live reason (dev override never touched ollama); now uses
+  `-f docker-compose.yml` only ✓
+- `wordcracker-status.service` runs host-Python and does not invoke
+  compose at all ✓
+- `chat` / `admin` systemd units are gone post-S-B2 ✓
+
+**Consequences.**
+- `.env.example` documents the dev opt-in line
+  (`COMPOSE_FILE=docker-compose.yml:docker-compose.dev.yml`,
+  commented).
+- `tests/v2/test_deploy_artifact.py` constant `OVERRIDE_COMPOSE` →
+  `DEV_COMPOSE`; the parametrized
+  `test_dev_override_restores_code_bind_mounts` test still reads the
+  renamed file and pins the dev bind-mounts.
+- `infra.md` minimal update (file inventory line + WC_OLLAMA_NUM_CTX
+  filename column); full env-var refresh against the post-S-B2
+  layout (where `WC_LLM_MODEL` / `WC_CRITIC_MODEL` / `WC_OLLAMA_NUM_CTX`
+  moved into `docker-compose.yml`'s `*app-env` anchor) is a separate
+  follow-up.
+- `CLAUDE.md` and `REFACTOR_BRIEF.md` R8 wording updated: "сверь
+  активные compose-файлы (docker-compose.yml + docker-compose.dev.yml
+  при dev opt-in) с гейтами `os.environ.get(...)`."
+- Historical references to `docker-compose.override.yml` in audit /
+  proposal-log prose (sections dated 2026-05-22 and the original
+  ADR-B series Proposed bodies) are left as-is — they are snapshots
+  at their respective dates.
+
+**Trade-offs.**
+- Dev workflow on a fresh box: one extra environment variable
+  (`COMPOSE_FILE`) or one extra `-f` flag on the command line.
+  Negligible cost, much smaller blast radius on prod.
+- Backwards-compat: an existing operator's muscle-memory `docker
+  compose up` on dev silently changes meaning (prod-only) until they
+  set `COMPOSE_FILE` in `.env`. Mitigated by the
+  `.env.example` line being right there in plain sight on `cp
+  .env.example .env`.
+
 ### Negative tests
 
 `tests/v2/test_deploy_artifact.py` (new) closes R2:
@@ -636,7 +708,7 @@ every deploy — operator chose to keep that boundary explicit.)
 1. Load `docker-compose.yml` (prod base) and assert gutenberg-lab's
    `volumes` list contains **zero** `./` paths (no host-repo
    bind-mounts).
-2. Load `docker-compose.yml` + `docker-compose.override.yml` (dev
+2. Load `docker-compose.yml` + `docker-compose.dev.yml` (dev
    layout) and assert gutenberg-lab's `volumes` list **does** include
    `./scripts:/workspace/scripts` — catches accidental removal of dev
    convenience.
@@ -967,7 +1039,7 @@ separate concern (ADR-B6).
 **Options considered.**
 1. **Image-tag-by-commit + `COPY scripts/ tests/` into image at
    build + remove code bind-mounts in prod; hybrid override for
-   dev.** Atomic deploy. A `docker-compose.override.yml` keeps
+   dev.** Atomic deploy. A `docker-compose.dev.yml` keeps
    bind-mounts so edit-and-reload still works locally. Deploy =
    build new image (SHA tag) + restart.
 2. **Image-tag-by-commit only; keep bind-mount + tighten deploy
@@ -983,8 +1055,9 @@ separate concern (ADR-B6).
 (strict-required, no `:-latest` fallback). `Dockerfile` adds
 `COPY scripts/ /workspace/scripts/` and
 `COPY tests/ /workspace/tests/`.
-[docker-compose.override.yml](docker-compose.override.yml) keeps the
-dev bind-mounts and a `:-dev` fallback. Deploy hook
+[docker-compose.dev.yml](docker-compose.dev.yml) keeps the
+dev bind-mounts and a `:-dev` fallback (dev-opt-in via `-f` or
+`COMPOSE_FILE` per D-SB1-7). Deploy hook
 (`scripts/deploy.sh`) builds
 `wordcracker-textlab:$(git rev-parse --short HEAD)` and atomically
 writes `WC_IMAGE_TAG=$SHA` into `.env`.
@@ -1177,9 +1250,9 @@ R2 ("баг closed only when fix exists + negative test + executes on
 prod flag combo") implies a pre-deploy gate that asserts:
 - the test suite passes (R10),
 - a golden answer set behaves correctly,
-- `docker-compose.override.yml` / systemd env values match what
-  `decisions.md` says is live (closes the v2-engine.conf-style
-  drift).
+- `docker-compose.yml` / `docker-compose.dev.yml` / systemd env
+  values match what `decisions.md` says is live (closes the
+  v2-engine.conf-style drift).
 
 Currently (c) drifted at least once — D-P1-5 deleted
 `WC_DEFAULT_ENGINE` from code, but
@@ -1246,7 +1319,7 @@ mandatory rationale string that's logged.
 
 **Status.** Proposed.
 
-**Context.** [docker-compose.override.yml:42-50](docker-compose.override.yml:42)
+**Context.** [docker-compose.dev.yml:42-50](docker-compose.dev.yml:42)
 already documents «feature flags consolidated per REFACTOR_BRIEF R1
 (no dark code)» — a Phase 1 win. But:
 - [v2-engine.conf:22](systemd/wordcracker-chat.service.d/v2-engine.conf:22)
@@ -1306,7 +1379,7 @@ The `v2-engine.conf` drop-in is **deleted** as part of this ADR.
 Its still-relevant pins (`WC_LLM_MODEL`, `WC_CRITIC_MODEL`) move
 into the `chat` compose service from ADR-B2 — same place as the
 Phase 1 toggle comments at
-[docker-compose.override.yml:42-50](docker-compose.override.yml:42).
+[docker-compose.dev.yml:42-50](docker-compose.dev.yml:42).
 
 **Consequences.**
 - One source of truth for env vars. R8 ("читай живой путь") becomes
@@ -1758,10 +1831,9 @@ mechanism that warm-loads the resulting model into VRAM after a deploy
   (`WC_LLM_MODEL=wordcracker:v2 WC_CRITIC_MODEL=wordcracker:v2`).
 
 The Ollama service is stock `ollama/ollama:latest`
-([docker-compose.override.yml:3](docker-compose.override.yml:3)) with
-its model directory bind-mounted from host:
-[docker-compose.override.yml:7-8](docker-compose.override.yml:7) maps
-`/data/ollama:/root/.ollama`. Both `qwen3:14b` blobs and
+([docker-compose.yml](docker-compose.yml)) with its model directory
+bind-mounted from host: the `ollama` service in `docker-compose.yml`
+maps `/data/ollama:/root/.ollama`. Both `qwen3:14b` blobs and
 `wordcracker:v2` blobs live there.
 
 **Build procedure for `wordcracker:v2` today (per the comment block at
@@ -1832,7 +1904,7 @@ control today.
    reproducible by tag; no init-time work.
    *Cons:* (i) Ollama's `OLLAMA_MODELS` directory is `/root/.ollama`,
    which is bind-mounted from `/data/ollama` in
-   [docker-compose.override.yml:7-8](docker-compose.override.yml:7) —
+   [docker-compose.yml](docker-compose.yml) (`ollama.volumes`) —
    the mount **hides the baked-in models** at runtime. Fixing this
    means either dropping the bind-mount (and re-pulling
    `qwen3:14b`-the-base on every Ollama-image swap, ~14 GB download)

@@ -1,12 +1,19 @@
-# Dev-only override. D-SB1-1: this file is AUTO-applied by bare
-# `docker compose up` (dev path). It is NOT applied on prod, because
-# systemd / scripts invoke compose with `-f docker-compose.yml`
-# explicitly (D-SB1-6 / D-SB2-4), which skips this override.
+# Dev-only opt-in overlay. After D-SB1-7 (rename from
+# docker-compose.override.yml), this file is **not** auto-applied by
+# bare `docker compose up`. Bare `docker compose up` on the prod host
+# now loads only docker-compose.yml — the safe default.
+#
+# Dev opt-in is explicit:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+# or via .env:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.dev.yml
+# Either way is greppable. The previous "magic auto-merge of override
+# .yml" silently turned dev shape on whenever an operator ran bare
+# `docker compose up` on prod — the failure mode D-SB1-7 closes.
 #
 # Three dev conveniences live here:
-#   1. WC_IMAGE_TAG falls back to `dev` when unset, so bare
-#      `docker compose up` works without an .env file. Prod has no
-#      fallback — see docker-compose.yml.
+#   1. WC_IMAGE_TAG falls back to `dev` when unset, so dev opt-in
+#      works without an .env file.
 #   2. Code paths bind-mount from the host so edit-and-reload works
 #      against the running container. Prod uses the baked-in image
 #      content from Dockerfile COPY.

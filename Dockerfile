@@ -54,11 +54,11 @@ RUN pip install --no-cache-dir \
 WORKDIR /workspace
 
 # D-SB1-2: bake the production code tree into the image. Dev (bind-mount
-# via docker-compose.override.yml) overlays /workspace/scripts and
-# /workspace/tests; prod (-f docker-compose.yml only) reads them straight
-# from the layers below. .dockerignore keeps the build context small —
-# corpus dirs (data/, raw_books/), .git, notebooks/, docs/ never enter
-# the image.
+# via docker-compose.dev.yml, dev opt-in only) overlays
+# /workspace/scripts and /workspace/tests; prod (-f docker-compose.yml
+# only) reads them straight from the layers below. .dockerignore keeps
+# the build context small — corpus dirs (data/, raw_books/), .git,
+# notebooks/, docs/ never enter the image.
 COPY scripts/ /workspace/scripts/
 COPY tests/ /workspace/tests/
 

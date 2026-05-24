@@ -5,9 +5,10 @@
 # baked into the image via Dockerfile COPY (D-SB1-2).
 #
 # Dev convenience (bind-mount of ./scripts ./tests etc.) lives in
-# docker-compose.override.yml, which is auto-applied to bare
-# `docker compose up` (dev path) and skipped by
-# `docker compose -f docker-compose.yml up` (prod path).
+# docker-compose.dev.yml. Per D-SB1-7 it is NOT auto-applied; bare
+# `docker compose up` loads only this file (prod). Dev opts in
+# explicitly via `-f docker-compose.yml -f docker-compose.dev.yml` or
+# `COMPOSE_FILE=docker-compose.yml:docker-compose.dev.yml` in .env.
 #
 # Supervision: chat / admin run as PID-1 Python in their own containers
 # (D-SB2-1 .. D-SB2-7). SIGTERM propagates natively; no `docker exec`,

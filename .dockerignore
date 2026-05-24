@@ -37,6 +37,6 @@ Modelfile.v2
 
 # Compose files describe HOW to run the container; not needed INSIDE it
 docker-compose.yml
-docker-compose.override.yml
+docker-compose.dev.yml
 .dockerignore
 Dockerfile

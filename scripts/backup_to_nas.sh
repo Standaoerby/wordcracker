@@ -67,7 +67,7 @@ tar --ignore-failed-read -czf "$TARBALL" \
     "home/claude/wordcracker/scripts" \
     "home/claude/wordcracker/Dockerfile" \
     "home/claude/wordcracker/docker-compose.yml" \
-    "home/claude/wordcracker/docker-compose.override.yml" \
+    "home/claude/wordcracker/docker-compose.dev.yml" \
     $(find data/spgc/derived -maxdepth 2 \( -name '*.csv' -o -name '*.json' \) 2>/dev/null) \
     data/spgc/SPGC-metadata-2018-07-18.csv \
     $(ls data/raw_text/u*.txt 2>/dev/null || true) \

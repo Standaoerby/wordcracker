@@ -6,7 +6,7 @@
 > путь") becomes mechanical — open this file, see the truth.
 >
 > **Snapshot.** 2026-05-24, HEAD `5b32530`.
-> **Compose files audited.** `docker-compose.yml`, `docker-compose.override.yml`.
+> **Compose files audited.** `docker-compose.yml`, `docker-compose.dev.yml` (renamed from `docker-compose.override.yml` under D-SB1-7).
 > **systemd drop-ins audited.** `systemd/wordcracker-chat.service.d/v2-engine.conf`.
 > **Refresh policy.** Update on any add/remove of a `WC_*` read, on any
 > change to the compose files, and on any deploy that touches the
@@ -26,9 +26,14 @@
   "WC_LLM_INTENT_ENABLED"|"WC_PLANNER_LLM_FALLBACK"|"WC_DEFAULT_ENGINE"|
   "WC_ALLOW_ENGINE_OVERRIDE")` returns zero hits in `scripts/`.
 - **No commented-out flag in compose.** `docker-compose.yml` declares
-  only `WC_IMAGE_TAG` (image tag template); `docker-compose.override.yml`
+  only `WC_IMAGE_TAG` (image tag template); `docker-compose.dev.yml`
   declares only `WC_OLLAMA_NUM_CTX=16384`. The Phase 1 comment block at
-  `override.yml:42-50` documents removed gates (no live `# WC_X=` lines).
+  `dev.yml:42-50` documents removed gates (no live `# WC_X=` lines).
+  (NOTE: this snapshot pre-dates S-B2 — under S-B2 the chat / admin
+  compose services carry an `*app-env` anchor that pins
+  `WC_OLLAMA_NUM_CTX`, `WC_LLM_MODEL`, `WC_CRITIC_MODEL` in
+  `docker-compose.yml` itself. Full infra.md refresh is a separate
+  follow-up; this rename touches only the filename.)
 - **One known dead-config drift, explicitly pending-removal.**
   Systemd drop-in `v2-engine.conf:22` still passes
   `-e WC_DEFAULT_ENGINE=v2` to a container that no longer reads it
@@ -65,7 +70,7 @@
 
 | where | value |
 |---|---|
-| `docker-compose.override.yml:41` | `16384` |
+| `docker-compose.dev.yml:41` | `16384` (snapshot — see §0 note re: post-S-B2 relocation) |
 | `scripts/v2/token_budget.py:67` | reads env, no default (caller guards) |
 
 - **Purpose.** Bump `qwen3:14b` ctx from upstream default 8192 to 16384

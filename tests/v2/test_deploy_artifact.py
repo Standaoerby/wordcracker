@@ -32,7 +32,10 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BASE_COMPOSE = REPO_ROOT / "docker-compose.yml"
-OVERRIDE_COMPOSE = REPO_ROOT / "docker-compose.override.yml"
+# D-SB1-7: dev overlay renamed from docker-compose.override.yml to
+# docker-compose.dev.yml so bare `docker compose up` on prod loads only
+# the base file (safe default; dev opts in explicitly).
+DEV_COMPOSE = REPO_ROOT / "docker-compose.dev.yml"
 SYSTEMD_DIR = REPO_ROOT / "systemd"
 
 GUTENBERG_SERVICE = "gutenberg-lab"
@@ -64,7 +67,7 @@ def test_no_code_bind_mounts_in_prod_base():
     repo_relative = [v for v in vols if v.startswith("./") or v.startswith(".\\")]
     assert repo_relative == [], (
         f"prod base {BASE_COMPOSE.name} bind-mounts host repo paths "
-        f"({repo_relative}). Move them to docker-compose.override.yml (dev-only)."
+        f"({repo_relative}). Move them to docker-compose.dev.yml (dev-only)."
     )
 
 
@@ -101,10 +104,10 @@ def test_dev_override_restores_code_bind_mounts(service: str):
     invariants (prod no-mount / dev mount) together pin the contract
     in both directions (R2).
     """
-    override = _load_yaml(OVERRIDE_COMPOSE)
+    override = _load_yaml(DEV_COMPOSE)
     vols = _service_volumes(override, service)
     assert any("./scripts" in v for v in vols), (
-        f"dev override {OVERRIDE_COMPOSE.name} does not bind-mount "
+        f"dev override {DEV_COMPOSE.name} does not bind-mount "
         f"`./scripts` for {service!r}. Dev edit-and-reload would not "
         f"work — host edits to scripts/*.py would not reach the "
         f"running container."
@@ -131,7 +134,7 @@ def test_prod_image_tag_is_strictly_required():
     assert not re.search(r"\$\{WC_IMAGE_TAG:-", text), (
         f"{BASE_COMPOSE.name} contains a ${{WC_IMAGE_TAG:-...}} fallback. "
         f"Prod must fail loud when the tag is unset; move the fallback "
-        f"to docker-compose.override.yml (dev)."
+        f"to docker-compose.dev.yml (dev)."
     )
 
 
@@ -142,9 +145,9 @@ def test_dev_override_provides_image_tag_fallback():
     working. If this fails, dev onboarding broke even though prod is
     happy.
     """
-    text = OVERRIDE_COMPOSE.read_text(encoding="utf-8")
+    text = DEV_COMPOSE.read_text(encoding="utf-8")
     assert re.search(r"\$\{WC_IMAGE_TAG:-", text), (
-        f"{OVERRIDE_COMPOSE.name} should provide a ${{WC_IMAGE_TAG:-...}} "
+        f"{DEV_COMPOSE.name} should provide a ${{WC_IMAGE_TAG:-...}} "
         f"fallback so bare `docker compose up` works without an .env."
     )
 

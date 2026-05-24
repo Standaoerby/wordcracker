@@ -34,8 +34,12 @@ fi
 log "GPU lost in ollama (nvidia-smi failed). Recreating container..."
 cd "$COMPOSE_DIR" || { log "cd $COMPOSE_DIR failed"; exit 1; }
 
-docker compose -f docker-compose.yml -f docker-compose.override.yml down ollama >>"$LOG" 2>&1
-docker compose -f docker-compose.yml -f docker-compose.override.yml up -d ollama >>"$LOG" 2>&1
+# D-SB1-7: dev override (docker-compose.dev.yml) is no longer
+# auto-applied and the watcher runs on prod via cron. Only the base
+# file is needed — the dev override touches gutenberg-lab / chat /
+# admin, never ollama.
+docker compose -f docker-compose.yml down ollama >>"$LOG" 2>&1
+docker compose -f docker-compose.yml up -d ollama >>"$LOG" 2>&1
 
 sleep 8
 
