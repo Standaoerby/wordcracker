@@ -1,14 +1,58 @@
 # Base / prod compose. D-SB1-1: this file is the prod source of truth.
-# It contains ollama, gutenberg-lab (image-by-SHA, env, corpus mounts).
-# It does NOT bind-mount code from the host — code is baked into the
-# image via Dockerfile COPY (D-SB1-2).
+# It contains ollama, gutenberg-lab (jupyter), chat (port 8890),
+# admin (port 8891). All three app services share the same SHA-pinned
+# image (D-SB2-1). It does NOT bind-mount code from the host — code is
+# baked into the image via Dockerfile COPY (D-SB1-2).
 #
 # Dev convenience (bind-mount of ./scripts ./tests etc.) lives in
 # docker-compose.override.yml, which is auto-applied to bare
 # `docker compose up` (dev path) and skipped by
-# `docker compose -f docker-compose.yml up` (prod path used by systemd).
+# `docker compose -f docker-compose.yml up` (prod path).
 #
-# See docs/v2/decisions.md → 2026-05-24 S-B1.
+# Supervision: chat / admin run as PID-1 Python in their own containers
+# (D-SB2-1 .. D-SB2-7). SIGTERM propagates natively; no `docker exec`,
+# no `pkill`. systemd no longer manages them — Docker / compose is the
+# only supervisor.
+#
+# See docs/v2/decisions.md → 2026-05-24 S-B1 + S-B2.
+
+# --- shared bits for the three app services (D-SB2-1) ---
+# These x-* extension fields are ignored by compose; the YAML anchors
+# they define are referenced by services: below.
+
+x-app-image: &app-image
+  wordcracker-textlab:${WC_IMAGE_TAG:?WC_IMAGE_TAG must be set (export it, write .env, or run scripts/deploy.sh)}
+
+x-app-env: &app-env
+  OLLAMA_HOST: http://ollama:11434
+  ASSISTANT_NAME: Словоёб
+  # Sprint 22+ alpha5 — Token Budget Layer override. Bump qwen3:14b
+  # ctx from default 8192 to 16384 (~2× headroom). With this, the
+  # Christie 200-word case fits comfortably without ladder shrink.
+  # Lower budgeted utilization = lower confabulation risk.
+  WC_OLLAMA_NUM_CTX: "16384"
+  # Pins that used to live in systemd/wordcracker-chat.service.d/v2-engine.conf
+  # (deleted in D-SB2-5). They are real, live model pins, not feature
+  # flags — Phase 1 already collapsed the feature-flag landscape (R1).
+  WC_LLM_MODEL: wordcracker:v2
+  WC_CRITIC_MODEL: wordcracker:v2
+
+x-app-volumes: &app-volumes
+  # D-SB1-1 / D-SB2-1: only corpus / state bind-mounts in the prod base.
+  # Code paths (./scripts, ./tests, ./notebooks, ./data, ./raw_books)
+  # live under dev-only override. /data/* paths are large state on the
+  # host disk; ADR-B2's "no bind-mount" rule explicitly excluded them.
+  # /data/uploads is the admin write target (was implicit under
+  # gutenberg-lab; promoted to an explicit bind-mount in D-SB2-1 so the
+  # admin container can write to it).
+  - /data/books:/workspace/books
+  - /data/clean_books:/workspace/clean_books
+  - /data/chroma_db:/workspace/chroma_db
+  - /data/spgc:/workspace/spgc
+  - /data/raw_text:/workspace/raw_text
+  - /data/wodehouse_raw:/workspace/wodehouse_raw
+  - /data/gutenberg_raw:/workspace/gutenberg_raw
+  - /data/uploads:/workspace/uploads
 
 services:
   ollama:
@@ -42,58 +86,23 @@ services:
       start_period: 90s
 
   gutenberg-lab:
-    # D-SB1-3: WC_IMAGE_TAG is REQUIRED in the prod path. The ${VAR:?msg}
-    # form fails `docker compose config` / `up` loudly if the variable
-    # is unset — no silent `:latest` ever ships to prod. Dev overrides
-    # this image: line in docker-compose.override.yml with a `:-dev`
-    # fallback so bare `docker compose up` still works locally.
-    image: wordcracker-textlab:${WC_IMAGE_TAG:?WC_IMAGE_TAG must be set (export it, write .env, or run scripts/deploy.sh)}
+    # Jupyter for notebook work. After S-B2 this is dev/analysis only —
+    # chat (8890) and admin (8891) live in their own services below.
+    # Memory cap reduced from 40 GB (pre-S-B2 single container) to 8 GB
+    # (idle jupyter + ad-hoc analysis). chat/admin carry their own caps.
+    image: *app-image
+    container_name: gutenberg-lab
     build:
       context: .
       dockerfile: Dockerfile
     ports:
       - "8888:8888"
-      - "8890:8890"
-      - "8891:8891"
-    environment:
-      - OLLAMA_HOST=http://ollama:11434
-      - ASSISTANT_NAME=Словоёб
-      # Sprint 22+ alpha5 — Token Budget Layer override. Bump qwen3:14b
-      # ctx from default 8192 to 16384 (~2× headroom). With this, the
-      # Christie 200-word case fits comfortably without ladder shrink.
-      # Lower budgeted utilization = lower confabulation risk.
-      # Set to 32768 if VRAM allows and longer queries are common.
-      - WC_OLLAMA_NUM_CTX=16384
-      # Phase 1 (2026-05-22) — feature flags consolidated per
-      # REFACTOR_BRIEF R1 (no dark code). The following are now the
-      # SINGLE permanent path and have no env-gate counterparts:
-      #   - v4 LLM planner (compound / follow-up queries)
-      #   - LLM intent fallback (when rules miss)
-      #   - v6 layered entity linker (closes E13)
-      #   - v5 pipeline envelope (RequestTrace + RequestBudget)
-      #   - legacy `_llm_render` renderer (typed Stage 3 / 4 branches deleted)
-      # See docs/v2/decisions.md → D-P1-1 ... D-P1-3.
-    volumes:
-      # D-SB1-1: only corpus / state bind-mounts in the prod base. Code
-      # paths (./scripts, ./tests, ./notebooks, ./data, ./raw_books)
-      # live under dev-only override. /data/* paths are large state on
-      # the host disk and were explicitly excluded from ADR-B2's "no
-      # bind-mount" rule.
-      - /data/books:/workspace/books
-      - /data/clean_books:/workspace/clean_books
-      - /data/chroma_db:/workspace/chroma_db
-      - /data/spgc:/workspace/spgc
-      - /data/raw_text:/workspace/raw_text
-      - /data/wodehouse_raw:/workspace/wodehouse_raw
-      - /data/gutenberg_raw:/workspace/gutenberg_raw
+    environment: *app-env
+    volumes: *app-volumes
     deploy:
       resources:
-        # cap RAM at 40 GB: ChromaDB hnsw (~5 GB) + sentence-transformers (~1 GB)
-        # + chat_server + admin_server + jupyter + tools + ~10 GB headroom. Past
-        # this the kernel kills the container instead of the host (previous OOM
-        # event under unbounded memory took down SSH and required a hard reboot).
         limits:
-          memory: 40G
+          memory: 8G
         reservations:
           devices:
             - driver: nvidia
@@ -103,3 +112,68 @@ services:
       sh -c "jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root
       --ServerApp.token='' --ServerApp.password=''
       --notebook-dir=/workspace"
+    restart: unless-stopped
+
+  chat:
+    # D-SB2-1: PID 1 = python; SIGTERM propagates from `docker stop` /
+    # compose recreate directly to the chat_server.py process. No
+    # `docker exec`, no `pkill` orphan reap.
+    image: *app-image
+    container_name: wordcracker-chat
+    command: ["python", "-u", "/workspace/scripts/chat_server.py", "--port", "8890"]
+    environment: *app-env
+    volumes: *app-volumes
+    ports:
+      - "8890:8890"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    deploy:
+      resources:
+        # Chat carries the LLM-facing path: rag_query + ChromaDB +
+        # SentenceTransformer + v2 engine. Observed ~700 MB RSS post-warmup;
+        # 28 GB cap is the pre-S-B2 gutenberg-lab share minus admin (4 GB)
+        # and jupyter (8 GB). Same overall 40 GB ceiling, just split.
+        limits:
+          memory: 28G
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      # D-SB2-7: native compose healthcheck replaces the systemd
+      # ExecStartPost curl-loop (`for i in $(seq 1 30); do sleep 2;
+      # curl ...; done`). Uses python urllib instead of curl to avoid
+      # depending on curl being in the runtime layer of the image.
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8890/health', timeout=2).status == 200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # 60s covers rag_query import (spaCy + tokenizer) + chat_server
+      # module load. ChromaDB cold-load is on first /api/chat (lazy),
+      # not on /health — so 60s is well above the observed warmup.
+      start_period: 60s
+
+  admin:
+    # D-SB2-1: PID 1 = python; admin is upload/index only — no LLM,
+    # no ChromaDB at import time, so warmup is shorter.
+    image: *app-image
+    container_name: wordcracker-admin
+    command: ["python", "-u", "/workspace/scripts/admin_server.py", "--port", "8891"]
+    environment: *app-env
+    volumes: *app-volumes
+    ports:
+      - "8891:8891"
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8891/health', timeout=2).status == 200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

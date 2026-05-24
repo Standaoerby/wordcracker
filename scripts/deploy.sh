@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/deploy.sh — single-command deploy of wordcracker-textlab.
 #
-# D-SB1-4 (docs/v2/decisions.md → 2026-05-24 S-B1).
+# D-SB1-4 + D-SB2-4 (docs/v2/decisions.md → 2026-05-24 S-B1 / S-B2).
 #
 # Usage:
 #     bash scripts/deploy.sh                 # deploy HEAD
@@ -13,10 +13,14 @@
 #   1. Resolve target SHA from <ref> or HEAD.
 #   2. Build wordcracker-textlab:$SHA (skipped on --rollback if image present).
 #   3. Atomically write WC_IMAGE_TAG=$SHA into .env.
-#   4. docker compose -f docker-compose.yml up -d --force-recreate gutenberg-lab.
-#   5. systemctl restart wordcracker-chat wordcracker-admin (if present).
-#   6. scripts/verify_deployed_image.sh $SHA — fail loudly on mismatch.
-#   7. Prune all but the last 5 SHA-tagged wordcracker-textlab images.
+#   4. docker compose -f docker-compose.yml up -d --force-recreate
+#      gutenberg-lab chat admin. After S-B2 (D-SB2-4) this is the ONLY
+#      supervision mechanism — chat/admin are compose services, not
+#      systemd-managed `docker exec` clients, so no systemctl restart
+#      loop is needed. wordcracker-status (host-side) is not touched on
+#      deploy — its code lives on the host and is not part of any image.
+#   5. scripts/verify_deployed_image.sh $SHA — fail loudly on mismatch.
+#   6. Prune all but the last 5 SHA-tagged wordcracker-textlab images.
 #
 # TODO(ADR-B4): step 0.5 — run scripts/v2/predeploy_check.py here once
 # the predeploy harness lands. Until then this script trusts the
@@ -119,23 +123,15 @@ mv "$TMP_ENV" "$ENV_FILE"
 trap - EXIT
 echo "[deploy] .env updated: WC_IMAGE_TAG=${SHA}"
 
-# --- bring up new container ---
-echo "[deploy] docker compose up -d --force-recreate gutenberg-lab ..."
-WC_IMAGE_TAG="${SHA}" docker compose -f docker-compose.yml up -d --force-recreate gutenberg-lab
-
-# --- restart systemd units if present ---
-if command -v systemctl >/dev/null 2>&1; then
-    for unit in wordcracker-chat wordcracker-admin; do
-        if systemctl list-unit-files "${unit}.service" --no-legend 2>/dev/null | grep -q "$unit"; then
-            echo "[deploy] systemctl restart ${unit}"
-            sudo systemctl restart "$unit"
-        else
-            echo "[deploy] skip: ${unit}.service not installed (run scripts/install_systemd_units.sh)"
-        fi
-    done
-else
-    echo "[deploy] skip: systemctl not on PATH (non-prod host?)"
-fi
+# --- bring up new containers ---
+# D-SB2-4: single mechanism. `--force-recreate` recreates all three app
+# services with the new image tag in one command. No systemctl follow-up
+# is needed because chat/admin are compose services (D-SB2-6), not
+# `docker exec` clients of gutenberg-lab. Services are named explicitly
+# to prevent the footgun where `up -d --force-recreate gutenberg-lab`
+# alone would silently leave chat/admin on the old image.
+echo "[deploy] docker compose up -d --force-recreate gutenberg-lab chat admin ..."
+WC_IMAGE_TAG="${SHA}" docker compose -f docker-compose.yml up -d --force-recreate gutenberg-lab chat admin
 
 # --- verify ---
 echo "[deploy] verifying running image tag ..."

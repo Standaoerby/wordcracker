@@ -2,19 +2,21 @@
 # scripts/install_systemd_units.sh — sync wordcracker systemd unit
 # files from the repo into /etc/systemd/system/ on the prod host.
 #
-# Run this once after any change to systemd/*.service files. D-SB1-6
-# (docs/v2/decisions.md → 2026-05-24 S-B1) requires `-f docker-compose.yml`
-# in the unit files, so the first run after S-B1 landing must come from
-# this script.
+# After S-B2 (docs/v2/decisions.md → 2026-05-24 S-B2) only the
+# host-side status_server has a systemd unit; chat / admin run as
+# compose services with PID 1 = python and are supervised by Docker
+# (D-SB2-6). The script also `systemctl enable`s the status unit so
+# it survives a reboot (D-SB2-3).
 #
 # Usage (as a user with sudo):
 #     bash scripts/install_systemd_units.sh
 #
+# Idempotent. Safe to re-run after a `git pull` that touches
+# systemd/*.service.
+#
 # This script is intentionally separate from scripts/deploy.sh:
-# deploy.sh is a routine operation (every deploy); install_systemd_units
-# is a one-time-per-systemd-change operation that requires sudo and
-# implies a service restart. Folding them together would mean every
-# deploy needs sudo for no behavioural gain on most deploys.
+# deploy.sh is routine (every deploy); install_systemd_units is
+# one-time-per-systemd-change and requires sudo.
 
 set -euo pipefail
 
@@ -30,9 +32,10 @@ if [[ "$EUID" -ne 0 ]] && ! sudo -n true 2>/dev/null; then
     exit 2
 fi
 
+# After S-B2: only the host-side status_server stays a systemd unit.
+# wordcracker-chat / wordcracker-admin were removed from systemd
+# entirely (D-SB2-6) — they are compose services now.
 UNITS=(
-    "systemd/wordcracker-chat.service"
-    "systemd/wordcracker-admin.service"
     "systemd/wordcracker-status.service"
 )
 
@@ -46,10 +49,37 @@ for src in "${UNITS[@]}"; do
     sudo install -m 644 "$src" "$dst"
 done
 
+# Detect leftover post-S-B2 unit files on the host and warn the operator.
+# This is a one-time cleanup hint, not a hard failure — chat/admin may
+# already be stopped but their unit files can linger from before S-B2.
+for stale in wordcracker-chat.service wordcracker-admin.service; do
+    if [[ -f "/etc/systemd/system/${stale}" ]]; then
+        echo "[install] WARN: /etc/systemd/system/${stale} still present (pre-S-B2)" >&2
+        echo "[install]       run: sudo systemctl disable --now ${stale%.service} && sudo rm /etc/systemd/system/${stale}" >&2
+    fi
+done
+if [[ -d "/etc/systemd/system/wordcracker-chat.service.d" ]]; then
+    echo "[install] WARN: /etc/systemd/system/wordcracker-chat.service.d (drop-in dir) still present" >&2
+    echo "[install]       run: sudo rm -rf /etc/systemd/system/wordcracker-chat.service.d" >&2
+fi
+
 echo "[install] systemctl daemon-reload"
 sudo systemctl daemon-reload
 
-echo "[install] systemctl restart wordcracker-chat wordcracker-admin"
-sudo systemctl restart wordcracker-chat wordcracker-admin || true
+# D-SB2-3: enable so status_server survives reboot. `enable` links the
+# unit into multi-user.target.wants/ → fires on next boot. `restart` is
+# safe (start if not running, restart if running). The previous nohup'd
+# status_server.py — if any — listens on the same :8889 and will block
+# the systemd start with EADDRINUSE; the WARN below tells the operator.
+echo "[install] systemctl enable wordcracker-status"
+sudo systemctl enable wordcracker-status
 
-echo "[install] OK — systemd units in sync with repo"
+echo "[install] systemctl restart wordcracker-status"
+if ! sudo systemctl restart wordcracker-status; then
+    echo "[install] WARN: wordcracker-status restart failed." >&2
+    echo "[install]       Likely cause: a manual nohup of status_server.py is still bound to :8889." >&2
+    echo "[install]       Find it with: pgrep -f 'python.*status_server.py'  →  kill, then re-run." >&2
+    exit 3
+fi
+
+echo "[install] OK — systemd units in sync with repo (status only; chat/admin run via compose)"
