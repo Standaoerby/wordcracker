@@ -6,7 +6,770 @@
 
 ---
 
-## 2026-05-23 — Phase 1 remediation (T1)
+## 2026-05-24 — Architecture brief: latency + deploy
+
+> Companion to `docs/AUDIT_2026-05-22_architecture_quality.md` and the
+> reconstructed brief `architecture_brief_2026-05-24_latency_and_deploy`
+> (no separate file — points enumerated in this section). Two domains:
+>
+> - **B — конвейер релиза.** Делаем первым: пока деплой невоспроизводим,
+>   латентность A проверять нечем — изменение, которое «ускорило»,
+>   может быть просто непредсказанной перезаписью кода через bind-mount.
+> - **A — латентность тяжёлых агрегаций.**
+>
+> Все ADR в статусе **Proposed** до ревью пользователя.
+
+### ADR-0 — ADRs live in this file, not in `docs/adr/`
+
+**Status.** Accepted (2026-05-24).
+
+**Context.** Structural decisions D-P0-1 … D-P1-8 are already
+sections in this file. The file is ~500 LOC, chronologically sorted
+("newest at the top"). A separate `docs/adr/NNNN-*.md` directory
+would split history into two stores — search becomes more expensive
+without buying anything for a single-author codebase.
+
+**Options considered.**
+1. **Continue here as additional dated sections.** Zero churn, same
+   template (`Decision/Why/Consequences`), `grep` stays in one file.
+2. **Migrate to `docs/adr/NNNN-title.md`.** Standard pattern in
+   larger projects but adds a rename pass over D-P0-1…D-P1-8 and
+   breaks in-flight refs ("D-P1-5" cited from CLAUDE.md and chat).
+3. **Hybrid — keep history here, new ADRs in `docs/adr/`.** Two
+   stores, drift risk.
+
+**Decision.** Option 1. ADR-B/A series live as sub-sections under
+this 2026-05-24 block, identified as **ADR-B1**…**ADR-B5** and
+**ADR-A1**…**ADR-A4**.
+
+**Consequences.** This file gains ~9 sub-sections (~600 LOC). When
+total exceeds ~1500 LOC, split-by-year (`decisions-2026.md`) — not
+by ADR.
+
+**Trade-offs.** Loses one-file-per-decision discoverability.
+Mitigated by stable section anchors (`#adr-b1-…`).
+
+---
+
+### Why Domain B is first
+
+(a) Latency claims (A) need a stable baseline. With code mounted via
+bind-mount (B2) and `chat_server` launched through `docker compose
+exec` (B3), a "fix" may simply observe a process that picked up new
+`.py` files but not new `.pyc` files (the pyc-purge incident at
+[wordcracker-chat.service:25](systemd/wordcracker-chat.service:25) is
+real prior art).
+
+(b) Precompute-style fixes (A1) are only as good as the batch job's
+ability to run reproducibly — without B1 the batch job's deps are
+unpinned.
+
+Order: B1 → B2 → B3 → B4 → B5, then A1 → A2 → A3 → A4. Effort is
+NOT uniform: B1 is multi-day; A4 is half a day.
+
+---
+
+### ADR-B1 — Pinned dependencies + image-tag-by-commit
+
+**Status.** Proposed.
+
+**Context.** [Dockerfile:7-28](Dockerfile:7) installs `jupyterlab`,
+`spacy[transformers]`, `transformers`, `sentence-transformers`,
+`chromadb`, `pandas`, `scikit-learn` without version pins or a
+lockfile. [Dockerfile:30-31](Dockerfile:30) runs `python -m spacy
+download en_core_web_sm` and `en_core_web_trf` — silently
+version-floating models (download URL serves current spaCy
+version). [docker-compose.yml:3](docker-compose.yml:3) declares
+`image: wordcracker-textlab` — single name, no tag, no commit SHA.
+Result: `docker compose build` on day N and day N+30 can yield
+different runtime artifacts at the same git SHA. Audit C5 ("bake
+time = 0; деплой-и-откат за 30 минут") presumes identical artifacts
+across deploys — currently not true.
+
+**Options considered.**
+1. **`requirements.txt` + `requirements.lock` (pip-compile), image
+   tagged by commit SHA.** Standard. Forces deterministic build.
+   Maintenance: explicit `pip-compile` on dep refresh.
+2. **`uv` with `pyproject.toml` + `uv.lock`.** Same goal, faster
+   install. Yet-another-packaging-change cost for a single-author
+   codebase.
+3. **Status quo + container-rebuild discipline.** Cheap, but R8
+   ("сначала читай живой путь") becomes impossible — `pip show` in
+   the running container is the only source of truth, drifts with
+   the latest pull.
+
+**Decision.** Option 1. Create `requirements.in` (~25 top-level deps
+from Dockerfile:7-28) and `requirements.lock` (transitive freeze).
+Dockerfile reads `pip install --require-hashes -r
+requirements.lock`. spaCy models pinned by direct URL (e.g.
+`en_core_web_sm-3.7.1`). [docker-compose.yml:3](docker-compose.yml:3)
+becomes `image: wordcracker-textlab:${WC_IMAGE_TAG:-latest}`. Deploy
+hook exports `WC_IMAGE_TAG=$(git rev-parse --short HEAD)`.
+
+**Consequences.**
+- New files at repo root: `requirements.in`, `requirements.lock`.
+- Dockerfile rewritten to install from lockfile (RUN layer cacheable).
+- `make build-image` (or equivalent) is the canonical build entry;
+  `pip-compile` on dep change is a separate, explicit step.
+- Rollback becomes coherent: `WC_IMAGE_TAG=<prev-sha> docker compose
+  up -d gutenberg-lab` restores the prior image without rebuild.
+- One-time cost: discover and resolve any existing dev↔prod version
+  skew.
+
+**Trade-offs.**
+- Lockfile maintenance friction is the **goal** — discourages casual
+  cascade upgrades (per R7).
+- Image-tag-by-SHA needs a local image store (single host, single
+  user — `docker save | docker load` to `/data/docker-images/` is
+  adequate; no private registry required).
+- spaCy direct-URL pin is one extra config to track; payoff is
+  reproducible NLP behavior across deploys.
+
+---
+
+### ADR-B2 — Code lives in the image, not on host bind-mount
+
+**Status.** Proposed.
+
+**Context.** [docker-compose.yml:11-14](docker-compose.yml:11) mounts
+`./scripts:/workspace/scripts`, `./tests:/workspace/tests`,
+`./notebooks:/workspace/notebooks` as bind-mounts. The container
+does not own the code — host filesystem does. Implications:
+- Any unstaged `.py` edit on host = immediate code in prod. No
+  atomic deploy flip.
+- `git checkout` to a different branch on host changes prod.
+- [wordcracker-chat.service:25](systemd/wordcracker-chat.service:25)
+  ships defensive pyc purge because a "fresh scp of .py" once lost
+  to an old `.pyc`. Bind-mount + concurrent edit is the precise
+  failure class.
+
+Data mounts at [docker-compose.yml:17-23](docker-compose.yml:17)
+(`/data/chroma_db`, `/data/spgc`, `/data/books`) are LEGITIMATELY
+bind-mounts — corpus is hundreds of GB on host disk. **This ADR is
+only about code paths.**
+
+**Options considered.**
+1. **`COPY scripts/ tests/` into image at build; remove code
+   bind-mounts in prod.** Deploy = build new image + restart.
+   Atomic. Pairs with B1.
+2. **Keep bind-mount + tighten deploy hook (`git fetch && git reset
+   --hard <tag>` with a lock file).** Cheaper but `git reset --hard`
+   on a host where a developer might be mid-edit is destructive.
+3. **Hybrid: COPY in image AND keep bind-mount for dev via compose
+   override.** Production override sets `volumes: []` for code paths;
+   dev override keeps the bind. Two compose files — they already
+   exist.
+
+**Decision.** Option 3. Dockerfile adds `COPY scripts/
+/workspace/scripts/` and `COPY tests/ /workspace/tests/`. A new
+`docker-compose.prod.yml` REMOVES the `./scripts` and `./tests`
+bind-mounts for `gutenberg-lab` (data mounts stay). Dev keeps
+existing [docker-compose.override.yml](docker-compose.override.yml)
+behaviour (bind-mounts for edit-and-reload).
+
+Prod deploy command: `docker compose -f docker-compose.yml -f
+docker-compose.prod.yml up -d gutenberg-lab`. systemd units invoke
+this.
+
+**Consequences.**
+- `git checkout` on host no longer affects running prod (image is
+  SHA-frozen via B1).
+- Pyc-purge `ExecStartPre` at [wordcracker-chat.service:25](systemd/wordcracker-chat.service:25)
+  becomes redundant in prod (kept as defence-in-depth short-term).
+- Single deploy path: commit → push → `docker compose build` (or CI
+  build) → image-tag bump → `docker compose up -d`.
+- Iteration in dev unaffected — bind-mount + hot-reload preserved.
+
+**Trade-offs.**
+- Image rebuild cost on code change = one `COPY` layer (pip layer
+  cached); small.
+- Prod hotfix path becomes "rebuild + redeploy" — no `vim
+  /workspace/scripts/...` shortcut. **Friction is desired** per R7,
+  R8.
+- If a hotfix is truly minute-critical, the SHA-tag image makes
+  rollback fast; structured emergency fix > shell-edit.
+
+---
+
+### ADR-B3 — `chat_server` / `admin_server` as compose services with proper PID 1
+
+**Status.** Proposed.
+
+**Context.** [wordcracker-chat.service:14-28](systemd/wordcracker-chat.service:14)
+orchestrates `chat_server` as:
+
+```
+ExecStartPre=docker compose up -d gutenberg-lab
+ExecStartPre=-docker compose exec ... pkill -9 -f /workspace/scripts/chat_server.py
+ExecStartPre=-docker compose exec ... find /workspace/scripts/__pycache__ -name '*.pyc' -delete
+ExecStart=docker compose exec -T ... python -u /workspace/scripts/chat_server.py --port 8890
+```
+
+The unit's own comment explains: «SIGTERM doesn't propagate from
+`docker compose exec` to the python process inside the container,
+so old chat_server.py instances can survive a restart and keep
+port 8890 bound.» Concretely:
+- [wordcracker-chat.service:39](systemd/wordcracker-chat.service:39)
+  `KillSignal=SIGTERM` and `TimeoutStopSec=20` kill only the
+  `docker compose exec` client; the container-side Python is
+  orphaned (hence the `pkill` on START).
+- Three deploy patterns coexist: `wordcracker-chat.service` and
+  `wordcracker-admin.service` use `docker compose exec`;
+  [wordcracker-status.service:12](systemd/wordcracker-status.service:12)
+  runs `/usr/bin/python3` from host directly (status_server has no
+  Docker dependency — reads file metadata).
+- [v2-engine.conf:21-22](systemd/wordcracker-chat.service.d/v2-engine.conf:21)
+  resets `ExecStart` to re-add `-e WC_DEFAULT_ENGINE=v2 -e
+  WC_LLM_MODEL=... -e WC_CRITIC_MODEL=...` because the main unit's
+  ExecStart only forwards `ASSISTANT_NAME`. `WC_DEFAULT_ENGINE` was
+  deleted from code in D-P1-5; the drop-in still ships it. This is
+  exactly the dead-config drift R8 forbids.
+
+**Options considered.**
+1. **`chat_server` / `admin_server` as separate compose services,
+   same image as `gutenberg-lab`.** Each service has its own
+   `command:` (python = PID 1). SIGTERM works. systemd uses `docker
+   compose up -d wordcracker-chat`.
+2. **Separate compose services with separate images.** Cleaner
+   isolation; ×3 image build cost (small — same deps). Overkill for
+   single-host.
+3. **Status quo + a wrapper entrypoint** (`scripts/chat_entrypoint.sh`
+   with `exec python ...`). Doesn't fix the `docker compose exec`
+   child-of-exec problem — exec is still the parent and SIGTERM
+   still doesn't reach python.
+
+**Decision.** Option 1. Add compose services `wordcracker-chat`
+(port 8890) and `wordcracker-admin` (port 8891) sharing the
+`wordcracker-textlab:${WC_IMAGE_TAG}` image. Each has its own
+`command: ["python", "-u", "/workspace/scripts/chat_server.py",
+"--port", "8890"]` and `environment:` block (Phase 1 toggles +
+`WC_LLM_MODEL` / `WC_CRITIC_MODEL` from the retiring drop-in). 
+systemd units become `ExecStart=/usr/bin/docker compose up
+wordcracker-chat` (foreground) or `up -d` with explicit health
+watch via `healthcheck:` in compose.
+
+**Consequences.**
+- `docker compose exec`, `pkill -9`, and pyc-purge `ExecStartPre`s
+  removed from `wordcracker-chat.service` and
+  `wordcracker-admin.service`. (Pyc-purge already redundant under
+  ADR-B2.)
+- SIGTERM propagates: systemd → docker → python. Graceful shutdown
+  works for the first time.
+- [v2-engine.conf](systemd/wordcracker-chat.service.d/v2-engine.conf)
+  deleted. Its still-meaningful pins (`WC_LLM_MODEL`,
+  `WC_CRITIC_MODEL`) move into the compose service `environment:`
+  alongside Phase 1 toggles already at
+  [docker-compose.override.yml:42-50](docker-compose.override.yml:42).
+- `healthcheck:` in compose replaces the curl-loop `ExecStartPost`
+  at [wordcracker-chat.service:33](systemd/wordcracker-chat.service:33).
+- Three deploy patterns collapse to two: compose services
+  (gutenberg-lab + ollama + chat + admin) and host-python
+  (status_server, which intentionally stays host-side to read host
+  files).
+
+**Trade-offs.**
+- ChromaDB cold-load (~12 s per [chat_server.py:1204-1224](scripts/chat_server.py:1204))
+  now lives in the chat service's process — same cost, different
+  process. admin_server doesn't touch ChromaDB, so it's faster.
+- jupyter on 8888 stays inside `gutenberg-lab` (unchanged) — chat /
+  admin no longer share a Python interpreter with notebooks. The
+  sharing was incidental, never load-bearing.
+- Implementation cost: ~30 lines in compose + 3-line edits in two
+  systemd units. Net code reduction (drop pkill, drop pyc-find,
+  drop drop-in file).
+
+---
+
+### ADR-B4 — Predeploy harness as the single gate
+
+**Status.** Proposed.
+
+**Context.** Current post-deploy verification is the curl loop at
+[wordcracker-chat.service:33](systemd/wordcracker-chat.service:33):
+30 retries × 2 s waiting for `/health` 200. That's a liveness probe,
+not a correctness probe. Audit C5: «деплой-и-откат за 30 минут;
+bake time = 0; тесты — музей регрессий, а не контракты.»
+
+Recent commit `6df5a1c` ("W-18 predeploy harness") added the
+beginnings of a harness. The R-23 cycle is incrementally adding
+verification. This ADR **codifies what the harness must gate**, not
+invent a new mechanism.
+
+R2 ("баг closed only when fix exists + negative test + executes on
+prod flag combo") implies a pre-deploy gate that asserts:
+- the test suite passes (R10),
+- a golden answer set behaves correctly,
+- `docker-compose.override.yml` / systemd env values match what
+  `decisions.md` says is live (closes the v2-engine.conf-style
+  drift).
+
+Currently (c) drifted at least once — D-P1-5 deleted
+`WC_DEFAULT_ENGINE` from code, but
+[v2-engine.conf:22](systemd/wordcracker-chat.service.d/v2-engine.conf:22)
+still sets it. Nothing mechanical catches this; only manual reads.
+
+**Options considered.**
+1. **systemd `ExecStartPre` runs the harness; non-zero aborts
+   deploy.** Tight coupling. Harness must run inside container.
+   5-10 min predeploy wait; failure leaves service down.
+2. **Predeploy harness as separate `make deploy` target (or
+   `scripts/v2/predeploy_check.py`)**, explicitly invoked. systemd
+   unchanged. Operator can `--force` for emergency rollback (logged).
+3. **CI runs harness on PR/merge; systemd assumes green.** Cleanest
+   but needs CI infra that doesn't exist in this single-host setup.
+
+**Decision.** Option 2. Build out `scripts/v2/predeploy_check.py`
+(or whichever file `6df5a1c` added) as the canonical pre-deploy
+gate. It runs:
+
+1. `pytest tests/v2 -q -p no:randomly` — R10 (must collect cleanly,
+   0 fails).
+2. **Golden query set** under `tests/v2/golden_set.py` — currently
+   `@skipUnless(WC_GOLDEN_LIVE)` per audit §4.6. Predeploy run sets
+   `WC_GOLDEN_LIVE=1` and dispatches 10-15 known-good queries
+   against the about-to-deploy image, asserting on
+   shape (not exact text — LLM render is non-deterministic).
+3. **`decisions.md` ↔ active env diff**: grep `WC_*` names in
+   compose/systemd vs. `os.environ.get("WC_*")` reads in
+   `scripts/`. Any var read but never set OR set but never read =
+   fail. Closes the `WC_DEFAULT_ENGINE` drift class.
+4. **Critic-flagged regression smoke**: pull last 5 "well-known
+   good" scenarios from `/admin/bad_answers` (audit §4.6), run
+   them, fail if any regresses on a previously-passing scenario.
+
+Deploy hook (Makefile / `scripts/deploy.sh`): runs
+`predeploy_check.py`; on green tags image (B1) + restarts; on red
+prints diff and exits non-zero. `--force` flag bypasses with a
+mandatory rationale string that's logged.
+
+**Consequences.**
+- Predeploy harness is the single gate between commit and prod.
+  Bypass requires explicit `--force <rationale>`, audit-logged.
+- Golden tests stop being museum pieces. `WC_GOLDEN_LIVE` skip stays
+  for developer CI (no live Ollama), is forced on at predeploy.
+- "Fix closed without prod verification" (audit §6) becomes
+  mechanically caught.
+- Out of scope for this ADR but worth noting: an R7 cascade counter
+  (commits since last green deploy in the same area, warn at ≥3) is
+  a natural follow-up.
+
+**Trade-offs.**
+- Harness takes 5-10 min. Acceptable for prod deploys (≤2/day in
+  active phases). Emergency hotfix = `--force` with note.
+- Golden-set maintenance burden: 10-15 queries with shape
+  assertions. The R-23 set already partly exists; ADR formalizes
+  "deploy gate, not optional".
+- Predeploy requires Ollama live at gate time (LLM render in
+  golden). Prod container already up = fine. Dev skip remains.
+
+---
+
+### ADR-B5 — Operational env-var lifecycle bound to `decisions.md`
+
+**Status.** Proposed.
+
+**Context.** [docker-compose.override.yml:42-50](docker-compose.override.yml:42)
+already documents «feature flags consolidated per REFACTOR_BRIEF R1
+(no dark code)» — a Phase 1 win. But:
+- [v2-engine.conf:22](systemd/wordcracker-chat.service.d/v2-engine.conf:22)
+  still sets `WC_DEFAULT_ENGINE=v2`. D-P1-5 deleted this var from
+  code. Drop-in's continued export is harmless but is exactly the
+  dead config that confuses R8.
+- D-P1-7 documents `WC_CRITIC` and `WC_NUMERIC_AUDIT` as "on by
+  default in code, absent from compose, confirmed live." A reader
+  of code alone would not know these toggles exist — documentation
+  is in `decisions.md`, not adjacent to the env read at
+  `critic.py:40` / `numeric_audit.py:31`.
+- No automated cross-check between (env reads in code) ↔ (env values
+  in compose/systemd) ↔ (env documentation in decisions.md). B4's
+  `--check-env` gate covers two; the third (documentation) stays
+  manual.
+
+R1 (no dark feature flags) is enforced. **Operational toggles
+(R1-permitted, see D-P1-7) need their own lifecycle**, separate
+from feature flags, because they outlive any individual decision.
+
+**Options considered.**
+1. **`scripts/v2/env_registry.py`** — single Python module
+   enumerating every `WC_*` env read with: default, prod_state,
+   owning-ADR ref, status. Code reads via `env_registry.WC_CRITIC`
+   instead of `os.environ.get`. Mechanical enforcement: predeploy
+   compares registry entries to code-grep.
+2. **`ENV_VARS.md`** at repo root. Easy to write, easy to drift —
+   no mechanical link to code.
+3. **Status quo + audit pass in predeploy.** Predeploy greps; if
+   registry doesn't exist, predeploy can verify "set ↔ read" but
+   not "documented".
+
+**Decision.** Option 1 + retire [v2-engine.conf](systemd/wordcracker-chat.service.d/v2-engine.conf).
+Create `scripts/v2/env_registry.py` as the single declaration site
+for every `WC_*` env var (and `OLLAMA_HOST`,
+`OLLAMA_HTTP_TIMEOUT_S` from
+[rag_query.py:157-159](scripts/rag_query.py:157)). Each entry:
+
+```
+WC_CRITIC = EnvVar(
+    name="WC_CRITIC", default="on", prod_state="on",
+    purpose="critic LLM verification pass",
+    added_in="D-P1-7", status="active",
+)
+```
+
+Code reads through the registry: `from scripts.v2.env_registry
+import WC_CRITIC; if WC_CRITIC.is_on(): ...`. Predeploy
+`--check-env` gate (ADR-B4) extends:
+- Every `os.environ.get("WC_*")` in code must be in the registry.
+- Every registry entry with `prod_state="on"` must be either set in
+  compose/systemd OR have `prod_state_via="code_default"`.
+- Every var set in compose/systemd must be in the registry (catches
+  the `WC_DEFAULT_ENGINE` ghost).
+
+The `v2-engine.conf` drop-in is **deleted** as part of this ADR.
+Its still-relevant pins (`WC_LLM_MODEL`, `WC_CRITIC_MODEL`) move
+into the new `wordcracker-chat` compose service from ADR-B3 — same
+place as the Phase 1 toggle comments at
+[docker-compose.override.yml:42-50](docker-compose.override.yml:42).
+
+**Consequences.**
+- One source of truth for env vars. R8 ("читай живой путь") becomes
+  mechanical: read `env_registry.py`, see `prod_state`.
+- Removing a var = registry status flip to `deprecated` + grace
+  period + delete (would have caught the D-P1-5 → v2-engine.conf
+  dangler).
+- `decisions.md` continues to be the narrative; `env_registry.py`
+  is the structured index. Each registry entry references its
+  owning D-PN-X / ADR-X identifier.
+
+**Trade-offs.**
+- One-time migration: ~26 surviving `WC_*` reads per D-P1-3 phase 1
+  gate. Mechanical refactor, ~1 day.
+- Small indirection layer. Cost bounded; benefit (mechanical R8)
+  durable.
+- Operator running a one-off `WC_X=foo python ...` is still
+  possible — registry can warn ("env observed at runtime that
+  isn't in registry") but cannot forbid. Acceptable.
+
+---
+
+### ADR-A1 — Materialized indices for full-corpus aggregations
+
+**Status.** Proposed.
+
+**Context.** Heavy aggregations re-scan the full corpus per call:
+- [rag_tools.py:word_freq_timeline:1185-1273](scripts/rag_tools.py:1185)
+  — per call: load `_metadata_df`, filter lang, groupby
+  `period_start`, FOR EACH BOOK in EACH bucket open
+  `_counts_path(pg)` and parse line-by-line `(word, count)` pairs.
+  Per-call cost ≈ O(books × per-book-tokens). [budget.py:67](scripts/v2/budget.py:67)
+  estimates 12 s; R14 trace caught 196 s for multi-word timelines.
+- [rag_tools.py:top_ngrams_by_author:539-589](scripts/rag_tools.py:539)
+  — `_select_books(author_regex)` then per book: open tokens file,
+  build Counter, optionally spaCy POS-tag top 5× heads.
+  `author_regex=".*"` iterates the full corpus.
+- [rag_tools.py:words_disappearing_after:1281+](scripts/rag_tools.py:1281)
+  — pre/post buckets, same per-book file walk.
+
+The project already has a precompute pattern:
+[build_author_richness.py](scripts/v2/build_author_richness.py)
+walks the corpus once, writes
+`/workspace/spgc/derived/author_richness.json`; the v2 wrapper reads
+it (fallback to live scan). Sibling:
+`scripts/v2/build_author_tokens.py`. **This ADR extends the same
+pattern to the timeline / n-gram axis.**
+
+**Options considered.**
+1. **Per-axis precompute artifacts under
+   `/workspace/spgc/derived/`** — one Parquet/JSON per "aggregation
+   axis", regenerated on corpus_version bump. Wrappers read
+   prebuilt; fall back to live scan with a `ToolWarning` if absent.
+2. **In-process pre-aggregation on first call** (lazy-build cache
+   files at `/data/v2_cache/agg/...`). Faster to ship — no batch
+   script — but first-after-restart is the slow path. Under predeploy
+   harness restarts the first user always pays.
+3. **DuckDB-backed materialized views** over tokens dir. Tempting
+   (SQL ergonomics, fast aggregations) but introduces new runtime
+   dep, new schema, new "where does data live" question. Orthogonal
+   to the existing parquet/JSON pattern, doesn't compose with it.
+
+**Decision.** Option 1. Three new build scripts under `scripts/v2/`:
+
+| script                               | output                                                                                | shape                                                                                  |
+|--------------------------------------|---------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------|
+| `build_word_freq_buckets.py`         | `/workspace/spgc/derived/word_freq_buckets/{basis}_b{years}.parquet`                  | `(word, basis, bucket_start, bucket_end, books_used, total_tokens, occurrences, per_million)` |
+| `build_author_ngrams.py`             | `/workspace/spgc/derived/author_ngrams/{slug}_n{n}.parquet`                           | `(ngram, count, books_seen)` per author × n                                            |
+| `build_corpus_word_buckets.py`       | `/workspace/spgc/derived/word_buckets/{basis}_pre{year}_post{year}.parquet`           | feeds `words_disappearing_after` / `words_appearing_after`                             |
+
+Wrappers ([timeline.py](scripts/v2/tools/words/timeline.py),
+[top_ngrams.py](scripts/v2/tools/authors/top_ngrams.py)) read
+prebuilt first; missing prebuilt → `ToolWarning("precompute_stale",
+"falling back to live scan")` and the current live path runs.
+
+Build invocation matches existing pattern (per
+[build_author_richness.py:1-12](scripts/v2/build_author_richness.py:1)):
+`docker compose exec -T gutenberg-lab python -u
+/workspace/scripts/v2/build_word_freq_buckets.py`. Runs on
+corpus_version bump (manual after `admin_server` ingests) AND nightly
+cron as defence-in-depth.
+
+Output filename keyed by `corpus_version` (or a sidecar
+`<artifact>.meta.json` with corpus_version + built_at) so stale
+artifacts are detectable.
+
+**Consequences.**
+- Per-call cost on warm path: parquet filter (~0.2-0.5 s) vs.
+  current 12-50+ s. A4 makes the estimator know this.
+- Disk: word_freq_buckets ≈ unique_words × buckets × ~120 B ≈
+  100-500 MB. Author n-grams: ~50 MB per author for n=2 across
+  ~5k indexed authors → ~2-5 GB. Within /data/ headroom (Audit:
+  40 GB memory cap; disk separate).
+- Build runtime: 5-15 min each on full corpus, parallelizable.
+- On corpus update: existing `admin_server` upload flow gains a
+  "re-bake derived/" hook (or it falls to nightly cron with a
+  `_render_note` warning if stale).
+
+**Trade-offs.**
+- ~3 new build scripts (~150-200 LOC each). Same pattern; low
+  maintenance per artifact.
+- Stale-precompute risk: artifact corpus_version mismatch surfaces
+  as `ToolWarning("precompute_stale", ...)` — never silent.
+- Words/n-grams not in precompute (OOV, typos, rare ngrams) fall
+  through to live scan. Acceptable — emit warning, charge true cost.
+
+---
+
+### ADR-A2 — Warm-up extended to top-N heavy intents
+
+**Status.** Proposed.
+
+**Context.** [chat_server.py:1204-1244](scripts/chat_server.py:1204)
+warms ChromaDB + embedder + 5 cheap queries
+(`corpus_overview`, 3× `top_authors_by`, Doyle `author_metadata`).
+Heavy intents — `word_freq_timeline`, `top_ngrams_by_author`,
+`find_book_by_topic` — are NOT warmed. First post-restart user on
+a heavy query pays cold p95.
+
+Cache layer ([cache.py:108-125](scripts/v2/cache.py:108)) is correct
+(AST fingerprint + `corpus_version` + LRU + disk). Cache hits are
+fast. The problem is "first-after-restart" never has a cache.
+
+Observability already collects the last 256 requests
+([chat_server.py:899](scripts/chat_server.py:899) calls
+`aggregate_recent` from `scripts.v2.observability`); top-N
+most-frequent recent queries are derivable.
+
+**Options considered.**
+1. **Static warm-up list of N representative heavy queries** —
+   extend the literal list at [chat_server.py:1232-1239](scripts/chat_server.py:1232).
+   Simple; drifts from actual user behavior.
+2. **Trace-derived warm-up: read last-N-hours from observability,
+   pick top-K (tool, args)-pairs, dispatch each.** Adapts to actual
+   hot paths. Warm-up time grows; needs a cap.
+3. **Background warmer process** running continuously,
+   re-dispatching top queries every M minutes regardless of
+   restart. Most invasive; not justified by current data.
+
+**Decision.** Option 2 with hard caps. `_warmup()` at
+[chat_server.py:1204](scripts/chat_server.py:1204) extends to:
+
+- Keep the existing 5 cheap queries (corpus_overview + top_authors +
+  Doyle).
+- Add: from `aggregate_recent(window_hours=24)`, extract top 10
+  `(tool, args_fingerprint)` pairs whose tool is in
+  `{find_book_by_topic, word_freq_timeline, top_ngrams_by_author,
+  hybrid_search, semantic_search, author_profile, vocab_passport}`.
+  Dispatch each through `scripts.v2.tool_registry.dispatch`.
+- Per-query soft cap: 20 s. Total warmup hard cap: 60 s. After
+  60 s, server starts accepting traffic; remaining warm-ups
+  dropped.
+
+**Consequences.**
+- Heavy-intent cold p95 drops sharply on canonical phrasings (their
+  args-fingerprint matches the trace-derived hot list).
+- Quiet period = small warm-up; busy day primes more. Self-tuning.
+- Warm-up failures stay non-fatal — existing `except Exception`
+  pattern at [chat_server.py:1222-1224](scripts/chat_server.py:1222)
+  applies.
+
+**Trade-offs.**
+- Up to +60 s startup time. ADR-B3 (graceful restarts via proper PID
+  1) makes graceful restarts routine, so the cost lands on planned
+  restarts rather than crash-loops.
+- Outlier queries still pay cold. By design — we warm the head, not
+  the tail.
+- Observability persistence: current
+  [scripts.v2.observability.aggregate_recent](scripts/v2/observability.py)
+  reads an in-process ring buffer that doesn't survive restart. A2
+  needs a small disk-persistence shim (append-only JSONL alongside
+  feedback JSONL — audit §4.6 already does this for `bad_answers`).
+  Until then, fall back to a hard-coded heavy-intent seed list (10
+  representative queries) as in Option 1.
+
+---
+
+### ADR-A3 — BGE rerank: caching + translation cache + popular-topic precompute
+
+**Status.** Proposed.
+
+**Context.** [find_book_by_topic.py:181-194](scripts/v2/tools/books/find_book_by_topic.py:181)
+documents: «per_retriever tightened from 60 to fit BGE rerank in
+≤30 s. The old budget passed 40-80 chunks to BGE rerank → wall
+clock 30-300 s on hot path.» [budget.py:77](scripts/v2/budget.py:77)
+estimates 15 s; R14 worst-case 50 s.
+
+Plus an unconditional LLM round-trip for RU→EN translation:
+[find_book_by_topic.py:128-147](scripts/v2/tools/books/find_book_by_topic.py:128)
+calls `_maybe_translate`
+([rag_tools.py:262-280](scripts/rag_tools.py:262)) which POSTs to
+Ollama on every Cyrillic topic. ~2-3 s extra.
+
+Existing cache catches exact repeat (topic, top, …). In practice
+users rephrase ("книги про викторианский Лондон" vs. "роман про
+Лондон XIX век"). Hit rate for this tool is low.
+
+**Options considered.**
+1. **Rerank-result cache by `(query_text_hash,
+   sorted_pg_id_tuple)`.** Reuses result when same query + same
+   candidate set arrives. Embedder is deterministic. Misses on
+   candidate drift (new book ingest) — rare.
+2. **Translation cache** — separate small cache for
+   `_maybe_translate(ru) → en`. 30-day TTL. Mechanically trivial.
+3. **Popular-topic precompute** — nightly batch over last-N-days
+   topical queries + manual "evergreen topic" list, write to
+   `/workspace/spgc/derived/topic_recs.json`. Wrapper checks
+   prebuilt first.
+4. **All three.**
+
+**Decision.** Option 4 — three independent layers, all small:
+
+- **Translation cache.** A small module under
+  `scripts/v2/cache.py` namespace (or `_translation_cache.py`
+  adjacent). Key = `(ru_text, ollama_model)`; TTL = 30 days
+  (translation is stable). Closes the per-call 2-3 s on Cyrillic
+  topics.
+- **Rerank-result cache.** Key = `(query, sorted_tuple(candidate_pg_ids),
+  rerank_model)`. Value = ordered list with scores. Lives in
+  [cache.py](scripts/v2/cache.py) namespace under tool name
+  `_bge_rerank` (so it gets the existing LRU + disk + AST-fp
+  invariants).
+- **Topic precompute.** New `scripts/v2/build_topic_recs.py` —
+  reads observability-derived popular topics + a small
+  `_evergreen_topics.json` (curated list: «викторианский Лондон»,
+  «детектив», «gothic horror», …), dispatches
+  `find_book_by_topic` offline, writes
+  `/workspace/spgc/derived/topic_recs.json` keyed by
+  `(normalized_topic, corpus_version)`. The wrapper at
+  [find_book_by_topic.py](scripts/v2/tools/books/find_book_by_topic.py)
+  consults the precompute BEFORE dispatching hybrid_search;
+  return-on-hit short-circuits rerank entirely.
+
+Per-tool `wrapper_version` bumps per R-23 Tier 0 when each layer
+ships.
+
+**Consequences.**
+- Cold rerank: 30-300 s → ~5 s on warm path → ~0.3 s on
+  precomputed-topic hit.
+- Three new artifacts; each ~50-150 LOC.
+- Precompute artifact is small (~1-5 MB even for hundreds of
+  topics).
+- Translation cache is reusable for any RU→EN call in the system,
+  not just find_book_by_topic.
+
+**Trade-offs.**
+- Three layered caches need contract-test discipline (R3) so a
+  schema change in any one invalidates the right downstream
+  consumers. Add tests under `tests/v2/test_rerank_cache.py`,
+  `test_translation_cache.py`, `test_topic_precompute.py`.
+- Stale-precompute: same mitigation as A1 — corpus_version-keyed,
+  invalidate on bump.
+- Rerank-cache memory: bounded by existing LRU (value is small —
+  list of pg_ids + floats). No new pressure.
+
+---
+
+### ADR-A4 — Estimator / budget aware of materialized-view presence
+
+**Status.** Proposed.
+
+**Context.** [budget.py:36-97](scripts/v2/budget.py:36) declares
+`STEP_COSTS_S` as a static dict — `word_freq_timeline = 12.0`,
+`find_book_by_topic = 15.0`, etc. — regardless of whether the
+precompute artifacts from A1/A3 exist.
+[budget.py:282-358](scripts/v2/budget.py:282) sums per-step costs vs.
+`INTENT_BUDGETS_S[intent]` and emits `execute` / `downsize` /
+`clarify`.
+
+After A1/A2/A3 land, real cost on warm paths drops ≥10×. The
+estimator, unchanged, will keep recommending downsize/clarify on
+queries that would finish in <1 s.
+
+**Options considered.**
+1. **Static dual-cost table** — `STEP_COSTS_S` becomes `{tool:
+   (cold_s, warm_s)}`; estimator picks based on a passed-in
+   `has_precompute(tool, args)` predicate.
+2. **Cost lookup function** wraps `STEP_COSTS_S`, consults
+   presence-checking predicates (file mtime, parquet existence,
+   cache LRU lookup) before returning. More moving parts;
+   integrates A1/A2/A3 cleanly.
+3. **Trace-derived adaptive cost table** (already mentioned at
+   [budget.py:23-25](scripts/v2/budget.py:23) as Phase 6 work) —
+   read median runtime per `(tool, args_shape)` from observability,
+   replace `STEP_COSTS_S` with rolling-percentile estimates.
+   Self-tuning, slower to converge, harder to debug.
+
+**Decision.** Option 2 now, Option 3 as Phase 6 follow-up. Add
+`scripts/v2/budget_cost_lookup.py`:
+
+```
+def estimate_step_cost(tool: str, args: dict | None) -> float:
+    base = STEP_COSTS_S.get(tool, 3.0)
+    mult = _scope_multiplier(tool, args)   # existing logic
+    if _has_warm_precompute(tool, args):
+        return WARM_COSTS_S.get(tool, base * 0.05) * mult
+    return base * mult
+```
+
+`_has_warm_precompute(tool, args)` consults:
+- `word_freq_timeline`: parquet at
+  `/workspace/spgc/derived/word_freq_buckets/{basis}_b{years}.parquet`
+  present AND its corpus_version matches current?
+- `top_ngrams_by_author`: parquet at
+  `/workspace/spgc/derived/author_ngrams/{slug}_n{n}.parquet` present?
+- `find_book_by_topic`: normalized topic present in
+  `topic_recs.json`?
+- Else: anticipate LRU/disk-cache hit by peeking
+  `cache_key(...)` on disk → fast path.
+
+`WARM_COSTS_S` is a separate dict listing prebuilt-path estimates
+(0.3 s for parquet read, 0.05 s for cache hit). Update
+[budget.py:BudgetEstimator.estimate_step](scripts/v2/budget.py:257)
+to call `estimate_step_cost` instead of reading `STEP_COSTS_S`
+directly.
+
+**Consequences.**
+- Estimator behavior aligns with actual prod latency on warm path.
+  Fewer false `clarify` / `downsize` on heavy intents that have
+  precompute.
+- R9 (`$sN.field` validation) and the downsize logic at
+  [budget.py:360-379](scripts/v2/budget.py:360) unchanged — they
+  consume estimator output, not internals.
+- Phase 6 trace-derived adaptive cost becomes an incremental upgrade
+  to `_has_warm_precompute` / `WARM_COSTS_S` — the lookup function
+  provides the seam.
+
+**Trade-offs.**
+- Couples estimator to artifact filesystem layout. Acceptable — the
+  layout is already encoded across A1/A3 and is referenced from
+  multiple places.
+- Wrong "has precompute = True" verdict (artifact deleted by ops):
+  estimator under-estimates; per-step timeout chokepoint at
+  [tool_registry.py:78-94](scripts/v2/tool_registry.py:78) still
+  enforces the real cap. One slow query, no cascading failure.
+- Lookup adds I/O (file stat) per estimate. Cache predicates
+  per-process (invalidate on `corpus_version._reset()`).
+
+---
+
+
 
 Closing actions from REMEDIATION_BRIEF.md / docs/T1_TZ.md (Фаза 1 doводка).
 Goal of T1: one resolver, one router executor (+ stream), engine flag
