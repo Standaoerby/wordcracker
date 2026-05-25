@@ -1,13 +1,20 @@
 name: predeploy
 
-# W-18 pre-deploy gate (CI half). Runs the parts of the deploy gate
-# that do NOT need a live chat endpoint:
+# Pre-deploy CI gate. Runs the parts of the deploy contract that do
+# NOT need a live chat endpoint:
 #
 #   - version-bump check vs the PR base (catches the 2026-05-24
 #     failure mode: merge to main without ANALYTICS_VERSION moving)
-#   - pytest tests/v2 collect (R10 — sweet must collect with 0 errors)
 #   - probe-config sanity (12 probes, no __FILL_FROM_SOURCE__ slots,
 #     `repeat` set on P12)
+#   - tests-v2 (R10): full requirements.lock install (S-B5 / ADR-B7,
+#     docs/v2/decisions.md → 2026-05-25 S-B5) + `pytest tests/v2
+#     --collect-only` (R10 gate) + `pytest tests/v2 -v` (full
+#     directory run, not a hand-list). Replaces the pre-S-B5 jobs
+#     `test-collect`, `s-b4-acceptance`, `test-cache-race-linux` —
+#     each was running a 5-package install + a hand-curated subset,
+#     so ~240 tests never executed on CI and the R10 gate was
+#     decorative for 15 / 15 runs (gh run list, 2026-05-24..05-25).
 #
 # The live 12-probe run happens on the deploy host via
 # `scripts/predeploy_gate.sh` — it needs a reachable chat API, which a
@@ -63,63 +70,81 @@ jobs:
           python -m pytest tests/v2/test_w18_predeploy_probe_suite.py \
                             tests/v2/test_w18_check_version_bump.py -q
 
-  test-collect:
-    name: pytest tests/v2 collect (R10)
+  tests-v2:
+    # S-B5 / ADR-B7 (docs/v2/decisions.md → 2026-05-25 S-B5).
+    #
+    # Installs the SAME requirements.lock that the prod image bakes
+    # (Dockerfile:39-41), plus the spaCy models the prod image pulls
+    # by URL (Dockerfile:50-52). CI's dependency surface is now the
+    # contract under test, not "whatever pip install pytest gives us
+    # today." Runs:
+    #
+    #   1. pytest tests/v2 --collect-only  — R10 gate (must be 0
+    #      collection errors). Separate step so the R10 signal is a
+    #      distinct line in the run log.
+    #   2. pytest tests/v2 -v              — full directory run. NOT
+    #      a hand-curated list: new test files added under future
+    #      blocks (S-F1…S-R4, etc.) get picked up automatically.
+    #
+    # Quarantines for tests that cannot pass on bare ubuntu-latest
+    # (need GPU, the live SPGC corpus, a live Ollama, a live
+    # persistent ChromaDB, etc.) are explicit @pytest.mark.skipif
+    # calls inside the test files, each with reason= and a stated
+    # follow-up. Silent-red is never accepted (R2). The complete
+    # carantine list with reason + count lives in the S-B5 closeout
+    # at the top of docs/v2/decisions.md.
+    name: tests/v2 (R10 collect + full directory run)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install pytest
-        run: pip install pytest
-      - name: Collect tests/v2 (must be 0 collection errors per R10)
-        run: |
-          python -m pytest tests/v2 --collect-only -q
 
-  s-b4-acceptance:
-    # S-B4 (docs/v2/decisions.md → 2026-05-25 S-B4) acceptance tests.
-    # Two behavioural tests in this suite are Windows-skipped because
-    # they rely on bash + PATH-prepend mocks of `docker` / `curl`:
-    #   - tests/v2/test_deploy_b4.py::test_stale_image_under_new_tag_fails_verify
-    #     (the headline TZ acceptance — docker tag matches, /health.git_sha
-    #      mismatches; verify must exit 7 / D-SB3-3 runtime mismatch)
-    #   - tests/v2/test_deploy_b4.py::test_verify_fails_loud_when_no_arg_no_env
-    #     (D-SB4-2 — verify refuses git-HEAD fallback)
-    # Linux CI is the contract that those tests are NOT silently skipped.
-    # -v shows each test as PASSED/SKIPPED so any unexpected skip is
-    # visible in the run log.
-    name: S-B4 acceptance (deploy contract + flag lint)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install pytest + pyyaml
-        run: pip install pytest pyyaml
-      - name: Run S-B4 deploy contract + flag lint tests
-        run: |
-          python -m pytest tests/v2/test_deploy_b4.py tests/v2/test_flag_lint.py -v
 
-  test-cache-race-linux:
-    # POSIX-only contract: `os.replace` is atomic on Linux (rename(2)), so
-    # the 4-writers-on-same-key race that `_write_disk` guards against (per
-    # b8dd3ab + memory `project_cache_writer_pattern`) resolves cleanly with
-    # unique `.tmp` per writer. Windows MoveFileExW can throw
-    # ERROR_ACCESS_DENIED while another writer is mid-replace on the same
-    # destination → the `CacheWriteDiskRaceSafe` class is `skipIf(win32)`
-    # per D-S0-2. This job is the canonical Linux gate for that property
-    # until the predeploy harness (ADR-B4 §1) runs the full suite.
-    name: cache race safety (Linux POSIX rename atomicity)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install pytest
-        run: pip install pytest
-      - name: Run CacheWriteDiskRaceSafe (must pass on POSIX)
+      - name: Free disk space for the full lock install
+        # requirements.lock pulls ~7 GB onto disk (torch 2.12 + the
+        # nvidia-*-cu13 wheels — manylinux2014_x86_64 .so files that
+        # install on any glibc Linux without a GPU; `import torch`
+        # works, torch.cuda.is_available() returns False, GPU-dependent
+        # tests skipif-out). ubuntu-latest ships with ~14 GB free root;
+        # /opt/hostedtoolcache holds another ~5 GB of language SDKs we
+        # don't use. Drop it to keep ~12 GB headroom for pip.
         run: |
-          python -m pytest tests/v2/test_cache_concurrent_writes.py -v
+          df -h /
+          sudo rm -rf /opt/hostedtoolcache
+          df -h /
+
+      - name: Cache pip wheels
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('requirements.lock') }}
+          restore-keys: |
+            pip-${{ runner.os }}-
+
+      - name: Install pinned production deps (requirements.lock)
+        # Same artifact as Dockerfile:39-41. --require-hashes makes a
+        # tampered or unexpected wheel a build failure with a clear
+        # message (the same loud-fail property the prod image relies
+        # on per ADR-B6).
+        run: |
+          python -m pip install --upgrade pip
+          pip install --require-hashes -r requirements.lock
+
+      - name: Install spaCy models (URL-pinned, mirrors Dockerfile:50-52)
+        # Models are published on GitHub Releases, not PyPI, so they
+        # sit outside the hashed lock set per ADR-B6. The version
+        # embedded in the URL is the pin (en_core_web_sm/trf-3.8.0
+        # matches spacy==3.8.14 from the lock).
+        run: |
+          pip install \
+            https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl \
+            https://github.com/explosion/spacy-models/releases/download/en_core_web_trf-3.8.0/en_core_web_trf-3.8.0-py3-none-any.whl
+
+      - name: Collect tests/v2 (R10 — 0 collection errors)
+        run: python -m pytest tests/v2 --collect-only -q
+
+      - name: Run tests/v2 (full directory, NOT a hand-list)
+        run: python -m pytest tests/v2 -v

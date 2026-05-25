@@ -6,7 +6,229 @@
 
 ---
 
-## 2026-05-25 — S-B4: one-command self-verifying deploy (ADR-B4 + ADR-B5 accepted)
+## 2026-05-25 — S-B5: CI dependency parity, run whole `tests/v2` (ADR-B7 accepted)
+
+Closes block **S-B5** of
+[tz_structural_fixes_2026-05-24.md](../tz_structural_fixes_2026-05-24.md)
+(spec lives in companion repo `C:\_PROJECTS\wordcracker\`).
+Promotes ADR-B7 to Accepted and lands the wiring in
+[predeploy.yml](.github/workflows/predeploy.yml). Closes the
+failure mode S-B1…S-B4 all shipped under: their closeouts reported
+"R10 ✓" based on local `pytest`, while the CI job that was supposed
+to enforce R10 (`pytest tests/v2 collect (R10)`) has been red on
+every single run since the workflow was created (`6df5a1c`,
+2026-05-24) — 15 / 15 reds at S-B4 closeout. The install step was
+`pip install pytest` (five packages); any test file with a
+module-scope `import pandas` / `import yaml` / `import spacy` /
+`import torch` errored at collection. The main run-job ran a
+hand-list of two files (`test_deploy_b4.py`, `test_flag_lint.py`).
+~240 tests (~11 % of the suite, 2097 collected locally) never
+executed on CI; new test files were invisible until someone
+manually appended them to the hand-list. **The R10 gate was
+decorative.**
+
+### ADR-B7 — CI installs the full production lockfile and runs `tests/v2` as a directory
+
+**Status.** Accepted (2026-05-25, under S-B5).
+
+**Context.** ADR-B6 (2026-05-24, accepted) shipped
+[requirements.lock](requirements.lock) as the dependency contract
+for the prod image: every wheel is hash-pinned, the
+[Dockerfile:40](Dockerfile:40) installs it with `--require-hashes`,
+SHA-tagged image (ADR-B1) is now bit-deterministic in both code and
+deps. **CI never adopted that contract.** The two test-running jobs
+in [predeploy.yml](.github/workflows/predeploy.yml) install
+`pip install pytest` (5 packages) and `pip install pytest pyyaml`
+(6 packages) respectively. Anything beyond that — `pandas`,
+`spacy`, `transformers`, `torch`, `chromadb`, even `yaml` outside
+the one job that explicitly added it — fails at `import` time.
+
+Concrete evidence of decorative R10:
+
+- `test-collect` job (`pytest tests/v2 collect (R10)`) red on
+  every push to main since 2026-05-24 03:29 (`gh run list` 15 / 15
+  red). Failure log shows install completes with 5 packages, then
+  `pytest --collect-only` fails on the first module-scope import
+  that isn't pytest itself.
+- The audit-listed 10 files that fail collection
+  (`test_w1_v2_extract_path`, `test_critic`,
+  `test_entity_resolver_v5`, `test_entity_resolver_v6`,
+  `test_frontend_v5`, `test_llm_intent`,
+  `test_phase3_regex_harness_gate`, `test_rag_v2_llm_merge`,
+  `test_ambiguous_surname_clarify`, `test_deploy_artifact`) all
+  collect cleanly on a fully-installed environment — locally
+  `pytest tests/v2 --collect-only` reports 2097 tests, 0 errors.
+  The failure is purely the install delta.
+- `s-b4-acceptance` runs a hand-list of two files. New test files
+  (e.g. anything added under S-B5, future test files for
+  S-F1…S-R4) are not run anywhere on CI unless someone remembers
+  to grow the list.
+- The local `chore(s-b4): bump to v2.6.14 + defer yaml import to
+  test runtime (R10)` commit attempted to patch one symptom
+  (deferred `import yaml` inside test bodies). That is patch-trash
+  per R7: at three commits chasing the same red job, the response
+  is structural, not another defer.
+
+This block is the structural response.
+
+**Options considered.**
+
+1. **Status quo — `pip install pytest` and hand-list.** What is
+   running. Cheap (~15 s per job). Catastrophic failure mode: this
+   is the bug the block is here to close. Rejected — keeping it
+   means S-B5 doesn't exist.
+2. **CI installs the full `requirements.lock` (hash-verified), plus
+   spaCy models by URL — exactly as [Dockerfile:40-52](Dockerfile:40).
+   Runs `pytest tests/v2` as a directory.** Reads the same artifact
+   as the prod image (single source of truth per R8 / ADR-B6). The
+   lock is Linux/CUDA13-specific
+   ([requirements.in:7-11](requirements.in:7)) but the CUDA pieces
+   (`nvidia-*-cu13` wheels, `torch==2.12.0+cu130`) are
+   manylinux2014_x86_64 .so files: they install on any glibc Linux
+   without a GPU — `import torch` works, `torch.cuda.is_available()`
+   returns False, tests that actually need a GPU `skipif` out
+   explicitly. Install footprint ~7 GB on disk; ubuntu-latest has
+   ~14 GB free root after clearing
+   `/opt/hostedtoolcache` (~5 GB recovered). Job time ~5-7 min cold,
+   ~1-2 min with pip cache.
+3. **CI builds the Dockerfile image and runs `pytest` inside.**
+   Bit-identical with prod, including base image
+   (`pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime`) and apt layer.
+   Cost: ~10 min cold build per PR; cache via GHCR requires
+   `packages: write` token scope (currently the workflow has
+   `packages: read` only), and fork-PR runs lose the cache. The
+   image also carries ~5-10 GB of non-test runtime
+   (jupyterlab, full transformer model weights downloaded at
+   build) — none of it exercised by `pytest`.
+4. **Separate CPU-only `requirements.ci.lock`.** A second lockfile,
+   smaller, faster to install. Two deps contracts will drift — CI
+   passes on its surface, prod has a different one. This is exactly
+   the bug class S-B5 closes (silent CI-vs-prod divergence).
+   Rejected — contradicts ADR-B6's whole point.
+
+**Decision.** **Option 2.**
+
+The real choice is 2 vs 3. Option 3 is structurally stronger but
+buys identity in layers (apt, base CUDA image) that no current test
+exercises — `tests/v2` is Python-only, doesn't touch nvidia-smi,
+doesn't probe the base OS. Option 2 keeps the *contract under test*
+(the lockfile) identical to prod while paying the runner price
+directly, and reserves the heavy build for a future ADR if Option 2
+leaks a real bug. Escalation path: if a class of CI-vs-prod
+divergence appears that Option 2 cannot see, the next ADR (B8)
+adopts Option 3 — but this is a forward decision, not a retrofit of
+B7.
+
+**Implementation.**
+
+[predeploy.yml](.github/workflows/predeploy.yml) is restructured to
+**three** jobs (down from five):
+
+| Job                  | Purpose                                              | Status under B7 |
+|----------------------|------------------------------------------------------|------------------|
+| `version-bump`       | git-only check, no deps                              | unchanged        |
+| `probe-config-sanity`| W-18 probe-config shape, two small files             | unchanged        |
+| `tests-v2`           | full lock install + `pytest tests/v2 --collect-only` + `pytest tests/v2 -v` | **new — replaces `test-collect` + `s-b4-acceptance` + `test-cache-race-linux`** |
+
+`tests-v2` is a single job — one install pays for both the collect
+gate (R10, first step) and the full directory run (second step).
+Collect runs separately so its red-or-green status is visible in
+the run log as the explicit R10 signal.
+
+The three folded-in jobs:
+
+- `test-collect` — was the collect-only smoke; superseded by the
+  collect step of `tests-v2`, against a fully-installed env.
+- `s-b4-acceptance` — ran `test_deploy_b4.py` + `test_flag_lint.py`
+  with `pip install pytest pyyaml`. Both files are in `tests/v2/`,
+  the full-suite run picks them up. The two Windows-skipped
+  behaviour tests called out at
+  [predeploy.yml:84-91](.github/workflows/predeploy.yml:84) remain
+  Linux-asserted because the full run is Linux.
+- `test-cache-race-linux` — ran `test_cache_concurrent_writes.py`
+  in isolation to assert the POSIX-rename atomicity contract per
+  the `project_cache_writer_pattern` memory. Folded in for the same
+  reason; the `skipif(win32)` guard already inside the file keeps
+  Windows-only branches inert.
+
+The `tests-v2` install steps mirror [Dockerfile:39-52](Dockerfile:39):
+
+```yaml
+- run: sudo rm -rf /opt/hostedtoolcache  # ~5 GB headroom for torch+CUDA wheels
+- uses: actions/cache@v4
+  with:
+    path: ~/.cache/pip
+    key: pip-${{ runner.os }}-${{ hashFiles('requirements.lock') }}
+- run: pip install --require-hashes -r requirements.lock
+- run: pip install \
+    https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl \
+    https://github.com/explosion/spacy-models/releases/download/en_core_web_trf-3.8.0/en_core_web_trf-3.8.0-py3-none-any.whl
+- run: python -m pytest tests/v2 --collect-only -q   # R10 gate
+- run: python -m pytest tests/v2 -v                  # full directory run
+```
+
+Quarantines (any test that cannot pass on ubuntu-latest under the
+above install) are explicit `@pytest.mark.skip(reason="…")` or
+`@pytest.mark.skipif(<cond>, reason="…")` calls with a stated
+follow-up. The complete carantine list with reason + count appears
+in the S-B5 closeout (this section, top of file) — silent-red is
+never accepted (R2).
+
+R2 negative test
+([tests/v2/test_ci_collect_gate_negative.py](tests/v2/test_ci_collect_gate_negative.py)):
+a fixture that simulates the failure mode — a test file with a
+guaranteed-missing import would cause `pytest --collect-only` to
+fail, proving the R10 gate is no longer fiction. Implemented as a
+sub-process test that runs `pytest --collect-only` against a
+fixture file with `import this_module_does_not_exist_xyz_b7` and
+asserts a non-zero exit + collection error in the output.
+
+**Consequences.**
+
+- The R10 gate stops being decorative. "R10 ✓" in any future
+  closeout now means **the CI job named `tests-v2` is green
+  against the full `tests/v2` directory under the prod
+  lockfile** — not "local pytest looked OK."
+- ~240 previously hidden tests start running on every push to main
+  and every PR. Real failures get a fix; failures requiring
+  resources unavailable on the runner (GPU, live corpus, live
+  Ollama, live ChromaDB persistent data) get an explicit `skipif`
+  with reason and follow-up.
+- New test files added under future blocks (S-F1…S-R4 etc.) are
+  picked up automatically by the directory glob — no hand-list to
+  update, no drift surface.
+- `s-b4-acceptance`, `test-cache-race-linux`, `test-collect` job
+  names retire. Closeout-to-CI mapping simplifies: one job, one
+  "R10 ✓".
+- Job time grows from ~15 s to ~5-7 min cold (lockfile install) /
+  ~1-2 min warm (pip cache hit). Acceptable for a deploy gate that
+  runs on push + PR; not acceptable for inner-loop dev where local
+  `pytest` is still the answer.
+
+**Trade-offs.**
+
+- ~7 GB install on the ubuntu-latest runner; requires clearing
+  `/opt/hostedtoolcache` for headroom. Disk is tight but not
+  blocking. If a future lock upgrade pushes us past the cap, the
+  escalation is Option 3 (Docker-in-CI), captured as a future
+  ADR-B8 rather than a B7 retrofit.
+- spaCy models stay outside the hashed lockfile (URL-pinned, same
+  as Dockerfile). ADR-B6 already accepted this trade-off; B7
+  inherits the same property. The URL contains the version; a
+  tampered model needs a different URL.
+- Option 2 cannot detect a class of bugs Option 3 would: a wheel
+  that behaves differently in the CUDA-base image vs on bare
+  ubuntu-24.04 (e.g. glibc-version-dependent .so loading). Has not
+  shown up in any production incident to date. Accepted; revisit
+  if/when evidence appears.
+- Tests requiring services or corpus data must skip with
+  `reason=`. Skip count is recorded in this closeout. A growing
+  skip count is a signal — not a problem — that the next blocks
+  (corpus-fixture, service-stub) need to land.
+
+---
+
+
 
 Closes block **S-B4** of `docs/tz_structural_fixes_2026-05-24.md`.
 Promotes ADR-B4 (one-command deploy with verify + probe-gate +
