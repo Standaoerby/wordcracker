@@ -6,6 +6,364 @@
 
 ---
 
+## 2026-05-25 — S-B3: runtime build identity landed (ADR-B3 accepted)
+
+Closes block **S-B3** of `docs/tz_structural_fixes_2026-05-24.md`.
+Promotes ADR-B3 (runtime build identity) from Proposed to Accepted
+and lands the implementation. After S-B3 each app process inside the
+container reports the same `git_sha` that `verify_deployed_image.sh`
+expects at the docker layer: chat / admin `/health` is JSON with
+`git_sha`, `version`, and `build_time`; the chat UI header chip
+shows the short SHA. The value is sourced from `os.environ["GIT_SHA"]`,
+which is baked in by `ARG GIT_SHA` at image build time
+(`deploy.sh` passes `--build-arg GIT_SHA=$SHA`). Closes the failure
+mode that wasted runs 2–5 of the 2026-05-22 deploy epic: a version
+string that encoded feature-flag state instead of code identity.
+
+### ADR-B3 — Runtime build identity (`/health.git_sha` + header SHA + `ARG GIT_SHA`)
+
+**Status.** Accepted (2026-05-25, under S-B3). Supersedes the
+2026-05-24 Proposed draft.
+
+**Context.** ADR-B1 + the S-B2 generalisation of
+`verify_deployed_image.sh` ship the *docker-level* guarantee that
+every app service runs from the expected SHA-tagged image
+(`gutenberg-lab`, `chat`, `admin` all on the same
+`wordcracker-textlab:<sha>`). What is missing is the *runtime
+self-report* — the Python process inside each container has no
+`/health.git_sha`, no SHA in the UI, no `ARG GIT_SHA` baked in. The
+only place "version" was surfaced was the chat HTML header
+`<span class=meta>v2.6.13 · planner→router→renderer→critic</span>`,
+which encoded `ANALYTICS_VERSION` *and historical feature-flag
+phrasing* (`v3.2.0-alphaX`) — so an external observer could not
+tell "the new commit is actually running" from "an old image is
+running with the new flag-string baked in".
+
+That gap cost the 2026-05-22 deploy epic five runs in a row: each
+time `git pull` + restart looked correct, the version chip
+*looked* updated (because `ANALYTICS_VERSION` had been bumped in
+the source tree), but `verify_deployed_image.sh` did not yet exist,
+and the running image had not actually been rebuilt. There was no
+runtime signal that exposed the drift.
+
+This ADR is **the runtime side of the SHA contract**. Docker-side
+(B1/B2) and runtime-side (B3) together let an operator confirm
+"the new commit is live" without trust: both surfaces report the
+same SHA, or one is wrong.
+
+**Options reconsidered.**
+
+1. **`ARG GIT_SHA` build-arg → `ENV GIT_SHA=$GIT_SHA` in Dockerfile;
+   each app reads `os.environ["GIT_SHA"]` at startup.** Build-time
+   bake of the value, runtime read of the env. SHA cannot drift
+   because it's frozen into the image layer — restarting the same
+   image always reports the same SHA. **Pros:** one source of truth
+   (the build invocation); no extra files; `docker inspect
+   --format='{{.Config.Env}}'` shows the SHA at the docker layer for
+   external auditors; works identically for chat / admin / any
+   future app service that joins the image; lazy `os.environ.get`
+   reads make tests cheap (set env, call helper). **Cons:** an
+   operator who runs `docker build` by hand without `--build-arg`
+   gets `GIT_SHA=unknown` — has to be a discipline gate in
+   `deploy.sh` (covered by negative test).
+
+2. **Read SHA from `/workspace/.git_sha` file written at image build
+   time by `deploy.sh`.** Functionally similar to (1); SHA lives in a
+   file inside the image instead of an env var. **Cons:** two layers
+   to wire (file-write at build, file-read at runtime); file path is
+   a new convention to remember; one more failure mode (`FileNotFoundError`,
+   stale file from a manual rebuild that forgot to update it,
+   permissions on the read). The env-var path is more idiomatic for
+   "a value baked at image-build time".
+
+3. **Probe at request time via
+   `subprocess.check_output(['git','rev-parse','HEAD'])`.** Not
+   viable — `.git` is intentionally not in the image (D-SB1-2 only
+   COPYs `requirements.lock`, `scripts/`, `tests/`). Even if it
+   were, the SHA would reflect whatever ref happened to be checked
+   out *on the host that ran the build*, not the SHA pinned at build
+   time. Rejected.
+
+4. **Server-side build-time replace into a `_version.py.in`
+   template** (Make-style codegen). Pros: SHA is a Python literal,
+   not an env read — no chance of env being unset at runtime. Cons:
+   adds a codegen step to the build; the `_version.py.in` →
+   `_version.py` indirection is another file convention; the env-var
+   approach already gives runtime-immutability (the env is set in
+   the image layer, not at container start). Rejected as
+   overengineering.
+
+**Decision.** Option 1.
+
+**Implementation.**
+
+```dockerfile
+# Dockerfile (right before WORKDIR /workspace, after COPY of code)
+ARG GIT_SHA=unknown
+ARG BUILD_TIME=unknown
+ENV GIT_SHA=$GIT_SHA \
+    BUILD_TIME=$BUILD_TIME
+```
+
+```bash
+# deploy.sh — at the `docker build` step (post dirty-check, post
+# SHA resolution).  BUILD_TIME is UTC ISO-8601 with second precision.
+BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+docker build \
+    --build-arg GIT_SHA="${SHA}" \
+    --build-arg BUILD_TIME="${BUILD_TIME}" \
+    -t "${IMAGE_NAME}:${SHA}" -f Dockerfile .
+```
+
+```python
+# scripts/v2/__version__.py
+import os
+
+ANALYTICS_VERSION = "2.6.13"
+
+# GIT_SHA and BUILD_TIME are baked into the image at build time via
+# Dockerfile ARG/ENV and deploy.sh's --build-arg (ADR-B3). Outside a
+# built image (dev, tests, ad-hoc python) both resolve to "unknown" —
+# an explicit string value, never None, never a feature-flag-derived
+# substitute. The lazy getters let tests use monkeypatch.setenv
+# without an import-order dance.
+def get_git_sha() -> str:
+    return os.environ.get("GIT_SHA", "unknown")
+
+def get_build_time() -> str:
+    return os.environ.get("BUILD_TIME", "unknown")
+
+def runtime_identity() -> dict:
+    return {
+        "status":     "ok",
+        "version":    ANALYTICS_VERSION,
+        "git_sha":    get_git_sha(),
+        "build_time": get_build_time(),
+    }
+```
+
+```python
+# chat_server.py / admin_server.py: /health
+def do_GET(self):
+    if self.path == "/health":
+        from scripts.v2.__version__ import runtime_identity
+        return self._send(200,
+                          json.dumps(runtime_identity(), ensure_ascii=False),
+                          "application/json; charset=utf-8")
+```
+
+The chat header chip
+(`<span class=meta>__VERSION_DISPLAY__</span>`) renders as
+`v2.6.13 · <sha7> · planner→router→renderer→critic`. The tooltip
+adds full SHA + build time. Both come from `runtime_identity()`,
+not from `WC_*` flag state — toggling any feature flag must not
+change either value (R2 negative test).
+
+**Runtime-vs-docker cross-check.**
+`scripts/verify_deployed_image.sh` is extended (D-SB3-3 below): after
+the docker-tag comparison passes for all three services, it issues a
+local `GET http://127.0.0.1:8890/health` (chat) and
+`http://127.0.0.1:8891/health` (admin) and asserts the JSON's
+`git_sha` matches `${EXPECTED}`. Two surfaces must agree: docker tag
+== `/health.git_sha`. A mismatch means the image tag was bumped but
+the running container was not actually replaced — exactly the failure
+class we are closing. The probe is gated behind a `--with-runtime`
+flag (default: on for prod, off when the script is run by tests that
+don't have the services up).
+
+**Consequences.**
+- Externally verifiable identity: anyone with HTTP access to the
+  service can confirm what code is running without docker
+  privileges. `curl -s slovoeb.net/health | jq -r .git_sha`
+  is the one-liner.
+- `verify_deployed_image.sh` becomes the single self-checking
+  acceptance script for *both* docker-side and runtime-side identity.
+  No more two-surface drift class.
+- The chat UI header chip now means what it says: bumping
+  `ANALYTICS_VERSION` without rebuilding the image will still show
+  the old SHA in the chip → user-visible signal that "deploy did not
+  land".
+- `tests/v2/test_runtime_identity.py` (new) closes R2: positive
+  cases for SHA propagation, negative cases for "WC_* flags do not
+  influence SHA", "missing env yields 'unknown' not silent fallback".
+- `predeploy_probe_suite.py` and `check_version_bump.py` are not
+  touched — they read `ANALYTICS_VERSION` by file parse, not by
+  importing `__version__.py`. The new env-derived attributes are
+  invisible to them.
+- `status_server.py` (host-side, no Docker image) is **explicitly
+  out of scope** for this ADR — it has its own lifecycle (runs from a
+  host checkout via systemd, not from a SHA-pinned image). A
+  future block can give it parity by reading `git rev-parse HEAD` at
+  startup, but that's a different mechanism for a different process
+  shape and would dilute S-B3.
+
+**Trade-offs.**
+- An operator who runs `docker build` by hand without
+  `--build-arg GIT_SHA=...` gets `GIT_SHA=unknown` baked in. Mitigated:
+  `deploy.sh` is the canonical build path and always passes both
+  build-args; `docker-compose.yml`'s `build:` section also passes
+  them (with `"unknown"` fallback for dev `compose build`); the
+  negative test `test_deploy_sh_passes_git_sha_build_arg` pins the
+  deploy.sh side.
+- Build-time is a UTC string baked at the moment the layer is
+  produced. The first deploy after editing the Dockerfile changes
+  it; a no-op rebuild with full layer cache hits *does not* change
+  it (the COPY/RUN layers are cached, so `ENV BUILD_TIME=...` is too
+  — that's actually desired: identical image content → identical
+  reported identity). Operators who want a fresh build-time use
+  `docker build --no-cache`.
+- Two new env vars in the image (`GIT_SHA`, `BUILD_TIME`).
+  Negligible size; visible in `docker inspect`, so a third
+  observation surface (alongside docker tag and `/health`) — useful,
+  not harmful.
+
+### D-SB3-1 — `GIT_SHA` and `BUILD_TIME` live in `scripts/v2/__version__.py`
+
+**Decision.** Extend the existing `__version__.py` (today: one line,
+`ANALYTICS_VERSION = "2.6.13"`) with two lazy getters
+(`get_git_sha`, `get_build_time`) plus a `runtime_identity()` helper
+that wraps all three values into the dict served by `/health`. No new
+module; no codegen.
+
+**Why this file.** `__version__.py` is already the single declared
+home of "what version is this code". The companion identity values
+(SHA, build time) belong adjacent to it, not in a new
+`runtime_identity.py` (which would proliferate import surfaces). The
+file is already parsed (not imported) by
+`predeploy_probe_suite.py:62` and `check_version_bump.py:65` with a
+regex pinned to `ANALYTICS_VERSION = "..."` — adding new lines does
+not break either parser (regex anchors on the variable name, not on
+line count).
+
+**Lazy vs. constant.** `GIT_SHA = os.environ.get("GIT_SHA", "unknown")`
+at module top is the obvious shape but breaks tests that
+`monkeypatch.setenv("GIT_SHA", "fake123")` *after* the module is
+already imported. Functions (`get_git_sha()`) read env at call time,
+which matches both prod semantics (the env is set in the image layer,
+process-lifetime constant) and test semantics (a test can vary it
+between calls). Tiny overhead; correctness win.
+
+### D-SB3-2 — `/health` returns JSON with the same shape on chat and admin
+
+**Decision.** Both `chat_server.py` (port 8890) and `admin_server.py`
+(port 8891) return JSON from `/health`:
+
+```json
+{"status": "ok", "version": "2.6.13", "git_sha": "bac0b80",
+ "build_time": "2026-05-25T12:34:56Z"}
+```
+
+Content-type: `application/json; charset=utf-8`. HTTP status: 200 on
+healthy.
+
+**Why JSON, not plain `"ok"`.** The 2026-05-22 incident teaches that
+"the endpoint returned 200" is not the same as "the endpoint
+returned the *right* 200". Plain text `"ok"` cannot carry the SHA;
+adding a header (`X-Git-Sha`) is greppable in CLI but ignored by
+existing health-check tooling (compose healthcheck looks at status
+code, not body). JSON is greppable, machine-readable, and survives
+through proxies that strip custom headers. The compose healthcheck
+in `docker-compose.yml:151,176` still checks `status == 200` and
+keeps working — body shape changed, body presence didn't.
+
+**Why both services.** Asymmetry would mean an operator has to
+remember "chat has SHA, admin doesn't"; the same image runs both,
+so the same identity should report from both. Catches a deploy that
+recreated chat but skipped admin (or vice versa).
+
+**Backward compat.** `smoke_s_b2.sh` polls `/health` with `curl -sf
+--max-time 2 ... >/dev/null` — discards the body, only checks exit
+code. Still passes. Same for the compose-level healthcheck (urllib
+status-code check).
+
+### D-SB3-3 — `verify_deployed_image.sh` cross-checks runtime SHA
+
+**Decision.** Extend `verify_deployed_image.sh` with a runtime probe
+step that follows the docker-tag check:
+
+```bash
+# After all docker-tag checks pass, fetch /health and compare git_sha.
+# Default: probe runtime. --no-runtime skips (for test contexts where
+# the services aren't actually running).
+if [[ "${WITH_RUNTIME:-1}" == "1" ]]; then
+    for svc_port in "chat:8890" "admin:8891"; do
+        svc="${svc_port%:*}"; port="${svc_port#*:}"
+        body="$(curl -sf --max-time 5 "http://127.0.0.1:${port}/health" || true)"
+        sha="$(printf '%s' "$body" | python3 -c \
+            'import json,sys; print(json.loads(sys.stdin.read() or "{}").get("git_sha","<unset>"))')"
+        if [[ "$sha" != "$EXPECTED" ]]; then
+            echo "FAIL: ${svc} /health git_sha=${sha} != expected ${EXPECTED}" >&2
+            rc=6
+        else
+            echo "OK: ${svc} /health git_sha=${sha}"
+        fi
+    done
+fi
+```
+
+**Why.** Closes the only remaining failure mode B1+B2 didn't cover:
+"docker tag is correct, but the process inside doesn't actually
+think it's running that SHA" (e.g. an operator pinned a tag in
+`docker-compose.yml` but the process was started before the env-var
+bake landed). One script, two surfaces, must agree.
+
+**Negative test.** `test_verify_deployed_image_runtime_probe` pins
+that the script reads `/health.git_sha` (greps the script source for
+the probe pattern). If a future change removes the runtime check,
+the test fails — same anti-drift pattern as
+`test_deploy_sh_uses_scoped_dirty_check`.
+
+### Negative tests (R2)
+
+`tests/v2/test_runtime_identity.py` (new) carries the R2 mirror set
+for ADR-B3:
+
+| Case | What it asserts |
+|---|---|
+| `test_git_sha_reads_from_env` | `monkeypatch.setenv("GIT_SHA","abc1234")` → `get_git_sha() == "abc1234"`. |
+| `test_git_sha_missing_returns_unknown` | `monkeypatch.delenv("GIT_SHA", raising=False)` → `get_git_sha() == "unknown"` (explicit string, not `None`, not empty). |
+| `test_runtime_identity_shape` | `runtime_identity()` returns dict with exactly keys `{status, version, git_sha, build_time}` and version == `ANALYTICS_VERSION`. |
+| `test_git_sha_independent_of_wc_flags` | NOT-X mirror: set `WC_CRITIC=off`, `WC_LLM_MODEL=foo`, etc. — `get_git_sha()` value is unchanged. |
+| `test_build_time_reads_from_env` / `_missing_returns_unknown` | Same pair for `BUILD_TIME`. |
+| `test_dockerfile_bakes_git_sha_arg` | Grep `Dockerfile` for `ARG GIT_SHA` and `ENV GIT_SHA=$GIT_SHA`; both must be present. Mirror for `BUILD_TIME`. |
+| `test_deploy_sh_passes_git_sha_build_arg` | Grep `deploy.sh` for `--build-arg GIT_SHA=` and `--build-arg BUILD_TIME=` adjacent to the `docker build` invocation. |
+| `test_verify_deployed_image_runtime_probe` | Grep `verify_deployed_image.sh` for the `/health` probe + `git_sha` JSON parse. |
+| `test_chat_health_handler_emits_runtime_identity` | Static import of `chat_server`; assert the `/health` branch in `do_GET` calls `runtime_identity()` (greppable; we don't spin up the server). |
+| `test_admin_health_handler_emits_runtime_identity` | Same for `admin_server`. |
+| `test_chat_version_chip_includes_git_sha` | Render `PAGE` template via `_build_version_strings()` with `GIT_SHA=feedface`; assert the rendered display string contains `feedface`. |
+
+Per R2, every "X triggers Y" has a "NOT-X does not trigger Y"
+mirror:
+- `test_git_sha_reads_from_env` (X) ↔ `test_git_sha_missing_returns_unknown` (NOT-X).
+- `test_chat_version_chip_includes_git_sha` (X) ↔ `test_git_sha_independent_of_wc_flags` (NOT-X — flag-toggle does NOT trigger SHA change).
+- File-level grep tests (Dockerfile / deploy.sh / verify_deployed_image.sh) are anti-drift pins; their failure mode is the trivial "the line went away" which the assert covers.
+
+### Acceptance gate (TZ S-B3)
+
+| Gate                                                                 | How verified                                                                       |
+|----------------------------------------------------------------------|------------------------------------------------------------------------------------|
+| `GET /health` returns `git_sha` matching deployed commit             | `verify_deployed_image.sh` runtime probe (D-SB3-3) + manual `curl /health \| jq`   |
+| UI footer/chip shows the same SHA                                    | `test_chat_version_chip_includes_git_sha` (offline render of header chip)          |
+| SHA value does NOT change with `WC_*` flag toggles                   | `test_git_sha_independent_of_wc_flags`                                             |
+| `/health.git_sha == git rev-parse HEAD` of built image               | `verify_deployed_image.sh --with-runtime` (D-SB3-3)                                |
+
+### Follow-ups deliberately out of scope of S-B3
+
+- **`status_server.py` runtime identity.** Host-side process, no
+  Docker image, no `ARG GIT_SHA`. Could read `git rev-parse HEAD`
+  on startup but that's a different mechanism for a different
+  process shape. Tracked separately.
+- **UI footer treatment beyond the header chip.** The `#stats-footer`
+  at the bottom of the chat HTML could also surface SHA. Decided
+  against to keep scope tight — the header chip is the canonical
+  version surface and already visible.
+- **Bumping `predeploy_probe_suite.py` to verify `/health.git_sha`
+  matches the about-to-deploy commit.** Natural extension under
+  ADR-B4 (predeploy harness as single gate); not added here to keep
+  S-B3 focused on the runtime surface itself.
+
+---
+
 ## 2026-05-24 — S-B2: supervision landed (ADR-B2 accepted)
 
 Closes block **S-B2** of `docs/tz_structural_fixes_2026-05-24.md`.
@@ -1319,39 +1677,6 @@ Systemd units for chat / admin are deleted from the repo.
 - Three containers instead of one for the app: chat (~28 GB cap),
   admin (~4 GB), jupyter (~8 GB); total RAM ceiling unchanged from
   the pre-S-B2 single 40 GB gutenberg-lab cap, just split.
-
----
-
-### ADR-B3 — Runtime build identity (`/health.git_sha` + footer SHA + `ARG GIT_SHA`)
-
-**Status.** Proposed. Placeholder slot for Step 4 / **S-B3**.
-
-**Context.** ADR-B1 ships the docker-level guarantee that the
-running container is from a known image tag
-(`verify_deployed_image.sh` reads `docker inspect` → image tag =
-expected SHA). That's the *infrastructure* identity. There is no
-corresponding *runtime self-report* — the chat process inside the
-container has no `/health.git_sha`, no footer SHA in the UI, no
-`ARG GIT_SHA` baked into the image and surfaced via `os.environ`.
-Drift between "what docker thinks is running" and "what the process
-inside thinks it is running" stays invisible.
-
-Originally bundled with the chat/admin supervision proposal (now
-ADR-B2); on inspection orthogonal to supervision (a runtime
-self-report concern, not a PID-1 concern), so split out into its own
-ADR. To be fleshed out by Step 4 / S-B3.
-
-**Options considered.** TBD by Step 4. Candidate directions:
-1. `ARG GIT_SHA` build-arg → `ENV GIT_SHA=$GIT_SHA` in Dockerfile;
-   chat exposes `/health.git_sha` from `os.environ`; footer of chat
-   HTML renders the SHA.
-2. Read SHA from `/workspace/.git_sha` file written at image build
-   time by `deploy.sh`.
-3. Probe at request time via
-   `subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=...)`
-   — not viable, no `.git` in the image.
-
-**Decision.** Deferred to S-B3.
 
 ---
 

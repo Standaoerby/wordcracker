@@ -150,8 +150,17 @@ else
     fi
 
     echo "[deploy] mode=forward ref=${REF} sha=${SHA}"
-    echo "[deploy] building ${IMAGE_NAME}:${SHA} ..."
-    docker build -t "${IMAGE_NAME}:${SHA}" -f Dockerfile .
+    # ADR-B3 / D-SB3-1: bake GIT_SHA + BUILD_TIME into the image so
+    # the running process can self-report identity at /health and in
+    # the UI. BUILD_TIME is UTC ISO-8601 (second precision). Both
+    # values are visible at `docker inspect --format='{{.Config.Env}}'`
+    # and at `curl /health | jq -r .git_sha`.
+    BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "[deploy] building ${IMAGE_NAME}:${SHA} (build_time=${BUILD_TIME}) ..."
+    docker build \
+        --build-arg GIT_SHA="${SHA}" \
+        --build-arg BUILD_TIME="${BUILD_TIME}" \
+        -t "${IMAGE_NAME}:${SHA}" -f Dockerfile .
 fi
 
 # --- write .env atomically ---

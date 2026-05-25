@@ -62,6 +62,19 @@ WORKDIR /workspace
 COPY scripts/ /workspace/scripts/
 COPY tests/ /workspace/tests/
 
+# ADR-B3 / D-SB3-1 (S-B3): bake runtime build identity into the image.
+# GIT_SHA + BUILD_TIME are surfaced via `/health` JSON (chat:8890 /
+# admin:8891) and the chat UI header chip. Placed late so a fresh SHA
+# only invalidates this layer + EXPOSE/CMD, not the heavy pip-install
+# layers above. `deploy.sh` passes both via --build-arg; an operator
+# who runs `docker build` by hand without them gets the "unknown"
+# default — visible at /health and in the UI as a deploy-discipline
+# signal. See docs/v2/decisions.md → 2026-05-25 S-B3.
+ARG GIT_SHA=unknown
+ARG BUILD_TIME=unknown
+ENV GIT_SHA=$GIT_SHA \
+    BUILD_TIME=$BUILD_TIME
+
 EXPOSE 8888
 
 # jupyter on 8888 stays the default CMD. chat_server / admin_server

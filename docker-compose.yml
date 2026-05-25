@@ -96,6 +96,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # ADR-B3 / D-SB3-1: forward GIT_SHA + BUILD_TIME to Dockerfile
+      # for any path that bypasses `scripts/deploy.sh` (notably
+      # `docker compose build` / `docker compose up --build` in dev).
+      # Defaults to WC_IMAGE_TAG when set (deploy.sh always exports it)
+      # and "unknown" otherwise — never silently empty.
+      args:
+        GIT_SHA: "${WC_IMAGE_TAG:-unknown}"
+        BUILD_TIME: "${WC_BUILD_TIME:-unknown}"
     ports:
       - "8888:8888"
     environment: *app-env

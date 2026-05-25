@@ -840,19 +840,31 @@ def _build_version_strings() -> tuple[str, str]:
     """Render version string + tooltip for the UI header.
 
     Returns (display, tooltip):
-      display — short string for the header pill
-      tooltip — longer string with version + caps, shown via `title=`.
+      display — short string for the header pill (version + short SHA)
+      tooltip — longer string with version, full SHA, build time, caps.
 
-    Closes the R14 TL;DR concern «версия не подтверждена — alphaX нигде
-    не выводится в UI». Now the deployed version is always visible.
+    ADR-B3 (S-B3): the chip now carries the runtime build identity
+    (short git_sha) alongside ANALYTICS_VERSION, NOT feature-flag
+    state — so an operator can confirm "the new commit is live" at
+    a glance, and the value does not change when WC_* toggles flip.
     """
     try:
-        from scripts.v2.__version__ import ANALYTICS_VERSION as _v
+        from scripts.v2.__version__ import (
+            ANALYTICS_VERSION as _v,
+            get_git_sha,
+            get_build_time,
+        )
+        _sha = get_git_sha()
+        _build_time = get_build_time()
     except Exception:
         _v = "unknown"
-    display = f"v{_v} · planner→router→renderer→critic"
+        _sha = "unknown"
+        _build_time = "unknown"
+    _sha_short = _sha[:7] if _sha != "unknown" else "unknown"
+    display = f"v{_v} · {_sha_short} · planner→router→renderer→critic"
     tooltip = (
         f"wordcracker analytics v{_v}\n"
+        f"git: {_sha} · built {_build_time}\n"
         f"engine: v2 (planner → router → renderer → critic)\n"
         f"composer cap: {COMPOSER_MAX_BYTES} bytes\n"
         f"history clip: {MAX_HISTORY_TURNS} turns / {MAX_HISTORY_BYTES} bytes server-side"
@@ -878,7 +890,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
-            return self._send(200, b"ok", "text/plain")
+            # ADR-B3 / D-SB3-2: /health is JSON, not plain "ok". Body
+            # carries git_sha + build_time + version so
+            # verify_deployed_image.sh and `curl /health | jq` can confirm
+            # the running process matches the expected SHA. HTTP 200
+            # semantics unchanged → compose healthcheck still works.
+            from scripts.v2.__version__ import runtime_identity
+            return self._send(200,
+                              json.dumps(runtime_identity(), ensure_ascii=False),
+                              "application/json; charset=utf-8")
         if self.path == "/api/tools":
             tools = [{"name": t["function"]["name"],
                       "description": t["function"]["description"]} for t in TOOLS_SPEC]

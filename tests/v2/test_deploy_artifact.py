@@ -117,24 +117,49 @@ def test_dev_override_restores_code_bind_mounts(service: str):
 # --- D-SB1-3: WC_IMAGE_TAG is required; no `:-latest` fallback ---
 
 def test_prod_image_tag_is_strictly_required():
-    """`image:` in the prod base must use ${VAR:?msg} (fail-loud) form.
+    """The image tag substitution in the prod base must use
+    ``${VAR:?msg}`` (fail-loud) form.
 
-    A `:-latest` or `:-dev` fallback in the prod file would let an
-    operator who forgot to set WC_IMAGE_TAG ship whatever the floating
-    tag happens to point at — exactly the failure that wasted runs 2-5
-    of the 2026-05-22 deploy epic.
+    A `:-latest` / `:-dev` fallback on the image tag would let an
+    operator who forgot to set WC_IMAGE_TAG ship whatever the
+    floating tag happens to point at — exactly the failure that
+    wasted runs 2-5 of the 2026-05-22 deploy epic.
+
+    The build-arg path (added under ADR-B3 / D-SB3-1) is a different
+    surface: ``build.args.GIT_SHA: "${WC_IMAGE_TAG:-unknown}"`` is
+    safe because (a) deploy.sh never goes through `docker compose
+    build` — it does a direct `docker build` with `--build-arg
+    GIT_SHA=$SHA`, so the compose path is dev-only; (b) the
+    "unknown" fallback is propagated all the way to /health, so a
+    casual `docker compose build` without WC_IMAGE_TAG produces an
+    image that visibly identifies itself as unknown, not a silently
+    floating one. So the `:-` form IS allowed in build.args context;
+    forbidden only on the canonical image tag substitution.
     """
     text = BASE_COMPOSE.read_text(encoding="utf-8")
-    # The strict-required form looks like ${WC_IMAGE_TAG:?...}.
+    # The strict-required form must appear (on the image tag).
     assert re.search(r"\$\{WC_IMAGE_TAG:\?", text), (
         f"{BASE_COMPOSE.name} must use ${{WC_IMAGE_TAG:?msg}} form "
-        f"(strict-required substitution) on the image: line."
+        f"(strict-required substitution) on the image tag line."
     )
-    # And must NOT carry a default-value fallback (:-something).
-    assert not re.search(r"\$\{WC_IMAGE_TAG:-", text), (
-        f"{BASE_COMPOSE.name} contains a ${{WC_IMAGE_TAG:-...}} fallback. "
-        f"Prod must fail loud when the tag is unset; move the fallback "
-        f"to docker-compose.dev.yml (dev)."
+    # `:-` fallback is forbidden ONLY in image-tag contexts. Allowed
+    # in build.args where the fallback feeds the GIT_SHA / BUILD_TIME
+    # bake-in (covered by test_compose_build_args_include_git_sha).
+    # Per-line scan: skip lines whose value position carries one of
+    # the runtime-identity arg names.
+    offending = []
+    for line in text.splitlines():
+        if "${WC_IMAGE_TAG:-" not in line:
+            continue
+        # Build-args lines look like:  GIT_SHA: "${WC_IMAGE_TAG:-unknown}"
+        # or                            BUILD_TIME: "${WC_BUILD_TIME:-unknown}"
+        if re.search(r"^\s*(GIT_SHA|BUILD_TIME)\s*:", line):
+            continue
+        offending.append(line.strip())
+    assert offending == [], (
+        f"{BASE_COMPOSE.name} carries a ${{WC_IMAGE_TAG:-...}} fallback "
+        f"on a non-build-arg line (image tag must fail loud). "
+        f"Offending lines: {offending}"
     )
 
 

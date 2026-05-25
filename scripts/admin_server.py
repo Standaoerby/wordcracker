@@ -1297,7 +1297,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
-            self.send_response(200); self.end_headers(); self.wfile.write(b"ok"); return
+            # ADR-B3 / D-SB3-2: /health is JSON carrying git_sha +
+            # build_time + version. Same shape as chat_server's /health
+            # (both serve under wordcracker-textlab:<sha>), so
+            # verify_deployed_image.sh can probe both and assert the
+            # process inside each container matches the expected SHA.
+            from scripts.v2.__version__ import runtime_identity
+            return self._json(200, runtime_identity())
         if self.path in ("/status", "/api/status"):
             pg_count = sum(1 for _ in RAW_DIR.glob("pg*.txt")) if RAW_DIR.exists() else 0
             user_count = sum(1 for _ in RAW_DIR.glob("u*.txt")) if RAW_DIR.exists() else 0
