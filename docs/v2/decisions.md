@@ -572,29 +572,55 @@ exists but never runs" (decorative-green), we ship
 "test runs every PR and fails until the operator action lands"
 (loud-red until intentional unblock).
 
-**Operator workflow (prod host).**
+**Operator workflow (prod host).** `docker compose exec` against
+the running container does NOT work: the deployed prod image is
+on the current main SHA (e.g. S-F1 = `5044173`), which does NOT
+contain `record_fixtures.py` or `live_args.py` (those are
+S-F2-only). The workflow uses `compose run --rm` against the dev
+overlay to spawn a one-off ephemeral container with the
+*current* prod image (so v1 + spaCy + ChromaDB clients are
+identical to prod) PLUS the host's `./scripts` bind-mounted on
+top (so the recorder + LIVE_ARGS table are present). The
+running chat/admin/gutenberg-lab containers are not touched.
 
 ```bash
-# 1. Pull the S-F2 branch
-cd /opt/wordcracker && git fetch && git checkout s-f2-v1-contracts
+# 1. Switch the prod working tree to the S-F2 branch.
+#    .env is NOT touched, so WC_IMAGE_TAG (= deployed SHA) stays
+#    intact — the dev overlay reads this back, so the ephemeral
+#    container reuses the live prod image as its base.
+cd /opt/wordcracker
+git fetch origin
+git checkout s-f2-v1-contracts-fixtures
 
-# 2. Record fixtures inside the running gutenberg-lab container
-#    (has /workspace/spgc/ + /workspace/chroma_db/ mounted, GPU)
-docker compose exec gutenberg-lab \
+# 2. Run the recorder in a one-off ephemeral container.
+#    Base image: $WC_IMAGE_TAG (current prod, has the v1 code +
+#    pinned deps from requirements.lock baked at build).
+#    Bind-mount: ./scripts → /workspace/scripts (S-F2 code on top).
+#    Volumes from base compose: /data/spgc → /workspace/spgc,
+#    /data/chroma_db → /workspace/chroma_db (corpus + index).
+#    --rm cleans up the container after the recorder exits.
+docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+    run --rm gutenberg-lab \
     python -m scripts.v2.contracts.record_fixtures
 
-# 3. Review the manifest
+# 3. Review the manifest — confirm `ok` count = expected (32),
+#    no `v1_returned_error` / `v1_raised` / `v1_unresolvable`.
 cat scripts/v2/contracts/fixtures/_manifest.json
 
-# 4. Commit the fixtures and push
-git add scripts/v2/contracts/fixtures/*.json
+# 4. Commit the fixtures + manifest and push.
+git add scripts/v2/contracts/fixtures/
 git commit -m "chore(s-f2): record v1 golden fixtures from prod"
-git push
+git push origin s-f2-v1-contracts-fixtures
+
+# 5. Restore the prod working tree to main (the deployed branch).
+git checkout main
 ```
 
-The push triggers a new CI run on the PR — coverage gate
-flips green, replay-gate runs schema validation on all 32
-fixtures, S-F2 closes.
+The push triggers a new CI run on PR #2. With the manifest
+present and 32 fixtures committed: `FixtureCoverageGate` flips
+green, `RecordedFixtureReplay` validates all 32 against schemas,
+`FixtureFreshnessGate` (D-SF2-6) confirms fingerprints match
+HEAD. S-F2 closes.
 
 **Ongoing maintenance.** After each prod deploy that changes a
 v1 function signature or output shape, the operator re-runs
@@ -607,6 +633,65 @@ hosted runner mounting prod corpus over the network (security
 risk + slow), or (b) a self-hosted runner (operational lift —
 option 2 in [D-SF2-4](#d-sf2-4--recorded-golden-fixtures-replay-hard-gated-in-ci)).
 The manual step is the floor; CI gates around it.
+
+### D-SF2-6 — Fingerprint freshness gate, reuses ADR-F1 walk
+
+**Decision.** Each recorded fixture stamps the AST-fingerprint of
+`(wrapper_fn, v1_fn)` at recording time (same formula as ADR-F1's
+cache fingerprint). CI runs `FixtureFreshnessGate` that recomputes
+the fingerprint from the current source tree and asserts it
+matches the stamp; drift means v1 source or wrapper was edited
+since the recording, so the fixture is structurally stale, and
+the operator must re-run `record_fixtures` on prod.
+
+**Why this is needed.** D-SF2-4 closes "v1 output drifts in shape"
+(replay vs schema) and "wrapper invents a key" (static AST gate),
+but NOT "v1 source changes between deploys and operator forgets
+to re-record". Without freshness, a v1 helper edit that leaves
+the JSON shape intact but flips a value (e.g. `_normalize_lang`
+becomes more strict, fewer rows emit) would never trigger any
+gate: schema validates, fixture still exists, CI green, prod data
+silently drifted. That is the exact "тест не падает, тест
+исчезает" class that S-F2 exists to kill — without this gate, the
+contract layer would re-introduce it at a deeper layer.
+
+**Why fingerprint and not content diff.** Content-diff is the
+follow-up `F2-DEPLOY-RERECORD` gate on the deploy host (compares
+freshly-captured JSON vs committed JSON). At PR-time on CI there
+is no corpus to re-capture against — fingerprint is what we *can*
+compute statically. The two gates are complementary:
+
+| Gate | Where | What it catches | What it misses |
+|---|---|---|---|
+| `FixtureFreshnessGate` (D-SF2-6) | CI, every PR | Edits to wrapper or v1 or any depth=1 helper since recording | Depth≥2 helpers, lazy in-body imports, C-extension behaviour change (ADR-F1 D-SF1-4 residual) |
+| `F2-DEPLOY-RERECORD` (follow-up) | deploy.sh post-rollout | JSON-content diff vs committed fixtures (catches everything the AST walk misses) | n/a (this is the floor) |
+
+Together they cover the failure surface. Layer 1 (CI) is fast and
+runs on every PR; layer 2 (deploy) is slow but authoritative and
+runs once per deploy.
+
+**Why reuse the cache fingerprint formula.** Cache invalidation
+and fixture staleness are the SAME question (did the code that
+produces this output change?). Two definitions would diverge over
+time; one definition keeps them aligned. If the cache key flips,
+the fixture is stale by construction — and vice versa. The
+fingerprint walks depth=1 from each entry function (D-SF1-3), so
+shared helpers like `_title_lookup` propagate to every consumer
+that calls them at the v1 module level.
+
+**Stamped where.** `scripts/v2/contracts/fixtures/_manifest.json`,
+under `results[].v1_fingerprint`. The manifest is committed
+alongside the JSON fixtures, so the stamp travels with the
+recordings; CI reads it back at replay time.
+
+**Implementation.** ~20 lines: one block in
+[record_fixtures.py](scripts/v2/contracts/record_fixtures.py)
+`_record_one` that computes `ast_fingerprint(binding.wrapper_fn,
+binding.v1_fn)` after a successful v1 call and includes it in
+the OK-result dict (manifest captures it). One test class in
+[test_v1_contracts.py](tests/v2/test_v1_contracts.py)
+(`FixtureFreshnessGate`) that loads `_manifest.json`, iterates,
+recomputes, asserts. Same import, same walk, no new infra.
 
 ### Negative tests (R2)
 
@@ -635,14 +720,17 @@ The manual step is the floor; CI gates around it.
 - ⏳ **CI runs the contract sweep against real v1 on every PR.**
   Static layer (AST gate, schema-mock gate, binding visibility,
   coverage floor, import-path canonical, R2 negative,
-  fixture-coverage hard-gate, recorded-fixture replay) runs by
-  default. Live-v1 portion is satisfied via *recorded golden
-  fixtures* (D-SF2-4) — equivalent to live calls structurally
-  (the fixtures ARE real v1 output) without dragging the corpus
-  onto the hosted runner. **Status pending the first operator
-  recording on prod.** Until then, `FixtureCoverageGate` is RED
-  and the PR cannot merge — this is the
-  [D-SF2-5](#d-sf2-5--recorder-workflow--bootstrap-red-pr-convention)
+  fixture-coverage hard-gate, recorded-fixture replay,
+  fixture-freshness hard-gate) runs by default. Live-v1 portion
+  is satisfied via *recorded golden fixtures* (D-SF2-4) —
+  equivalent to live calls structurally (the fixtures ARE real
+  v1 output) without dragging the corpus onto the hosted runner.
+  Fixture staleness (v1 source edited since recording) is
+  detected by [D-SF2-6](#d-sf2-6--fingerprint-freshness-gate-reuses-adr-f1-walk)
+  via the cache-fingerprint walk reused from ADR-F1. **Status
+  pending the first operator recording on prod.** Until then,
+  `FixtureCoverageGate` is RED and the PR cannot merge — this is
+  the [D-SF2-5](#d-sf2-5--recorder-workflow--bootstrap-red-pr-convention)
   bootstrap-red convention.
 - ✅ Artificial `raw.get("xyz_nonexistent")` in a wrapper → CI fails
   loud — via `PhantomKeyNegativeGate` (synthesised inline so the
@@ -752,19 +840,25 @@ deploy-host shell without pytest dependencies.
   amount to "add a key to the schema, update the wrapper's read,
   add a negative test on the row that came back empty", and benefit
   from the framework S-F2 lands.
-- **Stale-fixture detection.** The recorded fixtures pin v1
-  output at the timestamp of the last `record_fixtures` run. If
-  v1 source changes in a deploy and the operator forgets to
-  re-record, the fixtures and live v1 silently diverge until the
-  next time someone runs the recorder. The ADR-F1 AST-fingerprint
-  walk catches some of this (a v1 body edit changes the
-  fingerprint, invalidating the cache; that doesn't help the
-  fixture though). Mitigation: deploy-host integration in the
-  follow-up `F2-DEPLOY-RERECORD` runs `record_fixtures` as part
-  of `scripts/deploy.sh` post-rollout and blocks the deploy on
-  any diff to fixtures — turning "operator forgot" into a deploy-
-  time CI signal. Out of scope for this commit (deploy script
-  belongs to the B-namespace); tracked.
+- **Stale-fixture detection at depth ≤ 1.** Closed in
+  [D-SF2-6](#d-sf2-6--fingerprint-freshness-gate-reuses-adr-f1-walk):
+  fixtures stamp the AST-fingerprint of (wrapper, v1_fn) at
+  recording time; `FixtureFreshnessGate` recomputes on CI and
+  fails red on drift. Same formula as ADR-F1's cache fingerprint
+  — cache invalidation and fixture staleness share one definition.
+- **Stale-fixture detection at depth ≥ 2 (residual).** ADR-F1
+  D-SF1-4 documented the depth=1 ceiling: a helper-of-a-helper
+  edit (e.g. `_normalize_lang` is fine, but `_strip_quotes` it
+  calls has a regex change) does NOT flip the fingerprint. For
+  fixtures this means: v1's JSON output may diverge silently
+  while the fingerprint matches. Same mitigation as for cache:
+  the manual `wrapper_version` bump on `ToolSpec` is the explicit
+  backstop, AND the follow-up `F2-DEPLOY-RERECORD` re-runs the
+  recorder on the deploy host and fails the deploy on any
+  fixture-JSON diff. Out of scope for this commit (deploy script
+  belongs to the B-namespace); tracked. Layer 1 (D-SF2-6) +
+  layer 2 (F2-DEPLOY-RERECORD) together close the failure
+  surface structurally.
 
 **Follow-ups (durable).**
 

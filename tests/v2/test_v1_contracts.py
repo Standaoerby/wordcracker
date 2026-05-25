@@ -327,10 +327,17 @@ class FixtureCoverageGate(unittest.TestCase):
             missing, [],
             f"missing recorded fixtures for {len(missing)} bindings: "
             f"{missing}.\n"
-            f"Record them on the prod host:\n"
-            f"    docker compose exec gutenberg-lab \\\n"
+            f"Record them on the prod host (one-off ephemeral "
+            f"container — does NOT touch the running chat/admin):\n"
+            f"    git fetch origin && git checkout s-f2-v1-contracts-fixtures\n"
+            f"    docker compose -f docker-compose.yml -f docker-compose.dev.yml \\\n"
+            f"        run --rm gutenberg-lab \\\n"
             f"        python -m scripts.v2.contracts.record_fixtures\n"
-            f"then commit scripts/v2/contracts/fixtures/*.json. "
+            f"    cat scripts/v2/contracts/fixtures/_manifest.json   # review\n"
+            f"    git add scripts/v2/contracts/fixtures/\n"
+            f"    git commit -m 'chore(s-f2): record v1 golden fixtures'\n"
+            f"    git push origin s-f2-v1-contracts-fixtures\n"
+            f"    git checkout main\n"
             f"(v2-internal bindings without LIVE_ARGS are excluded "
             f"by design: {sorted(no_live_args)})",
         )
@@ -390,6 +397,99 @@ class RecordedFixtureReplay(unittest.TestCase):
             f"Re-record on prod with "
             f"`python -m scripts.v2.contracts.record_fixtures` and "
             f"compare the diff:\n{failures}",
+        )
+
+
+class FixtureFreshnessGate(unittest.TestCase):
+    """D-SF2-6 — hard-gate against stale fixtures.
+
+    Each fixture is recorded with a stamped `v1_fingerprint` (AST-hash
+    of `(wrapper_fn, v1_fn)` plus their depth=1 callees — same formula
+    as ADR-F1's cache fingerprint). At CI time, recompute the
+    fingerprint from the current source tree and compare. Drift means
+    v1 source or wrapper body was edited since the recording, so the
+    fixture is structurally stale — operator must re-run
+    `record_fixtures` on prod and commit the diff.
+
+    Layered defence against silent stale fixtures:
+
+      1. **CoverageGate** (presence): fixture file exists.
+      2. **RecordedFixtureReplay** (shape): JSON matches declared schema.
+      3. **FixtureFreshnessGate** (this class): fingerprint matches
+         current source. Catches the "v1 helper edited, re-record
+         forgotten" case at depth≤1.
+      4. **F2-DEPLOY-RERECORD** (deploy.sh follow-up): re-runs
+         record_fixtures post-rollout and fails the deploy on any
+         JSON diff. Catches depth≥2 / lazy-import / C-extension v1
+         edits that the AST walk cannot reach (ADR-F1 D-SF1-4
+         residual risk).
+
+    Layers 1-3 run on every PR. Layer 4 runs on every prod deploy.
+    Together they close the stale-fixture failure class structurally
+    — there is no path where v1 source changes and the fixture stays
+    untouched without a loud CI/deploy signal.
+    """
+
+    def test_every_fixture_fingerprint_matches_current(self):
+        manifest_path = _FIXTURES_DIR / "_manifest.json"
+        if not manifest_path.exists():
+            # Bootstrap state — no recordings yet. CoverageGate is
+            # the loud signal; this test stays silent so the failure
+            # surface remains unambiguous (1 red, not 2).
+            return
+
+        try:
+            with open(manifest_path, encoding="utf-8") as fh:
+                manifest = json.load(fh)
+        except (OSError, json.JSONDecodeError) as e:
+            self.fail(f"_manifest.json unreadable: {e}")
+
+        recorded_fingerprints = {
+            r["v1_qualname"]: r.get("v1_fingerprint")
+            for r in manifest.get("results", [])
+            if r.get("status") == "ok"
+        }
+
+        # Importing here keeps the test self-contained — the registry
+        # module is the canonical home of ast_fingerprint (same formula
+        # used by the cache key, by design).
+        from scripts.v2.contracts.registry import ast_fingerprint
+
+        drift = []
+        for binding in V1_CONTRACTS.values():
+            key = binding.v1_qualname
+            stamped = recorded_fingerprints.get(key)
+            if stamped is None:
+                # Either the fixture wasn't recorded yet (CoverageGate
+                # will fail loudly), or this binding has no LIVE_ARGS
+                # entry (v2-internal resolvers — by design). Either
+                # way, skip — the freshness signal is meaningful only
+                # when a recording exists.
+                continue
+            try:
+                current = ast_fingerprint(
+                    binding.wrapper_fn, binding.v1_fn,
+                )
+            except Exception as e:  # noqa: BLE001 — surface any failure
+                drift.append((key, f"fingerprint failed: "
+                                    f"{type(e).__name__}: {e}"))
+                continue
+            if stamped != current:
+                drift.append((
+                    key,
+                    f"stamped={stamped} current={current} — "
+                    f"v1 or wrapper edited since recording",
+                ))
+
+        self.assertEqual(
+            drift, [],
+            f"{len(drift)} fixture(s) stale — source has changed "
+            f"since recording. Re-run on prod:\n"
+            f"    docker compose -f docker-compose.yml -f docker-compose.dev.yml \\\n"
+            f"        run --rm gutenberg-lab \\\n"
+            f"        python -m scripts.v2.contracts.record_fixtures\n"
+            f"then commit the updated fixtures + _manifest.json. "
+            f"Drift detail:\n{drift}",
         )
 
 

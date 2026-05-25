@@ -145,12 +145,28 @@ def _record_one(v1_qualname: str, args: dict, fixtures_dir: Path) -> dict:
             "path": str(out_path),
         }
 
+    # D-SF2-6 — stale-fixture detection: stamp the AST-fingerprint of
+    # (wrapper, v1_fn) at recording time. Same formula as ADR-F1's
+    # cache fingerprint, so cache invalidation and fixture staleness
+    # share one definition (if the cache key flips, the fixture is
+    # stale by the same logic). At CI time
+    # `FixtureFreshnessGate` recomputes the fingerprint from the
+    # current source tree and asserts it matches the stamped value —
+    # drift means v1 or wrapper was edited since the recording, the
+    # fixture is stale, operator must re-run on prod.
+    try:
+        from scripts.v2.contracts.registry import ast_fingerprint
+        fingerprint = ast_fingerprint(binding.wrapper_fn, binding.v1_fn)
+    except Exception as e:
+        fingerprint = f"fingerprint_failed:{type(e).__name__}:{e}"
+
     return {
         "v1_qualname": v1_qualname,
         "status": "ok",
         "path": str(out_path.relative_to(fixtures_dir.parent.parent.parent)),
         "elapsed_s": elapsed,
         "size_bytes": out_path.stat().st_size,
+        "v1_fingerprint": fingerprint,
     }
 
 
