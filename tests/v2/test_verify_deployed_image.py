@@ -147,9 +147,9 @@ def test_verify_guards_json_loads():
 def test_verify_has_degraded_mode_marker():
     """Bug 2 fix shape: degraded mode is explicit and labelled —
     when /health is not JSON, the script logs `pre-B3` or
-    `non-JSON` and exits OK for that service. Future commits that
-    re-tighten the contract (e.g. "all targets must serve JSON")
-    flip this test red, forcing the trade-off to be re-litigated.
+    `non-JSON`. Future commits that re-tighten the contract
+    (e.g. "all targets must serve JSON") flip this test red,
+    forcing the trade-off to be re-litigated.
     """
     text = _read_verify_sh()
     assert "non-JSON" in text or "pre-B3" in text, (
@@ -157,6 +157,72 @@ def test_verify_has_degraded_mode_marker():
         "explicitly so operators reading the log see why git_sha "
         "was skipped (and so a refactor can't silently re-tighten "
         "the contract and lock out rollbacks)."
+    )
+
+
+def test_verify_gates_degraded_mode_to_rollback_env():
+    """Critical gate (user-requested 2026-05-25): degraded mode
+    is NOT an unconditional fallback — it is gated by an env var
+    set ONLY by deploy.sh on its rollback path. Forward deploys
+    that hit non-JSON /health must FAIL (exit 8), not degrade.
+
+    This static gate pins:
+      (a) the env var name (`VERIFY_ALLOW_PRE_B3_DEGRADED`)
+          appears in the script
+      (b) a non-zero exit (rc=8) is the alternative path when the
+          env is unset
+    A regression that drops the gate and re-introduces
+    unconditional degrade silently un-closes the silent-success
+    class --expected-sha was meant to close in ADR-B4.
+    """
+    text = _read_verify_sh()
+    assert "VERIFY_ALLOW_PRE_B3_DEGRADED" in text, (
+        "verify_deployed_image.sh must gate degraded-non-JSON-body "
+        "handling behind VERIFY_ALLOW_PRE_B3_DEGRADED. Without the "
+        "gate, forward-deploy non-JSON /health silently passes — "
+        "exactly the silent-success class --expected-sha closes."
+    )
+    assert "rc=8" in text, (
+        "the forward-mode rejection of non-JSON /health must set "
+        "rc=8 (distinct from rc=6 'curl empty' and rc=7 'sha "
+        "mismatch') so operators can distinguish failure modes."
+    )
+
+
+def test_deploy_sh_sets_degrade_env_only_in_rollback():
+    """The matching half of the gate: deploy.sh sets
+    `VERIFY_ALLOW_PRE_B3_DEGRADED=1` only inside its MODE=rollback
+    branch, never on the forward path.
+
+    Greps deploy.sh for the env-var assignment and asserts it
+    appears immediately under an `if [[ "$MODE" == "rollback" ]]`
+    block. A future refactor that hoists the env into a shared
+    section above (i.e. setting it for both forward AND rollback
+    invocations) flips this red — degrade is rollback-only by
+    contract.
+    """
+    deploy_sh = REPO_ROOT / "scripts" / "deploy.sh"
+    text = deploy_sh.read_text(encoding="utf-8")
+    assert "VERIFY_ALLOW_PRE_B3_DEGRADED=1" in text, (
+        "deploy.sh must set VERIFY_ALLOW_PRE_B3_DEGRADED=1 when "
+        "calling verify on its rollback path (otherwise rollback "
+        "to a pre-B3 target fails on the non-JSON /health body, "
+        "which is exactly the bug this amendment exists to fix)."
+    )
+    # Locate the env-var assignment line and confirm the immediately
+    # preceding 12 lines contain a MODE==rollback condition.
+    lines = text.splitlines()
+    target_idx = None
+    for i, line in enumerate(lines):
+        if "VERIFY_ALLOW_PRE_B3_DEGRADED=1" in line:
+            target_idx = i
+            break
+    assert target_idx is not None
+    preceding = "\n".join(lines[max(0, target_idx - 12):target_idx])
+    assert re.search(r'MODE.*==\s*"rollback"', preceding), (
+        f"VERIFY_ALLOW_PRE_B3_DEGRADED=1 must live inside a "
+        f"MODE==rollback conditional. Preceding 12 lines:\n"
+        f"{preceding}"
     )
 
 
@@ -323,11 +389,13 @@ class TestVerifyRuntime:
         assert "OK: chat /health.git_sha=5044173" in result.stdout
         assert "OK: admin /health.git_sha=5044173" in result.stdout
 
-    def test_pre_b3_plain_ok_body_degraded(self, tmp_path):
+    def test_pre_b3_plain_ok_body_in_rollback_mode_degrades(self, tmp_path):
         """Bug 2 R2 — /health returns plain text "ok" (pre-B3
-        rollback target). Verify must accept this as degraded
-        success (200 OK is sufficient when git_sha surface
-        doesn't yet exist), NOT crash on json.loads."""
+        rollback target). With `VERIFY_ALLOW_PRE_B3_DEGRADED=1`
+        (the gate deploy.sh exports on MODE=rollback), verify
+        accepts non-JSON as degraded success: 200 OK is sufficient
+        when git_sha surface doesn't yet exist. Verify must NOT
+        crash on json.loads."""
         servers = _start_health_servers(
             body_chat=b"ok", body_admin=b"ok",
         )
@@ -338,26 +406,72 @@ class TestVerifyRuntime:
             result = _run_verify(
                 "5044173",
                 docker_shim_dir=shim_dir,
-                env_extra={"VERIFY_HEALTHCHECK_BUDGET_S": "10"},
+                env_extra={
+                    "VERIFY_HEALTHCHECK_BUDGET_S": "10",
+                    # Simulate deploy.sh rollback-mode behaviour.
+                    "VERIFY_ALLOW_PRE_B3_DEGRADED": "1",
+                },
             )
         finally:
             _stop_servers(servers)
 
         assert result.returncode == 0, (
-            f"pre-B3 plain 'ok' body should DEGRADE to success, got rc="
-            f"{result.returncode}\nstdout:\n{result.stdout}"
-            f"\nstderr:\n{result.stderr}"
+            f"pre-B3 plain 'ok' body in rollback mode should DEGRADE "
+            f"to success, got rc={result.returncode}\nstdout:\n"
+            f"{result.stdout}\nstderr:\n{result.stderr}"
         )
         assert "non-JSON" in result.stdout or "pre-B3" in result.stdout, (
             "expected the degraded-mode marker in stdout so operators "
             "see why git_sha was skipped"
         )
 
-    def test_malformed_json_body_degrades_not_crashes(self, tmp_path):
-        """Defensive: malformed JSON body (truncated dict) is
-        treated as non-JSON degraded — not as a crash. A future
-        regression that drops the try/except would surface here
-        as a non-zero rc.
+    def test_forward_mode_plain_ok_body_fails_loud(self, tmp_path):
+        """User-requested gate (2026-05-25): non-JSON `/health` in
+        FORWARD mode (the env var is NOT set) is the silent-success
+        class that --expected-sha was meant to close — verify must
+        reject it, NOT degrade.
+
+        Pinned scenario: B3+ image's chat process starts but its
+        init failed silently and `/health` returns a generic error
+        string ("ok", "starting", "error"...) without a JSON
+        envelope. Pre-gating, verify would degrade and accept the
+        deploy. Post-gating, verify fails with exit 8 and the
+        operator sees the forward-mode silent-success guard fire.
+        """
+        servers = _start_health_servers(
+            body_chat=b"ok", body_admin=b"ok",
+        )
+        try:
+            shim_dir = tmp_path / "shim"
+            shim_dir.mkdir()
+            _write_docker_shim(shim_dir, health_sequence=["healthy"])
+            # NO VERIFY_ALLOW_PRE_B3_DEGRADED — this is a forward deploy.
+            result = _run_verify(
+                "5044173",
+                docker_shim_dir=shim_dir,
+                env_extra={"VERIFY_HEALTHCHECK_BUDGET_S": "10"},
+            )
+        finally:
+            _stop_servers(servers)
+
+        assert result.returncode == 8, (
+            f"forward mode + non-JSON /health must exit 8 (silent-"
+            f"success guard), got rc={result.returncode}\nstdout:\n"
+            f"{result.stdout}\nstderr:\n{result.stderr}"
+        )
+        assert "forward deploy" in result.stderr, (
+            "expected the 'forward deploy' marker in stderr explaining "
+            "why non-JSON was rejected"
+        )
+
+    def test_malformed_json_in_forward_mode_fails_loud(self, tmp_path):
+        """Defensive — malformed JSON body (truncated dict) in
+        forward mode fails loud (exit 8), same path as plain "ok".
+        Verifies the json.loads guard is still in place (no crash)
+        AND that the gate fires for any non-parseable body, not
+        just plain text. A future regression that drops the
+        try/except surfaces here as a CRASH (rc != 8) — distinct
+        from "guard works but body wasn't acceptable" (rc == 8).
         """
         servers = _start_health_servers(
             body_chat=b'{"git_sha":',  # truncated
@@ -367,6 +481,7 @@ class TestVerifyRuntime:
             shim_dir = tmp_path / "shim"
             shim_dir.mkdir()
             _write_docker_shim(shim_dir, health_sequence=["healthy"])
+            # Forward mode — gate active.
             result = _run_verify(
                 "5044173",
                 docker_shim_dir=shim_dir,
@@ -375,12 +490,10 @@ class TestVerifyRuntime:
         finally:
             _stop_servers(servers)
 
-        # Malformed → degraded path; rc must be 0 (script did not
-        # crash). Even though the body looks like JSON, it doesn't
-        # parse — same exit path as plain text "ok".
-        assert result.returncode == 0, (
-            f"malformed JSON must not crash verify; got rc="
-            f"{result.returncode}\nstderr:\n{result.stderr}"
+        assert result.returncode == 8, (
+            f"malformed JSON in forward mode must exit 8 (gated "
+            f"silent-success refusal), not crash and not degrade; "
+            f"got rc={result.returncode}\nstderr:\n{result.stderr}"
         )
 
     def test_b3_json_with_matching_sha(self, tmp_path):

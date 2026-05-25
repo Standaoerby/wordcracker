@@ -1780,6 +1780,18 @@ until the verify script could distinguish "not yet warm" from
   enforced. This is the only honest contract for pre-B3 rollback
   targets — refusing them on a JSON surface they never offered
   would lock out the rollback path entirely.
+- **Degraded mode is GATED to rollback only** via env var
+  `VERIFY_ALLOW_PRE_B3_DEGRADED=1`. `deploy.sh` exports this on
+  its `--rollback` path; forward deploys never set it. Forward
+  + non-JSON `/health` exits `rc=8` (silent-success refusal).
+  Rationale: a B3+ image whose init failed silently (chat
+  process up but `/health` returning a generic error string)
+  would, under unconditional degrade, pass verify and let the
+  deploy "succeed" — exactly the silent-success class that
+  ADR-B4's `--expected-sha` was added to close. The gate ties
+  degraded-mode legitimacy to the only context where it is
+  honest: rolling back to an image that predates the JSON
+  surface contract.
 - JSON-but-malformed (not a dict, or missing `git_sha`) still
   fails loud (`rc=7`). Degraded mode is exclusively for
   non-parseable bodies — once you've claimed JSON, the shape
@@ -1797,15 +1809,16 @@ sets them):
 
 **R2 negative tests.**
 [tests/v2/test_verify_deployed_image.py](tests/v2/test_verify_deployed_image.py)
-carries six runtime gates (Linux-only per the S-B5 quarantine
-pattern — needs bash + a PATH-shim trick) plus four static parse
+carries seven runtime gates (Linux-only per the S-B5 quarantine
+pattern — needs bash + a PATH-shim trick) plus six static parse
 gates that always run:
 
 | Test | What it pins |
 |---|---|
 | `test_slow_service_polling_succeeds` | Docker shim returns `starting × 2 → healthy`; verify polls and succeeds (Bug 1). |
-| `test_pre_b3_plain_ok_body_degraded` | `/health` returns `"ok"`; verify accepts as degraded (Bug 2). |
-| `test_malformed_json_body_degrades_not_crashes` | Truncated JSON; verify does not crash. |
+| `test_pre_b3_plain_ok_body_in_rollback_mode_degrades` | `VERIFY_ALLOW_PRE_B3_DEGRADED=1` + `/health` = `"ok"` → degraded OK (Bug 2, rollback path). |
+| `test_forward_mode_plain_ok_body_fails_loud` | **Gate**: forward (env not set) + `/health` = `"ok"` → `rc=8` (closes silent-success class for forward deploys). |
+| `test_malformed_json_in_forward_mode_fails_loud` | Forward + truncated JSON → `rc=8`, not crash, not degrade. |
 | `test_b3_json_with_matching_sha` | Happy path — `git_sha` matches → OK. |
 | `test_b3_json_with_mismatched_sha_fails_loud` | Mismatch is **loud** (`rc=7`), not silent. |
 | `test_poll_budget_exhausted_fails_loud` | Always-`starting` → `rc=6` after budget (no infinite block). |
@@ -1813,11 +1826,16 @@ gates that always run:
 | `test_verify_has_budget_and_sleep` (static) | Pin budget env var + `sleep` inside poll. |
 | `test_verify_guards_json_loads` (static) | Pin `JSONDecodeError` handler exists. |
 | `test_verify_has_degraded_mode_marker` (static) | Pin the `non-JSON` / `pre-B3` label. |
+| `test_verify_gates_degraded_mode_to_rollback_env` (static) | Pin `VERIFY_ALLOW_PRE_B3_DEGRADED` gate + `rc=8` forward-fail path. |
+| `test_deploy_sh_sets_degrade_env_only_in_rollback` (static) | Pin `deploy.sh` sets the env var ONLY under `MODE=="rollback"` conditional. |
 
 **Acceptance.** Verify against the deployed S-F1 image succeeds
-(JSON path, polling waits for warmup). Verify against the
-rollback target `bac0b80` succeeds (degraded path, no crash).
-The rollback-to-pre-B3 dead-end is closed.
+(JSON path, polling waits for warmup, no degraded fallback
+available because `VERIFY_ALLOW_PRE_B3_DEGRADED` unset on
+forward). Verify against the rollback target `bac0b80` succeeds
+(degraded path, env set by `deploy.sh` `--rollback`). The
+rollback-to-pre-B3 dead-end is closed; the forward-deploy
+silent-success vector is held closed by the gate.
 
 ### Negative tests (R2)
 

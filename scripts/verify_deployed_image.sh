@@ -152,9 +152,16 @@ fi
 #           is plain text there). `set -e` aborted the script; the
 #           operator saw "ROLLBACK ALSO FAILED" while the host was
 #           in fact fine on bac0b80. Fix: wrap json.loads in
-#           try/except — non-JSON body is degraded mode for pre-B3
-#           images (200 OK is sufficient, git_sha not enforced).
-#           Closes the rollback-to-pre-B3 dead-end.
+#           try/except — non-JSON body is degraded mode (200 OK is
+#           sufficient, git_sha not enforced). GATED to rollback
+#           mode only via VERIFY_ALLOW_PRE_B3_DEGRADED=1 (deploy.sh
+#           exports this only on its --rollback path). Forward
+#           deploys ALWAYS require JSON /health with git_sha; non-
+#           JSON in forward mode is exit 8 — the silent-success
+#           class that ADR-B4's --expected-sha gate exists to close
+#           is left closed. Closes the rollback-to-pre-B3 dead-end
+#           without re-opening the forward-deploy silent-success
+#           vector.
 # VERIFY_HEALTHCHECK_BUDGET_S env (default 180) sizes the poll
 # budget. VERIFY_SKIP_DOCKER_HEALTHCHECK=1 bypasses the docker
 # inspect poll (used by tests/v2/test_verify_deployed_image.py on
@@ -260,9 +267,30 @@ else:
         case "$sha" in
             "<non-json-body>")
                 # Pre-B3 image (e.g. bac0b80) — /health is plain text.
-                # Don't refuse the rollback target on this surface;
-                # 200 OK is the contract that existed before B3.
-                echo "OK: ${svc} /health returned non-JSON body (pre-B3 image — degraded check, 200 OK sufficient, git_sha not enforced)"
+                # GATED: degraded mode is ONLY legitimate in rollback
+                # to a pre-B3 target. Forward deploy of a B3+ image
+                # must emit JSON with git_sha; non-JSON in forward
+                # mode is the silent-success class --expected-sha was
+                # meant to close (e.g. B3 init failed, chat process
+                # serving a generic error string), and accepting it
+                # would re-introduce exactly that failure mode.
+                # deploy.sh sets VERIFY_ALLOW_PRE_B3_DEGRADED=1 only
+                # on its rollback path (MODE=rollback).
+                if [[ "${VERIFY_ALLOW_PRE_B3_DEGRADED:-0}" == "1" ]]; then
+                    echo "OK: ${svc} /health returned non-JSON body (pre-B3 rollback target — degraded check, 200 OK sufficient, git_sha not enforced)"
+                else
+                    cat >&2 <<EOF
+FAIL: ${svc} /health returned non-JSON body, but this is a forward deploy.
+  B3+ images MUST emit JSON {"git_sha":"...",...} on /health.
+  Non-JSON in forward mode is the silent-success class that ADR-B4's
+  --expected-sha gate closes — refused here for the same reason.
+  body: ${body}
+  surface: http://127.0.0.1:${port}/health
+  (Degraded mode is set by deploy.sh only on its rollback path
+   via VERIFY_ALLOW_PRE_B3_DEGRADED=1; not for forward deploys.)
+EOF
+                    rc=8
+                fi
                 ;;
             "<non-dict-json>"|"<no-git_sha-field>")
                 # JSON parsed but the shape is wrong (top-level not a
