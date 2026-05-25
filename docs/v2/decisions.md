@@ -226,6 +226,69 @@ asserts a non-zero exit + collection error in the output.
   skip count is a signal — not a problem — that the next blocks
   (corpus-fixture, service-stub) need to land.
 
+### Closeout (S-B5 / ADR-B7)
+
+**First green CI run after the wiring landed:**
+[predeploy run 26381278129](https://github.com/Standaoerby/wordcracker/actions/runs/26381278129)
+on commit `742e4df`. Job durations: `tests-v2` 3m 44s wall
+(`pytest tests/v2 -v` itself 1m 12s), `12-probe config sanity`
+10 s, `Mandatory version-bump` 5 s. **First green
+`tests/v2 (R10 …)` job since the workflow was created on
+2026-05-24** — the previous 15 / 15 runs were red because the
+install step never matched what the prod image bakes. R10 ✓ in
+this and future closeouts means *this CI job is green*, not
+"local pytest looked OK."
+
+**Suite result on CI:** `2083 passed, 16 skipped, 565 subtests
+passed` (out of 2097 collected — collection errors: 0). All 16
+skips are pre-existing env-gated `unittest.skipUnless` /
+`skipIf` markers — **0 quarantines were added under S-B5**. The
+breakdown:
+
+| File                              | Count | Marker                                                              | Reason / follow-up                                                                                                              |
+|-----------------------------------|-------|---------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------|
+| `test_golden_v5.py`               | 12    | `unittest.skipUnless(_LIVE, …)` (env `WC_GOLDEN_LIVE=1`)            | Behavioural goldens against a live stack + live corpus. Run only on the prod host. Follow-up: corpus-fixture story (post-S-F1). |
+| `test_entity_resolver_v5.py`      | 3     | `unittest.skipIf(_V6_ON, "v5-specific test; v6 is default")`        | v5 resolver is dead code under v6 default. Follow-up: removed under Phase 1 (S-F4 collapse-generations).                        |
+| `test_v1_contracts.py::Live…`     | 1     | `unittest.skipUnless(WC_CONTRACT_LIVE_V1=1, …)`                     | Live-v1 contract check — needs the corpus loaded. Same corpus-fixture story as `test_golden_v5.py`.                              |
+
+None of the 16 skips was introduced to make S-B5 green; the
+previously hand-listed `s-b4-acceptance` and
+`test-cache-race-linux` jobs simply never executed the other
+~240 tests, so the failure modes they would have exposed
+(import errors at collect, runtime errors needing a live env)
+were invisible. The full-directory run on a fully-installed
+runner shows there were none in the dark — everything not
+explicitly env-gated passes.
+
+**What S-B5 closes structurally.**
+
+- R10 gate is no longer fiction — `pytest tests/v2 --collect-only`
+  ran clean against the **full prod dependency surface**, not
+  against `pip install pytest`. Future closeouts cannot truthfully
+  claim "R10 ✓" without a green `tests-v2` job — there is no other
+  R10 surface.
+- The hand-curated file lists are gone. New test files added under
+  S-F1…S-R4 / S-A* / S-C* / S-P* will run on every push without
+  any workflow edit. The "invisible test file" failure mode is
+  closed.
+- The decorative-CI failure mode that produced five sequential
+  silent-failure deploys under S-B1…S-B4 (closeouts wrote
+  "R10 ✓" while CI was red) cannot recur: the same job that wrote
+  the green checkmark IS the gate.
+
+**Out-of-scope follow-ups noted by the first green run.**
+
+- Node.js 20 deprecation warnings on `actions/checkout@v4`,
+  `actions/setup-python@v5`, `actions/cache@v4`. GitHub forces
+  Node.js 24 on 2026-06-02; Node.js 20 removed 2026-09-16.
+  Non-blocking. Follow-up: bump action versions or set
+  `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` before 2026-09-16.
+  Out of scope for S-B5.
+- `~7 GB` install on the runner with `~3.5 GB` pip cache saved.
+  Both well within ubuntu-latest headroom after the
+  `rm -rf /opt/hostedtoolcache` step. No action needed; monitor
+  if a future lock upgrade pushes against the cap.
+
 ---
 
 
