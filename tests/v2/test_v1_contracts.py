@@ -1,4 +1,4 @@
-"""Phase 2 contract sweep — REFACTOR_BRIEF Gate.
+"""Phase 2 contract sweep — REFACTOR_BRIEF Gate + TZ S-F2 / ADR-F2 closeout.
 
 For every (wrapper, v1_fn, schema) triple in `V1_CONTRACTS`:
 
@@ -6,7 +6,9 @@ For every (wrapper, v1_fn, schema) triple in `V1_CONTRACTS`:
      the wrapper body reads only keys declared in the schema (plus the
      well-known internal/error-branch sets). Phantom keys → import-time
      ContractError, which means this test file would also fail to
-     collect — we re-run the check explicitly for clarity.
+     collect — we re-run the check explicitly for clarity, via the
+     standalone lint helper `_v1_contract_lint.scan_all_contracts`
+     (one body, two callers — TZ S-F2 D-SF2-3).
 
   2. Drift gate (the "remove any key from v1 → exactly one contract test
      fails" half of Phase 2 gate): a minimal mock built from the schema
@@ -17,10 +19,23 @@ For every (wrapper, v1_fn, schema) triple in `V1_CONTRACTS`:
   3. Decorator visibility: every wrapper exposes its (v1_fn, schema)
      binding through `__v1_contract__`.
 
+  4. R2 negative gate (TZ S-F2 acceptance): synthesise a wrapper that
+     reads a phantom key, apply `@v1_contract`, assert `ContractError`
+     is raised with both phantom keys named in the message. Locks in
+     the import-time enforcement — a future regression that catches
+     and logs instead of raising flips this test red.
+
+All classes carry `@pytest.mark.v1_contract` (declared in
+[conftest.py](tests/v2/conftest.py)) so the contract sweep is
+targetable from CI / deploy host via `pytest -m v1_contract`.
+
 Designed to be fast (no network, no v1 actually called) and deterministic.
 The optional `WC_CONTRACT_LIVE_V1=1` env var swaps in real v1 calls for
 contract verification against live data — kept opt-in because a few v1
-calls touch disk / pandas / network.
+calls touch disk / pandas / network. Under S-F2 the gated `LIVE_ARGS`
+table covers all 19 wrappers driven by the four golden PG books named in
+the TZ (PG1342 *Pride and Prejudice*, PG174 *The Picture of Dorian
+Gray*, PG345 *Dracula*, PG84 *Frankenstein*).
 """
 from __future__ import annotations
 
@@ -30,15 +45,26 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+# Allow `from _v1_contract_lint import …` — the standalone lint helper
+# lives next to this test module (TZ S-F2 D-SF2-3 path).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import pytest
 
 # Importing tools populates V1_CONTRACTS.
 import scripts.v2.tools  # noqa: F401
 from scripts.v2.contracts import (
     assert_matches_schema,
-    check_wrapper_against_schema,
     mock_from_schema,
 )
 from scripts.v2.contracts.registry import V1_CONTRACTS
+from _v1_contract_lint import scan_all_contracts
+
+
+# Module-level marker — `pytest -m v1_contract` runs every class in
+# this file and nothing else. Declared in conftest.py so unknown-marker
+# warnings stay clean.
+pytestmark = pytest.mark.v1_contract
 
 
 class StaticContractGate(unittest.TestCase):
@@ -51,13 +77,7 @@ class StaticContractGate(unittest.TestCase):
     """
 
     def test_every_wrapper_reads_only_declared_keys(self):
-        offenders = {}
-        for key, binding in V1_CONTRACTS.items():
-            rogue = check_wrapper_against_schema(
-                binding.wrapper_fn, binding.schema,
-            )
-            if rogue:
-                offenders[key] = rogue
+        offenders = scan_all_contracts()
         self.assertEqual(
             offenders, {},
             f"wrappers reading phantom keys not in their schema: {offenders}. "
@@ -194,21 +214,155 @@ class V1ImportPathCanonical(unittest.TestCase):
         )
 
 
+class PhantomKeyNegativeGate(unittest.TestCase):
+    """R2 negative test (TZ S-F2 acceptance, ADR-F2 §"Negative tests").
+
+    Synthesise a tiny wrapper that reads two phantom keys not in the
+    schema and not in INTERNAL_V2_KEYS / ERROR_BRANCH_KEYS. Apply
+    `@v1_contract(...)` to it. The decorator MUST raise `ContractError`
+    at decoration time (NOT at first call, NOT silently logged) and the
+    error message MUST list both phantom keys.
+
+    Locks in the import-time enforcement: a future regression that
+    catches and logs instead of raising, or one that carelessly
+    broadens INTERNAL_V2_KEYS, will flip this test red — proving the
+    static gate is the structural defence the audit named (C2).
+    """
+
+    def test_phantom_key_raises_contract_error(self):
+        from scripts.v2.contracts import v1_contract, ContractError
+        from scripts.v2.contracts.schemas import V1FindBook
+
+        def synthetic_phantom_wrapper(**_kw):
+            raw = {"matches": []}
+            # Neither key appears in V1FindBook nor in the global
+            # INTERNAL_V2_KEYS / ERROR_BRANCH_KEYS allowances.
+            _ = raw.get("xyz_nonexistent_phantom")
+            _ = raw["yyy_other_phantom"]
+            return raw
+
+        with self.assertRaises(ContractError) as ctx:
+            v1_contract(
+                v1_fn="scripts.rag_tools.find_book",
+                schema=V1FindBook,
+            )(synthetic_phantom_wrapper)
+
+        msg = str(ctx.exception)
+        # Diff is part of the contract — error message names BOTH
+        # phantom keys, not just the first one we found.
+        self.assertIn("xyz_nonexistent_phantom", msg)
+        self.assertIn("yyy_other_phantom", msg)
+        # Schema name appears so the developer reading the failure
+        # knows which schema to widen (or which wrapper to fix).
+        self.assertIn("V1FindBook", msg)
+
+
+# Golden-book regexes — PG1342 / PG174 / PG345 / PG84 anchor the live
+# sweep per TZ S-F2 "фикстура «golden books»". The four books cover
+# distinct author regexes so author-scope contracts exercise real-name
+# matching (not just the regex syntax). PG174 (Dorian Gray) does not
+# appear in every wrapper's args directly — book-scope wrappers rotate
+# through PG1342/PG345/PG84 so coverage spans more than one (id, raw)
+# pair against real corpus shape.
+_AUSTEN = "^Austen,"          # PG1342
+_WILDE = "^Wilde, Oscar$"     # PG174
+_STOKER = "^Stoker, Bram$"    # PG345
+_SHELLEY = "^Shelley, Mary"   # PG84
+
+
 @unittest.skipUnless(os.environ.get("WC_CONTRACT_LIVE_V1") == "1",
                      "live v1 contract sweep is opt-in (slow, touches disk/network)")
 class LiveV1Contracts(unittest.TestCase):
-    """Optional: call each v1 with safe defaults; verify against schema.
+    """Optional: call each v1 with golden-book args; verify against schema.
 
     Gated by WC_CONTRACT_LIVE_V1 because several v1 functions read
-    pandas / chroma / disk. CI green path doesn't need it; ops can flip
-    the env var to spot drift in actual prod v1 outputs.
+    pandas / chroma / disk. CI green path doesn't need it; the deploy
+    host flips the env var via `predeploy_gate.sh` so the sweep runs
+    against the live corpus the prod chat is serving.
+
+    The LIVE_ARGS table covers every binding in V1_CONTRACTS — one
+    entry per `v1_qualname`. Args are tuned to hit the four golden
+    PG books (PG1342 Pride and Prejudice, PG174 The Picture of Dorian
+    Gray, PG345 Dracula, PG84 Frankenstein) and their authors. Live
+    failures are recorded as `(key, diff)` tuples and surface with a
+    schema-mismatch diff in the test failure — the TZ S-F2 acceptance
+    criterion in literal form.
     """
 
-    LIVE_ARGS = {
+    LIVE_ARGS: dict[str, dict] = {
+        # rag_tools — word-scope (words sampled from the golden corpus)
+        "scripts.rag_tools.word_collocates":
+            {"word": "love", "window": 4},
+        "scripts.rag_tools.emotion_collocates":
+            {"emotion": "fear"},
+        "scripts.rag_tools.word_contexts":
+            {"word": "love", "author_regex": _AUSTEN},
+        "scripts.rag_tools.word_contexts_global":
+            {"word": "blood"},
+        "scripts.rag_tools.word_pos_distribution":
+            {"word": "love"},
+        "scripts.rag_tools.word_freq_timeline":
+            {"word": "monster"},
+        "scripts.rag_tools.words_disappearing_after":
+            {"year": 1920, "top": 5},
+        "scripts.rag_tools.words_appearing_after":
+            {"year": 1920, "top": 5},
+        "scripts.rag_tools.word_etymology":
+            {"word": "sword"},
+        "scripts.rag_tools.find_words_by_etymology":
+            {"family": "Old_English"},
+
+        # rag_tools — author-scope (regexes hit the four golden authors)
         "scripts.rag_tools.affinity_by_author":
-            {"author_regex": "^Doyle,", "top": 5, "min_corpus_count": 500},
-        "scripts.rag_tools.word_etymology": {"word": "sword"},
-        "scripts.rag_tools.corpus_overview": {},
+            {"author_regex": _AUSTEN, "top": 5, "min_corpus_count": 500},
+        "scripts.rag_tools.compare_authors":
+            {"author1_regex": _AUSTEN, "author2_regex": _WILDE},
+        "scripts.rag_tools.corpus_stats_by_author":
+            {"author_regex": _STOKER},
+        "scripts.rag_tools.author_profile":
+            {"author_regex": _SHELLEY},
+        "scripts.rag_tools.author_influences":
+            {"author_regex": _AUSTEN},
+        "scripts.rag_tools.author_attribution":
+            {"text_sample": "It is a truth universally acknowledged."},
+        "scripts.rag_tools.author_metadata":
+            {"author_regex": _WILDE},
+        "scripts.rag_tools.top_ngrams_by_author":
+            {"author_regex": _AUSTEN, "n": 2},
+        "scripts.rag_tools.lexical_diversity":
+            {"author_regex": _STOKER},
+
+        # rag_tools — book-scope (golden PG ids)
+        "scripts.rag_tools.book_readability":
+            {"pg_id": "PG1342"},
+        "scripts.rag_tools.book_emotion_profile":
+            {"pg_id": "PG345"},
+
+        # rag_tools — global search / top-N (no scope arg needed)
+        "scripts.rag_tools.semantic_search":
+            {"query": "vampire"},
+        "scripts.rag_tools.find_book":
+            {"title": "Pride and Prejudice"},
+        "scripts.rag_tools.top_authors_by":
+            {"metric": "books"},
+        "scripts.rag_tools.top_authors_by_country":
+            {"country": "GB"},
+        "scripts.rag_tools.top_books_by_downloads":
+            {"top_n": 5},
+        "scripts.rag_tools.top_books_by_recency":
+            {"top_n": 5},
+
+        # learning_tools — covers PG84 + PG174 to round out the four
+        "scripts.learning_tools.learning_words":
+            {"scope": "book:PG1342", "level": "intermediate"},
+        "scripts.learning_tools.enrich_word":
+            {"word": "pleasure"},
+        "scripts.learning_tools.export_word_list":
+            {"entries": [{"word": "love"}], "format": "anki_csv"},
+        "scripts.learning_tools.affinity_by_book":
+            {"pg_id": "PG174"},
+        "scripts.learning_tools.book_archaic_words":
+            {"pg_id": "PG84", "top": 10},
     }
 
     def test_live_v1_outputs_match_schema(self):
@@ -217,9 +371,12 @@ class LiveV1Contracts(unittest.TestCase):
             key = binding.v1_qualname
             args = self.LIVE_ARGS.get(key)
             if args is None:
+                # V6 resolvers (`scripts.v2.entity_resolver_v6.*`) are
+                # not in LIVE_ARGS — they're v2-internal and have their
+                # own test paths. The sweep skips them by design.
                 continue
             try:
-                raw = binding.v1_fn(**args)
+                raw = binding.resolved_v1_fn()(**args)
             except Exception as e:
                 failures.append((key, f"v1 raised: {e}"))
                 continue

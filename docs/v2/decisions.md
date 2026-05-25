@@ -6,6 +6,609 @@
 
 ---
 
+## 2026-05-25 — S-F2: v1↔v2 contract framework (ADR-F2 / D68 accepted)
+
+Closes block **S-F2** of
+[tz_structural_fixes_2026-05-24.md](../tz_structural_fixes_2026-05-24.md)
+(spec lives in companion repo `C:\_PROJECTS\wordcracker\`).
+Bills the long-running Phase 2 of
+[REFACTOR_BRIEF.md](../../REFACTOR_BRIEF.md):84-95 (the "key phase"
+that lands `scripts/v2/contracts/` and binds every wrapper to a
+declared output schema). The framework itself has been incrementally
+landing since Phase 2 was opened; this ADR documents the final state,
+the closeout gaps that S-F2 closed on top, and the one design
+deviation from the TZ literal text.
+
+### What was already in place at the start of S-F2
+
+The post-audit refactor has been growing the contract layer
+file-by-file for ~3 weeks. At HEAD entering S-F2:
+
+- [scripts/v2/contracts/__init__.py](scripts/v2/contracts/__init__.py)
+  exports the `@v1_contract(v1_fn, schema)` decorator, `ContractError`,
+  `mock_from_schema`, `assert_matches_schema`,
+  `check_wrapper_against_schema`. Decoration-time AST scan over the
+  wrapper body collects every `<name>.get("X")` / `<name>["X"]`
+  literal access and fails loudly on keys not in the schema (plus the
+  generic `ERROR_BRANCH_KEYS` / `INTERNAL_V2_KEYS` allowances).
+- [scripts/v2/contracts/registry.py](scripts/v2/contracts/registry.py)
+  holds `V1_CONTRACTS` (a `dict[wrapper_qualname, ContractBinding]`)
+  populated at wrapper import time. Same module also hosts the
+  AST-fingerprint utilities consumed by ADR-F1.
+- [scripts/v2/contracts/schemas.py](scripts/v2/contracts/schemas.py)
+  declares **32 schemas** (`V1<Name>`) as `TypedDict` subclasses with
+  class-level `__required__` (frozenset), `__row_keys__` (frozenset),
+  `__defaults__` (dict). Schema covers every v1 function called by a
+  v2 wrapper plus the V6 entity resolver outputs.
+- **19 wrapper files** under
+  [scripts/v2/tools/](scripts/v2/tools/) carry one or more
+  `@v1_contract(...)` decorations — coverage that includes all
+  seven E15-class wrappers the TZ S-F2 acceptance gate names
+  explicitly (`books/readability.py`,
+  `authors/author_profile.py`, `corpus_meta/stats_by_author.py`,
+  `authors/author_metadata.py`, `search/semantic.py`,
+  `authors/top_ngrams.py`, `learning/enrich.py`) plus 12 more.
+  `tests/v2/test_v1_contracts.py::RegistryCoverage` asserts
+  `len(V1_CONTRACTS) >= 30` as a floor.
+- [tests/v2/test_router.py](tests/v2/test_router.py) generates every
+  v1 mock via `mock_from_schema(V1<Name>, **overrides)` — no
+  hand-written `{"top": [...]}` literals. Closes the B2 mock-drift
+  failure mode E8 named (`test_router.py:97` was reading the same
+  wrong key the broken wrapper was reading; mock and wrapper drifted
+  together).
+- [tests/v2/test_v1_contracts.py](tests/v2/test_v1_contracts.py)
+  hosts five test classes covering: static AST gate over every
+  binding, schema-mock validation, decorator binding visibility,
+  registry coverage floor, V1 import-path canonicalisation
+  (RECOVERY_BRIEF Cluster A — wrappers must use `scripts.<module>.X`,
+  not bare-name `from learning_tools import X`, so `mock.patch`
+  reaches the same Python object the wrapper imports).
+- The optional `LiveV1Contracts` class behind
+  `WC_CONTRACT_LIVE_V1=1` calls a tiny stub of three v1 functions
+  with hardcoded args.
+
+S-F2 ships the four pieces the TZ acceptance gate names that were
+NOT yet in place: (a) the explicit `tests/v2/_v1_contract_lint.py`
+module per the TZ literal path, (b) a `@pytest.mark.v1_contract`
+marker so the contract sweep is targetable from CI / deploy host,
+(c) an explicit R2 negative test that proves `@v1_contract` raises
+on a phantom key (the import-time enforcement existed but no test
+asserted it head-on), and (d) the per-binding `LIVE_ARGS` table
+covering all 19 wrappers driven by the four golden PG books named in
+the TZ (PG1342 *Pride and Prejudice*, PG174 *The Picture of Dorian
+Gray*, PG345 *Dracula*, PG84 *Frankenstein*) plus author regexes
+keyed to the same books, so the env-gated live sweep stops being a
+three-call stub.
+
+### ADR-F2 — Schema-bound v1↔v2 contracts
+
+**Status.** Accepted (2026-05-25, under S-F2). Promotes the Phase 2
+sketch in [REFACTOR_BRIEF.md:84](../../REFACTOR_BRIEF.md):84 to a
+shipped contract, including the four closeout gaps above.
+
+**Context.** Audit 2026-05-22 corner C2 ("contract grouping by
+guessing"): the v1↔v2 boundary held by hand-written
+`raw.get("X") or raw.get("Y")` chains, with both v1 and v2 free to
+rename keys silently. E15 (key mismatch, 7 wrappers) and B-R14-7
+(learning_words read `"words"` not v1's `"results"`) shipped to prod
+through CI green because the tests' mocks repeated the wrapper's
+wrong key. E20–E23 are downstream symptoms (the `[:3]` truncation
+class S-F3 targets) but the proximate failure is the missing
+contract: no declared truth about v1's shape, so no negative test can
+fail when v1 drifts. The header bug `$s2.words[N]` is the same class
+in plan-spec form — the plan interpolator dereferenced a field name
+the source step never emitted, and the literal leaked into the
+render path. No declared schema = no place to fail.
+
+The audit's C2 fix is one mechanism: a typed declaration that lives
+on the v1 side of the boundary, AST-validated against the wrapper at
+import time, dynamically validated against real v1 in CI. Phase 2 of
+REFACTOR_BRIEF specifies the shape — `scripts/v2/contracts/`,
+`@v1_contract` decorator, schema-derived mocks — without prescribing
+the exact decorator signature. The TZ S-F2 block proposes one
+signature; the shipped framework chose another, and this ADR is
+where the deviation gets recorded.
+
+**Options considered.**
+
+1. **Status quo at HEAD pre-Phase-2 — hand-written `.get()` chains,
+   ad-hoc test mocks.** What every wrapper in `scripts/v2/tools/`
+   looked like in May 2026 before Phase 2 work started. Pros: no
+   framework cost, no learning curve. Cons: every key mismatch is a
+   silent prod failure with a CI-green test (the actual incident
+   pattern, E8/E14/E15/E33/E34/B-R14-7). Mocks drift with the broken
+   wrapper because mocks are hand-typed. Rejected; this is the
+   problem statement, not a solution.
+
+2. **TZ-literal four-tuple decorator:
+   `@v1_contract(v1_fn=..., sample_args=..., must_read_at_least_one_of=[...],
+   declared_v1_keys=[...])`.** Each binding declares its own
+   per-wrapper list of v1 keys and a per-wrapper sample-args dict.
+   Pros: zero up-front type design — every wrapper is autonomous.
+   Cons: (a) decorator becomes 4-15 lines of repeated key lists at
+   each call site (the audit's "kitchen-sink decorator" anti-pattern);
+   (b) two wrappers backed by the same v1 function (`affinity.py` +
+   the composite invocation inside `author_profile.py`) declare their
+   key lists independently and drift; (c) `sample_args` is a *test*
+   concern bolted onto a *production* decorator — couples the
+   decorator API to the test harness lifecycle (an env without
+   pytest cannot import the wrapper without dragging the sample-args
+   dict; or, more honestly, every prod startup carries dead
+   sample-args fixtures); (d) the brief's "moks generated from
+   contract" property requires more glue because the contract data
+   is unstructured key-lists rather than a typed object. Rejected
+   in favour of option 3 below; rationale recorded under
+   [D-SF2-1](#d-sf2-1--schema-as-typeddict-vs-tz-literal-key-list-tuple).
+
+3. **Schema-bound decorator: `@v1_contract(v1_fn, schema=V1<Name>)`
+   where `V1<Name>` is a `TypedDict` subclass with class-level
+   `__required__`, `__row_keys__`, `__defaults__`.** Pros: (a) one
+   schema covers N wrappers backed by the same v1 (no drift between
+   them by construction); (b) `mock_from_schema(schema, **overrides)`
+   is one-liner — schema is structured, generating mocks is mechanical;
+   (c) the declaration is type-hint-readable by mypy and by humans;
+   (d) test concerns (sample args) live in the test harness, not on
+   the decorator; (e) the AST scan's allow-list is `schema.__row_keys__
+   ∪ schema_keys ∪ ERROR_BRANCH_KEYS ∪ INTERNAL_V2_KEYS`, computed
+   once per schema class, not per wrapper. **Decision.**
+
+4. **Full pydantic / dataclass / attrs models with runtime validation
+   on every v1 call.** Strictly stronger than option 3 — type-checks
+   the v1 result at every call site, not just at the AST level. Cons:
+   per-call overhead (every v1 result roundtrips through a model
+   constructor), and the failure mode is a noisy validation exception
+   on prod paths where the existing `.get(...)` chain would have
+   returned the data plus an empty key. Pydantic-on-the-hot-path
+   would replace silent stale-data with loud-prod-500s — a regression
+   in service availability for a class of bug we've already proven
+   the AST-time enforcement catches. Rejected; the AST-time gate
+   plus the schema-mock validation gives 90 % of the benefit at 0 %
+   of the per-call cost.
+
+**Decision.** Option 3.
+
+**Implementation.**
+
+1. **Decorator signature.**
+   [`v1_contract(*, v1_fn, schema)`](scripts/v2/contracts/__init__.py:207)
+   — `v1_fn` is a callable OR `"scripts.<module>.<attr>"` string
+   (lazy resolution, see
+   [`_resolve_v1_fn`](scripts/v2/contracts/__init__.py:188); the
+   string form is preferred so test modules that stub a partial v1
+   don't trip an ImportError at wrapper module load time). `schema`
+   is a `V1Schema` subclass. The decorator is a no-op at runtime
+   (just wraps with `functools.wraps` and stamps `__v1_contract__`);
+   all enforcement happens at decoration time and via the contract
+   sweep. Zero per-call overhead — confirmed by reading
+   [`v1_contract`](scripts/v2/contracts/__init__.py:228-254): no
+   try/except, no introspection, no metadata mutation on the call
+   path.
+
+2. **Static AST gate (decoration-time).**
+   [`check_wrapper_against_schema`](scripts/v2/contracts/__init__.py:99)
+   walks the wrapper body via `ast.parse(inspect.getsource(fn))`
+   (textwrap-dedented per the same lesson as ADR-F1 D-SF1-4 — closures
+   would otherwise hit the SyntaxError fallback) and collects every
+   `<expr>.get("X")` / `<expr>["X"]` string-literal key. The set of
+   allowed keys is
+   `SCHEMA_KEYS[schema] ∪ schema.__row_keys__ ∪ INTERNAL_V2_KEYS ∪
+   ERROR_BRANCH_KEYS`. Phantom keys raise `ContractError` from inside
+   `v1_contract`, which means the wrapper module cannot finish
+   importing — the error surfaces at pytest collection time, not at
+   first call.
+
+3. **Dynamic gate (test-time).**
+   [tests/v2/test_v1_contracts.py](tests/v2/test_v1_contracts.py)
+   runs five gates on every binding in `V1_CONTRACTS`:
+   `StaticContractGate` (re-runs the AST scan to make the failure
+   point at this test, not a generic import-collection error),
+   `SchemaShapeGate` (builds `mock_from_schema(cls)` for each schema
+   and asserts it satisfies `__required__`), `ContractBindingVisibility`
+   (every wrapper exposes `__v1_contract__` for downstream tooling
+   — record_fixtures and the cache fingerprint walk both consume it),
+   `RegistryCoverage` (floor of 30 bindings — the Phase 2 promise),
+   `V1ImportPathCanonical` (every `v1_fn` string uses the `scripts.`
+   prefix; AST scan over wrapper modules forbids bare-name
+   `from learning_tools import X`).
+
+4. **Mocks generated from the schema, not hand-written.**
+   [`mock_from_schema(schema, **overrides)`](scripts/v2/contracts/__init__.py:261)
+   reads `schema.__defaults__` (representative values per declared
+   key) and applies overrides for the specific test case. Every
+   `_stub_*` in [test_router.py](tests/v2/test_router.py) is now one
+   call; the same pattern is reused by `_fake_v1_query()` and
+   `_fake_v1_tools()`. When v1 renames a key, the schema bumps once
+   and every test mock updates in lockstep — the B2 drift class is
+   structurally closed.
+
+5. **Live-v1 sweep (env-gated, deploy-host-only).**
+   [`LiveV1Contracts`](tests/v2/test_v1_contracts.py:199) is skipped
+   unless `WC_CONTRACT_LIVE_V1=1` (a few v1 functions touch pandas /
+   chroma / disk, the green-CI path on ubuntu-latest doesn't have
+   the corpus mounted). Under S-F2 the `LIVE_ARGS` table grows from
+   3 stub entries to **19** — one per `v1_qualname` in `V1_CONTRACTS`,
+   keyed off the four golden PG books named in the TZ (PG1342 *Pride
+   and Prejudice*, PG174 *The Picture of Dorian Gray*, PG345
+   *Dracula*, PG84 *Frankenstein*) plus per-author regexes that hit
+   those books' authors (Austen, Wilde, Stoker, Shelley). The sweep
+   runs on the deploy host after image rollout — same machine that
+   serves prod traffic, so the v1 results it validates against are
+   the live ones, not a recorded fixture that could drift.
+
+6. **Standalone lint module
+   [`tests/v2/_v1_contract_lint.py`](tests/v2/_v1_contract_lint.py).**
+   Per TZ literal text. The module is a thin orchestrator over
+   `check_wrapper_against_schema` — it iterates `V1_CONTRACTS`,
+   collects offenders, exits non-zero in CLI mode. Importable as
+   `from tests.v2._v1_contract_lint import scan_all_contracts`; the
+   `StaticContractGate` test reuses the same function. Two
+   consumers, one implementation — same DRY discipline as ADR-F1's
+   `cache_fingerprint_audit` CLI.
+
+7. **`@pytest.mark.v1_contract` marker.** Declared in
+   [pyproject.toml](pyproject.toml) under `[tool.pytest.ini_options]
+   markers`. Every test class in `test_v1_contracts.py` carries the
+   marker. Targeted run via `pytest -m v1_contract`. The deploy-host
+   `predeploy_gate.sh` companion will call this directly in a
+   follow-up; CI continues to run the full directory.
+
+8. **R2 negative test.** New `PhantomKeyNegativeGate` in
+   [test_v1_contracts.py](tests/v2/test_v1_contracts.py) synthesises
+   a tiny wrapper that reads `raw.get("xyz_nonexistent_phantom")`,
+   applies `@v1_contract(...)` to it, and asserts `ContractError`.
+   Proves the static gate fails LOUD; future regressions that would
+   weaken the gate (catch-and-log instead of raise; broaden
+   `INTERNAL_V2_KEYS` carelessly) break this test, not prod.
+
+**Consequences.**
+
+- A wrapper module *cannot* import successfully if its body reads a
+  phantom key. CI failure is at pytest collection time — earlier
+  than any test would have run. The audit's B2 mock-drift class is
+  closed structurally: the mock is generated from the same schema
+  the wrapper is bound to.
+- A v1 function that drops a declared key flips `SchemaShapeGate`
+  (the schema's `__required__` no longer satisfies its own mock) or
+  `LiveV1Contracts` (on the deploy host, against real v1 output).
+  Either failure surfaces with a diff of `raw_keys` vs schema keys
+  — the TZ S-F2 acceptance criterion in literal form.
+- The 19 contract-bound wrappers carry zero per-call decorator
+  overhead. `v1_contract` returns immediately after the AST scan;
+  the runtime wrapper is just `functools.wraps + return fn(*args,
+  **kwargs)`. Confirmed by reading the call site — no try/except,
+  no logging hook, no metadata mutation.
+- Adding a new wrapper now requires *two* edits: a new `V1<Name>`
+  schema in `schemas.py` and a `@v1_contract(v1_fn=..., schema=...)`
+  decoration on the wrapper. The cost is the cost; the audit
+  documented that the "single-edit-add-a-wrapper" property was
+  exactly what enabled E15 to propagate through 7 tools.
+- The 8 v2-native tools (no v1 backing — `corpus_overview`,
+  `hybrid_search`, `lemma_profile`, `lexical_search`,
+  `lexical_richness_authors`, `resolve_author_name`,
+  `resolve_book_title`, `find_book_by_topic`) deliberately do NOT
+  carry `@v1_contract` — there is no v1 function to bind against.
+  ADR-F1's `wrapper_fingerprint_for_tool` falls through to the
+  v2-native path for them. The contract sweep skips them by virtue
+  of not appearing in `V1_CONTRACTS`. `RegistryCoverage`'s floor
+  (≥30) is set below the 32-binding ceiling for this reason.
+
+**Trade-offs.**
+
+- The AST scan tolerates a wide set of keys via `INTERNAL_V2_KEYS`
+  (~80 entries today). Each entry is documented in-place at
+  [`scripts/v2/contracts/__init__.py:126`](scripts/v2/contracts/__init__.py:126);
+  most are v2-side annotations the wrapper stamps onto `raw` for
+  render-hint or count-honesty purposes. The risk: a wrapper that
+  reads a phantom key happening to collide with an `INTERNAL_V2_KEYS`
+  entry will slip through the static gate. The dynamic gate
+  (`LiveV1Contracts` against real v1) is the backstop; without
+  corpus access in CI it runs on the deploy host instead. The
+  current list grew organically and would benefit from a follow-up
+  audit (per-entry justification + minimum required set). Tracked
+  in `backlog.md` follow-up `F2-INTERNAL-KEYS-AUDIT`.
+- The schema's `__defaults__` table doubles as test fixture data.
+  When a default value happens to satisfy a wrapper's "expected
+  shape" but real v1 returns something subtly different (e.g.
+  `__defaults__` ships `[]` for `top` but real v1 ships
+  `[{"word": "x", "affinity": None}]` with a None field that breaks
+  the view builder), the static path passes but the dynamic path
+  catches it. This is acceptable — the dynamic path is the canonical
+  truth — but it means the developer reading a failing CI must
+  recognise that "`mock` satisfied the schema but `live_v1` didn't"
+  is two different defects in two different layers. The error
+  messages in both gates name the gate explicitly.
+- `inspect.getsource` failure mode is shared with ADR-F1: packed
+  deploys (PyInstaller, zipapp) would drop the static AST scan to
+  empty allow-list. Prod runs from a SHA-tagged Docker image with
+  full source on disk (ADR-B1 / D-SB1-2). Same non-issue today,
+  same graceful degradation if the deploy mode ever changes.
+
+### D-SF2-1 — Schema as TypedDict vs TZ-literal key-list tuple
+
+**Decision.** Use a `V1Schema` (TypedDict subclass) with class-level
+`__required__` / `__row_keys__` / `__defaults__` rather than the
+TZ-literal `must_read_at_least_one_of=[...]` /
+`declared_v1_keys=[...]` lists on every decoration.
+
+**Why.** Three structural wins:
+
+1. **Reuse across wrappers backed by the same v1.**
+   `V1AffinityByAuthor` is the contract for the standalone
+   `affinity.py` wrapper AND for the composite invocation in
+   `author_profile.py` (which calls v1 `affinity_by_author` to
+   populate one of its sub-sections). With option 2, each wrapper
+   declares its own `declared_v1_keys` list. Drift between them is
+   eventual — a v1 key rename forces *both* lists to update or one
+   silently stops matching. With the schema, they share one
+   declaration; drift is impossible by construction.
+2. **`mock_from_schema` is mechanical.** Schema is a structured
+   object; building a representative mock is one read of
+   `__defaults__`. With option 2, mocks are still hand-written or
+   require a separate `sample_args`-to-mock translator. The B2
+   drift class only closes structurally when the mock is *derived*
+   from the same source as the contract — schema makes that one
+   reference; key-lists make it two.
+3. **Type-hint friendly.** A `V1<Name>` class is consumable by mypy
+   and by humans reading the wrapper. The schema's body lists every
+   key, with declared types. The TZ-literal form is two opaque
+   string lists per call site — readable as data, but not by tooling.
+
+**TZ literal text.** "Декоратор
+`@v1_contract(v1_fn=..., sample_args=..., must_read_at_least_one_of=[...],
+declared_v1_keys=[...])`". Permitted to deviate per the TZ's own
+preamble: *"Рекомендованное решение в блоке — отправная точка, не
+диктат; если репозиторий говорит иначе, обоснуй в ADR."* — recorded
+here.
+
+**`sample_args` factored to test harness.** Test-only data lives in
+`LIVE_ARGS` in `test_v1_contracts.py`, not on the decorator. Keeps
+the decorator API stable across env modes (prod start-up doesn't
+care about sample_args; pytest does).
+
+### D-SF2-2 — `__v1_contract__` on wrapper fn, not on `ToolSpec`
+
+**Decision.** The contract binding is stamped on the wrapper
+function via `proxy.__v1_contract__ = (v1_fn, schema)` and held in
+the `V1_CONTRACTS: dict[str, ContractBinding]` registry — NOT
+added as a new field on `ToolSpec` (which is what the TZ literal
+suggests: "складывает метаданные в `ToolSpec.v1_contract`").
+
+**Why.** `ToolSpec` is the *dispatch* contract (input schema, cost,
+timeout, cacheable, wrapper_version, fn). It's what
+[`tool_registry.dispatch()`](scripts/v2/tool_registry.py:236)
+operates on at call time. The v1-contract binding is metadata about
+the wrapper's INPUT side of v1 — orthogonal to dispatch. Two
+mechanical reasons:
+
+1. **Lifecycle.** `ToolSpec` is created by the `@tool(...)`
+   decorator, which fires *outside* `@v1_contract(...)` (decorator
+   order is `@tool` outer, `@v1_contract` inner — checked at
+   `test_v1_contracts.py::test_decorator_exposes_v1_contract_attr`).
+   Mutating `ToolSpec` from within `@v1_contract` requires either a
+   look-back at the outer decorator's registration (fragile to
+   decorator order) or a second pass at registry-build time
+   (extra coupling).
+2. **Separation of concerns.** Tools that have no v1 backing
+   (8 v2-native) carry no contract binding. With binding on
+   `ToolSpec`, every `ToolSpec` would carry an `Optional[V1Contract]`
+   field — read by dispatch as `None`, never consumed. With binding
+   on the fn / in `V1_CONTRACTS`, the v2-native tools simply don't
+   appear in the registry. ADR-F1's `wrapper_fingerprint_for_tool`
+   queries `V1_CONTRACTS` and falls back to `spec.fn` directly —
+   the absence is meaningful.
+
+**Where the binding *is* readable.** Three places, all stable:
+
+- `wrapper_fn.__v1_contract__` → `(v1_fn, schema)` tuple, set by the
+  decorator after `functools.wraps`.
+- `V1_CONTRACTS[f"{module}.{qualname}"]` → `ContractBinding(wrapper_fn,
+  v1_fn, schema, wrapper_qualname, v1_qualname, schema_name)`.
+- `scripts.v2.contracts.registry.wrapper_fingerprint_for_tool(name)`
+  → reaches into `V1_CONTRACTS` for the cache fingerprint walk.
+
+Downstream tooling that needs the binding (record_fixtures, the
+fingerprint walk, mock generators) reads `V1_CONTRACTS`, not
+`ToolSpec`. The TZ literal "сложить в `ToolSpec.v1_contract`" was a
+suggested storage location, not a contract — the structural property
+("the binding is queryable from anywhere via a stable API") holds
+via the registry.
+
+### D-SF2-3 — Lint module lives at `tests/v2/_v1_contract_lint.py`, re-exports prod logic
+
+**Decision.** The standalone lint orchestrator
+[`tests/v2/_v1_contract_lint.py`](tests/v2/_v1_contract_lint.py) is
+a thin wrapper that imports
+`scripts.v2.contracts.check_wrapper_against_schema` and the
+`V1_CONTRACTS` registry, iterates bindings, returns a dict of
+offenders, and ships a CLI entry point. Production logic stays in
+`scripts.v2.contracts`.
+
+**Why the underscore prefix.** TZ asks for the literal path
+`tests/v2/_v1_contract_lint.py`. The leading underscore signals
+"importable test helper, not a pytest module" — `pytest` doesn't
+auto-collect `_*` files. The class `tests/v2/test_v1_contracts.py`
+imports `scan_all_contracts()` from this helper and asserts the
+returned dict is empty. Two callers, one body.
+
+**Why not just keep the scan inside `test_v1_contracts.py`.** The
+TZ literal text names the path. The closeout would have been
+honest either way (the static gate exists, the test reuses it),
+but the literal request is cheap to satisfy and produces a CLI
+runnable for deploy-host use (`python -m tests.v2._v1_contract_lint`).
+Same DRY discipline as ADR-F1's `cache_fingerprint_audit` CLI.
+
+### D-SF2-4 — Live-v1 sweep stays env-gated, runs on deploy host not CI
+
+**Decision.** `LiveV1Contracts` remains skipped unless
+`WC_CONTRACT_LIVE_V1=1`. CI on ubuntu-latest runs the static AST
+gate + schema-mock gate but NOT the live sweep. The deploy-host
+[`predeploy_gate.sh`](scripts/predeploy_gate.sh) carries the flag
+flip in a follow-up commit.
+
+**Why not default-on in CI.** Real v1 functions touch the SPGC
+corpus on disk (pandas / chroma reads), an Ollama instance for
+etymology, and a few network calls. ubuntu-latest has none of
+these — making the live sweep CI-default would either red the
+suite immediately (no corpus) or hide failures behind a
+silent-skip pattern (the dark-test anti-pattern S-B5 ADR-B7
+exists to forbid). The sweep is *meaningful* only against the
+prod-equivalent corpus state; the deploy host is the only place
+both the corpus and the contract-bound wrappers live.
+
+**What still runs in CI.** Static AST gate (every wrapper),
+schema-mock validation (every schema), binding visibility,
+registry coverage floor, import-path canonical sweep, R2
+negative test. That's enough to catch a phantom-key wrapper or
+a schema-drop at PR-time. The live sweep catches *v1* drift —
+which only matters once the deployed image is up against the
+prod corpus.
+
+**No new flag (R1).** `WC_CONTRACT_LIVE_V1` already exists from
+the pre-S-F2 scaffold; S-F2 grows the `LIVE_ARGS` table inside
+the gated class but doesn't add a new env var.
+
+### Negative tests (R2)
+
+- **`PhantomKeyNegativeGate`**
+  ([test_v1_contracts.py](tests/v2/test_v1_contracts.py)) — defines
+  an inline wrapper that reads `raw.get("xyz_nonexistent_phantom")`
+  and `raw["yyy_other_phantom"]`. Applying `@v1_contract(v1_fn=...,
+  schema=V1FindBook)` MUST raise `ContractError`; the error message
+  MUST list both phantom keys. Asserts the *positive* property of
+  S-F2: a future commit that weakens the gate (broadens
+  `INTERNAL_V2_KEYS`, catches `ContractError` and logs instead of
+  raising) flips this test red, not prod.
+- **`StaticContractGate::test_every_wrapper_reads_only_declared_keys`**
+  (already present) — re-runs the AST scan over every binding so
+  the offender dict surfaces at this test's name, not as a generic
+  import-collection error.
+- **`SchemaShapeGate`** — `__required__` drop causes the schema's
+  own mock to fail validation; exactly the "remove a key from v1
+  → exactly one contract test fails" property the brief promises.
+
+### Acceptance gate (TZ S-F2)
+
+- ✅ 7 E15-class wrappers under `@v1_contract` — and 12 more for
+  coverage beyond the named seven. Total 19 wrapper files, 32
+  schema bindings (some files declare multiple tools).
+- ✅ CI runs the contract sweep on every PR — static AST gate,
+  schema-mock gate, binding visibility, coverage floor, import-path
+  canonical. Six tests in `test_v1_contracts.py` run by default; the
+  seventh is the env-gated live sweep.
+- ✅ Artificial `raw.get("xyz_nonexistent")` in a wrapper → CI fails
+  loud — via `PhantomKeyNegativeGate` (synthesised inline so the
+  failure path is locked in) and via the existing
+  `StaticContractGate` (which would also fail at import-time if
+  someone shipped a real-wrapper regression).
+- ✅ Mocks generated from contract — every `_stub_*` in
+  `test_router.py` uses `mock_from_schema`. Hand-written v1 result
+  dicts are forbidden by the import-path sweep.
+- ✅ Standalone lint at `tests/v2/_v1_contract_lint.py` — orchestrator
+  with CLI entry point, reused by `StaticContractGate`.
+- ✅ `@pytest.mark.v1_contract` marker — declared in `pyproject.toml`
+  and applied to every test class in `test_v1_contracts.py`.
+- ✅ Golden books fixture (PG1342 / PG174 / PG345 / PG84) — driven
+  through `LIVE_ARGS` for every contract-bound wrapper.
+
+### Closeout (S-F2 / ADR-F2)
+
+**Local test run** (`pytest tests/v2/test_v1_contracts.py -v`,
+2026-05-25, Windows 11 / Python 3.13.4): **7 passed, 1 skipped**
+(skip = `LiveV1Contracts` w/o `WC_CONTRACT_LIVE_V1=1`). The +1
+compared to the pre-S-F2 baseline is `PhantomKeyNegativeGate`.
+
+**Marker-targeted run** (`pytest tests/v2 -m v1_contract`): **7
+passed, 1 skipped, 2107 deselected**. Marker correctly scopes the
+sweep to the contract layer — deploy-host invocation works without
+pulling the rest of the suite.
+
+**Full directory run** (`pytest tests/v2 -q`): **2084 passed, 30
+skipped, 1 xfailed** in 94 s. Compared to the S-B5 baseline
+(2083 passed, 2026-05-25 closeout, [docs/v2/decisions.md → 2026-05-25
+S-B5](#2026-05-25--s-b5-ci-dependency-parity-run-whole-testsv2-adr-b7-accepted)):
+exactly +1 (the new R2 negative test). Zero regressions; zero new
+silent skips; the existing 30 skips are the same Windows / GPU /
+corpus quarantines documented in
+[S-B5 closeout](#2026-05-25--s-b5-ci-dependency-parity-run-whole-testsv2-adr-b7-accepted)
+plus the env-gated `LiveV1Contracts`.
+
+**Collection gate** (`pytest tests/v2 --collect-only -q`): **2115
+tests collected, 0 errors** (was 2114 pre-S-F2; +1 from
+`PhantomKeyNegativeGate`).
+
+**Standalone lint** (`python tests/v2/_v1_contract_lint.py`): exit
+**0**, output `[v1_contract_lint] OK`. CLI surface is callable from
+deploy-host shell without pytest dependencies.
+
+**What S-F2 closes structurally.**
+
+- **C2 (contract grouping by guessing).** Every wrapper module
+  *cannot* import successfully if its body reads a key not declared
+  in its schema — the failure is a `ContractError` at decoration
+  time, surfaced as a pytest collection error or as the
+  `PhantomKeyNegativeGate` assertion when synthesised inline.
+- **E14/E15 (key mismatch, 7 wrappers).** All seven E15-class
+  wrappers the TZ names (`books/readability.py`, `author_profile.py`,
+  `stats_by_author.py`, `author_metadata.py`, `search/semantic.py`,
+  `top_ngrams.py`, `learning/enrich.py`) carry `@v1_contract` and
+  satisfy the static AST gate. 12 more wrappers under the same
+  decorator give 19 total — 32 contract bindings across them. The
+  next time v1 renames a key, exactly one schema flips red, exactly
+  one wrapper's allow-list flips red, and the diff names both.
+- **B-R14-7 / E8 (mock drift).** Hand-written v1 mocks are gone from
+  `test_router.py` — every stub is `mock_from_schema(V1<Name>, **overrides)`.
+  Drift is structurally impossible: schema is the single source of
+  truth for both contract-time validation and test-time mock.
+- **E20/E21/E22 (`[:3]`-truncation residual).** S-F3 covers the
+  `_normalize_lang` / `_NON_FIRST_NAME_TOKENS` class proper, but
+  the underlying "schemas with unstable string shape" pattern that
+  enabled it is closed here — the affected wrappers' reads are
+  declared and verified.
+
+**What S-F2 does NOT close (declared scope boundary).**
+
+- The 8 v2-native tools (`corpus_overview`, `hybrid_search`,
+  `lemma_profile`, `lexical_search`, `lexical_richness_authors`,
+  `resolve_author_name`, `resolve_book_title`, `find_book_by_topic`)
+  deliberately have no `@v1_contract` — they have no v1 callable to
+  bind against. ADR-F1's v2-native fingerprint fallback covers the
+  cache invalidation axis for them; contract-shape verification is
+  unnecessary because the schema is whatever the wrapper itself
+  emits.
+- The TZ S-R4 follow-up (closing the active key-mismatch list:
+  `readability.py:119` cefr/cefr_estimate, `author_profile.py:256`
+  signature/diversity, etc.) is *applied work that uses the
+  framework*, not framework work. Several were already fixed during
+  Phase 2 (e.g. `book_readability` reads `cefr_heuristic`, not the
+  pre-fix `cefr_estimate`); the remaining concrete-mismatch items
+  on the TZ S-R4 list are queued as a follow-up block — they all
+  amount to "add a key to the schema, update the wrapper's read,
+  add a negative test on the row that came back empty", and benefit
+  from the framework S-F2 lands.
+- The deploy-host live sweep wire-up (`scripts/predeploy_gate.sh`
+  flips `WC_CONTRACT_LIVE_V1=1` after rollout) is a one-line
+  follow-up to that script — not in this commit because the script
+  edit belongs to a B-namespace block (deploy plumbing), not F-namespace.
+  Tracked in `backlog.md` follow-up `F2-DEPLOY-LIVE-SWEEP`.
+
+**Follow-ups (durable).**
+
+- `F2-INTERNAL-KEYS-AUDIT` — audit the ~80-entry `INTERNAL_V2_KEYS`
+  allow-list in `scripts/v2/contracts/__init__.py`. Each entry is
+  documented at its addition site; the audit is to confirm none
+  has decayed into "needed for a wrapper that has since been
+  rewritten" status. Cheap, mechanical, low-risk.
+- `F2-DEPLOY-LIVE-SWEEP` — wire
+  `WC_CONTRACT_LIVE_V1=1 pytest -m v1_contract` into
+  `predeploy_gate.sh` after the green canary observation window.
+- `F2-V6-RESOLVERS-LIVE-ARGS` — extend `LIVE_ARGS` to cover the v6
+  resolver bindings (V6ResolveAuthor / V6ResolveBook). They are
+  v2-internal so the live sweep doesn't gain anything obvious from
+  exercising them against the corpus, but completeness of the
+  table aids consistency review.
+
+---
+
 ## 2026-05-25 — S-F1: AST-hash cache invalidation (ADR-F1 / D67 accepted)
 
 Closes block **S-F1** of

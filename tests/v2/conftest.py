@@ -20,6 +20,24 @@ from pathlib import Path
 
 import pytest
 
+
+def pytest_configure(config):
+    """Declare custom markers so `pytest -W error::UserWarning` (and
+    the default `--strict-markers` flag once we add it) doesn't warn
+    on documented markers.
+
+    `v1_contract` — TZ S-F2 / ADR-F2: marks the contract sweep so the
+    deploy host can run `pytest -m v1_contract` selectively. Module-
+    level `pytestmark = pytest.mark.v1_contract` in
+    `test_v1_contracts.py` applies it to every class there.
+    """
+    config.addinivalue_line(
+        "markers",
+        "v1_contract: v1↔v2 contract sweep (S-F2 / ADR-F2). "
+        "Run via `pytest -m v1_contract`. The opt-in live-v1 portion "
+        "is additionally gated by WC_CONTRACT_LIVE_V1=1.",
+    )
+
 _TMP_CACHE_DIR = tempfile.mkdtemp(prefix="wc-v2-cache-")
 os.environ["WC_V2_CACHE_DIR"] = _TMP_CACHE_DIR
 
