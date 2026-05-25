@@ -99,7 +99,7 @@ rc=0
 # VERIFY_SKIP_TAG_CHECK=1 — test-only knob. Skips the docker-tag
 # loop entirely so runtime tests (mock HTTP /health) can exercise
 # the /health-parse path without a docker daemon. Production never
-# sets this. Documented alongside VERIFY_SKIP_DOCKER_HEALTHCHECK at
+# sets this; only the test harness at
 # tests/v2/test_verify_deployed_image.py.
 if [[ "${VERIFY_SKIP_TAG_CHECK:-0}" != "1" ]]; then
     for service in "${SERVICES[@]}"; do
@@ -163,10 +163,10 @@ fi
 #           without re-opening the forward-deploy silent-success
 #           vector.
 # VERIFY_HEALTHCHECK_BUDGET_S env (default 180) sizes the poll
-# budget. VERIFY_SKIP_DOCKER_HEALTHCHECK=1 bypasses the docker
-# inspect poll (used by tests/v2/test_verify_deployed_image.py on
-# CI runners without a docker daemon — they exercise the /health-
-# parse path directly via a mock HTTP server).
+# budget. Tests in tests/v2/test_verify_deployed_image.py drive
+# the poll via a `docker` PATH shim that returns controlled
+# `.State.Health.Status` values — no env-knob escape hatch in
+# the verifier itself.
 
 # Poll `docker inspect ... .State.Health.Status` until "healthy"
 # or the budget runs out. Compose defines a healthcheck on chat
@@ -183,12 +183,6 @@ poll_until_healthy() {
     local interval=5
     local elapsed=0
     local status
-
-    if [[ "${VERIFY_SKIP_DOCKER_HEALTHCHECK:-0}" == "1" ]]; then
-        # Test-only: bypass the docker poll, exercise the /health
-        # parse path directly. Documented in the test file.
-        return 0
-    fi
 
     while [[ $elapsed -lt $budget ]]; do
         # `.State.Health` is absent if no HEALTHCHECK is declared

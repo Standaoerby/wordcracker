@@ -1797,15 +1797,19 @@ until the verify script could distinguish "not yet warm" from
   non-parseable bodies — once you've claimed JSON, the shape
   must hold.
 
-**Test knobs.** Two test-only env vars added (production never
-sets them):
+**Test knob.** One test-only env var (production never sets it):
 
-- `VERIFY_SKIP_DOCKER_HEALTHCHECK=1` — skips the poll. Used by
-  the /health-parse path tests in
-  [tests/v2/test_verify_deployed_image.py](tests/v2/test_verify_deployed_image.py).
 - `VERIFY_SKIP_TAG_CHECK=1` — skips the docker-tag check loop.
-  Same use case: runtime tests don't have a docker daemon, only
-  a mock HTTP server.
+  Used by runtime tests in
+  [tests/v2/test_verify_deployed_image.py](tests/v2/test_verify_deployed_image.py)
+  that exercise the `/health`-parse path against a mock HTTP
+  server (no real docker daemon available on the hosted CI
+  runner). The `docker` invocations inside `poll_until_healthy`
+  are mocked via a PATH-shim instead of an env-knob escape —
+  this keeps the verifier itself free of any "skip the
+  healthcheck" branch (ADR-B5 "no dark code": a knob that
+  bypasses production logic but is never set in prod is the
+  same shape as a dark feature flag).
 
 **R2 negative tests.**
 [tests/v2/test_verify_deployed_image.py](tests/v2/test_verify_deployed_image.py)
