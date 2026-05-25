@@ -6,6 +6,495 @@
 
 ---
 
+## 2026-05-25 — S-B4: one-command self-verifying deploy (ADR-B4 + ADR-B5 accepted)
+
+Closes block **S-B4** of `docs/tz_structural_fixes_2026-05-24.md`.
+Promotes ADR-B4 (one-command deploy with verify + probe-gate +
+auto-rollback) and ADR-B5 (operational flag lifecycle / no-dark-code
+lint) from Proposed (2026-05-24) to Accepted, and lands the wiring.
+After S-B4 a single `bash scripts/deploy.sh` invocation is the only
+supported path to prod: it builds the SHA-tagged image (S-B1), brings
+chat/admin up via compose (S-B2), verifies the runtime self-report
+matches the deployed SHA (S-B3), runs the probe gate against the
+live runtime, and on any red step rolls back to the previously-deployed
+SHA tag — without operator intervention. Closes the failure mode
+where a "successful deploy" left prod on the old code AND statuses
+saying it was new code at the same time.
+
+### ADR-B4 — One-command deploy with verify + probe-gate + auto-rollback
+
+**Status.** Accepted (2026-05-25, under S-B4). Supersedes the
+2026-05-24 Proposed draft (which framed B4 as a *pre-build*
+predeploy harness gate).
+
+**Context.** The 2026-05-24 Proposed draft framed B4 as a pre-build
+gate (`scripts/v2/predeploy_check.py`): run pytest + golden queries +
+env-diff *before* the deploy. That framing was correct for the
+problem visible from the 2026-05-22 audit, but the S-B1/S-B2/S-B3
+landings shifted the picture: the actual remaining gap is *not*
+"we ship untested code" (CI + pytest collect already gate that, see
+[predeploy.yml](.github/workflows/predeploy.yml)) — it is "we ship
+correct code but cannot tell at deploy time whether it actually
+arrived in the running container, and if it didn't, the operator is
+left to spot it and roll back by hand". Five sequential runs of the
+2026-05-22 epic were silent-failure deploys: image rebuilt, restart
+issued, version chip looked updated, but the running Python process
+was from an earlier image. The fix is *post-deploy*, not *pre-build*.
+
+The S-B3 follow-ups left two specific gaps for this ADR to close
+(both called out in the S-B4 TZ prompt):
+
+A. `predeploy_probe_suite.py` does not assert `/health.git_sha ==
+   expected`. The 2026-05-24 ADR-B3 entry explicitly deferred this:
+   "Bumping `predeploy_probe_suite.py` to verify `/health.git_sha`
+   matches the about-to-deploy commit. Natural extension under
+   ADR-B4." So all 12 probes can pass against the *wrong* code
+   (probes are functional-shape, not identity).
+
+B. [verify_deployed_image.sh:43](scripts/verify_deployed_image.sh:43)
+   falls back to `git rev-parse --short HEAD` when called without an
+   explicit SHA. That fallback is host-state-dependent: an operator
+   could `git pull` on the prod host *after* the deploy ran, advancing
+   HEAD ahead of what was actually built, and a subsequent
+   `bash scripts/verify_deployed_image.sh` would compare the
+   currently-running image against the *new* HEAD — silently green.
+   [smoke_s_b2.sh:51](scripts/smoke_s_b2.sh:51) inherits the same
+   footgun (calls verify without arg).
+
+**Options considered.**
+
+1. **Pre-build harness only** (the 2026-05-24 Proposed draft).
+   Strengths: catches "we are about to ship broken code". Weaknesses:
+   does not catch silent-failure deploys at all — by the time the
+   harness ran, the image was already going to be built; if compose
+   recreate fails to bring up the new tag, the harness has no surface
+   to detect it. Rejected as insufficient on its own — already
+   partially covered by CI's `pytest --collect-only` and
+   `check_version_bump.py`.
+2. **Pre-build harness + post-deploy verify, two separate scripts,
+   operator-driven sequence.** What was de-facto running pre-S-B4:
+   `predeploy_gate.sh` (against the *live* endpoint) followed by
+   `deploy.sh` followed by manual `verify_deployed_image.sh` /
+   `smoke_s_b2.sh`. Weakness: three commands, no contract that
+   rollback follows from red verify. The 2026-05-22 epic happened
+   under this regime — operators looked at the chip, declared green,
+   moved on.
+3. **One `deploy.sh` invocation gates the whole flow: build → up →
+   verify (docker-tag + /health.git_sha) → probe-gate → on any red,
+   roll back to the previously-deployed SHA and re-verify.** No
+   manual steps between build and "prod is on the new code or the
+   old code, never on a half-deployed mix". **Decision.**
+4. **External orchestrator (Argo Rollouts / Spinnaker) with canary +
+   automated traffic-shift.** Right shape for multi-host
+   environments; massive overkill for a single Docker host. Rejected
+   as scope-mismatch.
+
+**Decision.** Option 3.
+
+**Implementation.**
+
+The pipeline lives in `scripts/deploy.sh`. Each step is a hard gate;
+red on any step triggers rollback before exit.
+
+```
+deploy.sh <ref>
+  ├─ 1. resolve SHA from <ref> (or rollback target from --rollback)
+  ├─ 2. dirty-check scoped to Dockerfile COPY paths (D-SB1-8)
+  ├─ 3. capture PREVIOUS_SHA from running gutenberg-lab container
+  │     (before compose up — after recreate the previous image tag is
+  │     replaced on the service, only the local image store still has it)
+  ├─ 4. docker build --build-arg GIT_SHA=$SHA --build-arg BUILD_TIME=... (S-B1/S-B3)
+  ├─ 5. write WC_IMAGE_TAG=$SHA into .env atomically
+  ├─ 6. docker compose up -d --force-recreate gutenberg-lab chat admin (S-B2)
+  ├─ 7. verify: scripts/verify_deployed_image.sh $SHA
+  │     ├─ docker-tag check on all three services (S-B1)
+  │     └─ /health.git_sha == $SHA on chat:8890 and admin:8891 (S-B3)
+  ├─ 8. probe-gate: scripts/predeploy_probe_suite.py --base-url http://127.0.0.1:8890 --expected-sha $SHA
+  │     ├─ wait for /health (existing behaviour)
+  │     ├─ NEW: assert /health.git_sha == $SHA before firing any probe
+  │     │       (otherwise all 12 probes ran against the old code and
+  │     │       a stale-image deploy looks "12/12 PASS")
+  │     └─ 12-probe taxonomy suite (existing)
+  └─ on red at step 7 or 8:
+        ├─ recover PREVIOUS_SHA captured at step 3
+        ├─ re-run steps 5–7 with PREVIOUS_SHA (compose up + verify)
+        └─ exit non-zero, surface "rolled back to $PREVIOUS_SHA"
+```
+
+The probe-gate is invoked with `--expected-sha $WC_IMAGE_TAG`. The
+new flag (§A) is the deploy-time integration of S-B3's runtime
+identity surface — `wait_for_health` is extended to additionally
+assert `git_sha` from the same JSON body it already polled. A
+mismatch returns the same exit code 4 the suite uses today for
+"health never came up", because semantically that's the same class
+of failure: the runtime the probes are about to interrogate is not
+the runtime we asked for. Adding a new exit code would split the
+"probes did not run against the right target" failure across two
+codes for no diagnostic gain.
+
+§B (no-arg footgun) is closed at `verify_deployed_image.sh`: when
+called without an explicit positional SHA, it now reads
+`WC_IMAGE_TAG` from process env (`.env` is loaded by the deploy.sh
+that drives it). If both are missing, it exits 2 with an explicit
+"refusing to fall back to git HEAD — pass SHA explicitly". The
+previous `git rev-parse --short HEAD` fallback is removed. The smoke
+script `smoke_s_b2.sh` is updated to source `.env`'s WC_IMAGE_TAG
+and pass it explicitly to both verify invocations — a smoke run
+after the host moved forward will surface as "verify failed against
+the expected SHA", not as "silently green because HEAD advanced".
+
+**Rollback target capture.** Step 3 captures `PREVIOUS_SHA` from the
+*currently-running* gutenberg-lab container (before recreate replaces
+it). The capture uses `docker inspect --format='{{.Config.Image}}'`
+on the running container ID and strips the `wordcracker-textlab:`
+prefix. If the result is empty (fresh deploy with no running
+container) or is the same as the new SHA (re-deploy of HEAD), the
+"rollback target" is recorded as unavailable and any subsequent red
+verify/probe-gate exits without attempting rollback — surfaces an
+unambiguous "no rollback target; manual recovery required" so the
+operator does not chase a false green.
+
+**Consequences.**
+- One supported path: `bash scripts/deploy.sh`. No more "deploy
+  succeeded but smoke wasn't run" / "verify wasn't checked" /
+  "probe-gate was forgotten" — they're all gated by the same exit
+  code.
+- The probe gate now gates *identity* before it gates *behaviour*.
+  Twelve PASS against the wrong code cannot occur. A stale-image
+  deploy will fail at step 8 (probe-gate's `--expected-sha` check),
+  not at "operator notices the chip didn't change".
+- `verify_deployed_image.sh` becomes safer to invoke standalone:
+  passing no arg + no `WC_IMAGE_TAG` is now a hard error instead of
+  a silent comparison against host HEAD.
+- Auto-rollback prefers the SHA tag that was actually running at the
+  start of the deploy attempt, not "the previous commit on this
+  branch" (which the host may have moved past). Restores the exact
+  bits, not a reconstructed approximation.
+- The 2026-05-24 Proposed B4 framings that remain unaddressed by
+  this Accepted form (golden-set live tests under `WC_GOLDEN_LIVE`;
+  critic-flagged regression smoke from `/admin/bad_answers`) are
+  explicitly out of scope here — they belong with the F-wave
+  refactor (`tests/v2/golden_set.py` requires the v1↔v2 contract
+  layer from S-F2 to be meaningful). Carried forward as B4-Phase 2.
+
+**Trade-offs.**
+- Deploy time grows by the probe-gate budget. Twelve probes at ≤180s
+  per-probe ceiling = ~3 min worst case; observed ~30-60 s on a warm
+  host. Acceptable for a single-host stack with ≤2 deploys/day.
+- Auto-rollback can hide a *symmetric* failure: if both the new SHA
+  and `PREVIOUS_SHA` fail verify (e.g. compose itself is broken),
+  rollback "succeeds" technically while the host is still in a bad
+  state. Mitigated: rollback re-runs verify and surfaces its own
+  exit code; the operator sees both failures on the deploy log,
+  not just the original.
+- Capturing `PREVIOUS_SHA` from `docker inspect` ties the rollback
+  surface to "what was actually running", not "what git says was
+  previously deployed". A divergence (someone manually swapped tags
+  in compose) shows up as "running image not in wordcracker-textlab
+  family" and aborts the deploy cleanly at step 3.
+
+### ADR-B5 — Flag lifecycle: live, code-default-on, or experimental; lint blocks dark-code drift
+
+**Status.** Accepted (2026-05-25, under S-B4). Narrows the
+2026-05-24 Proposed draft (full `env_registry.py` migration of all
+26+ `WC_*` reads). The Proposed draft's broader goal is preserved as
+B5-Phase 2; this Accepted form lands the part that pays for itself
+inside S-B4: a *lint test* that catches the exact failure class
+that motivated the Proposed draft (`WC_DEFAULT_ENGINE` / v2-engine.conf
+ghost-flag, see [decisions.md line 1773](docs/v2/decisions.md)).
+
+**Context.** "No dark code" is the project's first principle (R1).
+But its enforcement was manual: an operator had to remember to grep
+compose/systemd against code on every flag change. The 2026-05-22
+audit's C5 root cause (process without verification) plus the
+S-B-namespace evidence that the cleanest compose / systemd pair
+still drifted (`WC_DEFAULT_ENGINE=v2` lived in systemd drop-in for
+weeks after the code reading it was deleted) shows that
+manual-grep enforcement is structurally insufficient.
+
+The Proposed `env_registry.py` migration is the right long-term
+shape — one declaration site, every read goes through it, predeploy
+compares the registry vs. the world. But it is a ~1-day refactor
+touching ~26 sites, which is too much surface to bundle with S-B4's
+deploy-pipeline work (R7 forbids cascade commits in one area). The
+narrower piece that pays for itself *now* is the lint test that
+catches the harm class — once the lint exists, the migration can
+land independently behind it, with the lint as the negative test.
+
+The TZ for S-B4 calls out two specific lint requirements:
+1. No commented-out `WC_*` line may exist in any compose file. A
+   flag is either live (uncommented) or absent — never
+   "documentation-grade dead config".
+2. Lint forbids drift between "comment in compose says X" and "code
+   actually does X".
+
+**The three legitimate states of a binary toggle.** R1 ("no dark
+code") forbids *undeclared* binary toggles, not all out-of-compose
+toggles. The TZ's "experimental / released → gate removed" framing
+was a *binary* — it accidentally rejected a third state that
+predates the audit and is structurally honest: a flag whose default
+*lives in code on purpose* (e.g., a safety pass that is always on
+in prod and only ever flipped off by a developer instrumenting the
+pass itself). The v2-engine.conf incident was not a "code-default
+flag", it was a *ghost compose flag with no live read* — opposite
+direction, different failure class. This ADR makes the third
+category explicit so the lint can sanction it without weakening R1:
+
+| State              | Where declared                                     | When to use                                              |
+|--------------------|----------------------------------------------------|----------------------------------------------------------|
+| **Live**           | `docker-compose.yml` (or `.dev.yml`) `environment:` | The flag's value differs across envs (dev/prod), or it has a non-default value somewhere. |
+| **Code-default-on** | `scripts/v2/flag_registry.CODE_DEFAULT_ON`         | The flag is invariant for prod and the default is the production state — flipping it is a developer-debugging action, not a configuration choice. |
+| **Experimental**   | `scripts/v2/flag_registry.EXPERIMENTAL`            | Honestly opt-in, default-off, not yet a production decision. Lives here until promoted (to compose) or removed (dead branch). |
+
+Anything else — a binary toggle read in code that's neither in
+compose nor in either registry set — is dark code by definition,
+and Rule 2 of the lint catches it. The registry IS the declaration
+that lets the lint distinguish "permanent, intentionally
+out-of-compose default" from "forgotten ghost". R1 stays intact:
+every flag is named in *some* declaration surface, and the lint
+mechanically enforces it.
+
+**Options considered.**
+
+1. **Full `env_registry.py` migration in this block.** The Proposed
+   2026-05-24 form: every `os.environ.get("WC_*")` rewritten as
+   `env_registry.WC_*.is_on()` etc.; the registry IS the lint. Pros:
+   maximally rigid contract. Cons: ~1 day, ~26 sites; cascade risk
+   if it lands alongside the deploy-pipeline work. Carried forward
+   as **B5-Phase 2**, deferred from this block.
+2. **Lint without a registry: grep-based audit in a pytest test.**
+   The test enumerates `os.environ.get("WC_*", "on"|"off"|...)`
+   binary-toggle reads across `scripts/`, cross-references against
+   live compose env, and asserts each toggle is either (a) live in
+   compose with a value, or (b) listed in a small
+   `scripts/v2/flag_registry.py::CODE_DEFAULT_ON` /
+   `EXPERIMENTAL` set with a one-line rationale. Configuration values
+   (paths, model names, timeouts) are explicitly *out* of scope —
+   they are values, not flags, and have no dark-code risk. **Decision.**
+3. **Status quo + reviewer discipline.** Rejected — what got us
+   here.
+
+**Decision.** Option 2.
+
+**Implementation.**
+
+Lint test `tests/v2/test_flag_lint.py` enforces two rules:
+
+```python
+# Rule 1: no commented WC_* in any compose file.
+# Pattern: ^\s*#.*WC_[A-Z][A-Z0-9_]*\s*[:=]
+# Whitelist exact comment lines that DESCRIBE the env contract
+# rather than dead-flag-state (currently zero whitelisted entries).
+
+# Rule 2: every os.environ.get("WC_*", "on"|"off"|"0"|"1"|"true"|"false")
+# read in scripts/ must be in exactly one of:
+#   (a) live compose env (docker-compose.yml services.*.environment)
+#   (b) scripts/v2/flag_registry.py::CODE_DEFAULT_ON  with rationale
+#   (c) scripts/v2/flag_registry.py::EXPERIMENTAL     with rationale
+# Reads that are NOT binary-toggle shape (paths, models, ints, floats
+# without on/off literal default) are NOT in scope for this rule —
+# they are configuration, not flags.
+```
+
+`scripts/v2/flag_registry.py` is a tiny module (~20 lines) — just
+the two sets and their rationales. It is *not* the full proposed
+registry indirection: code still reads `os.environ.get(...)`
+directly. The registry's only role here is to be the
+explicitly-declared whitelist that the lint reads. Full B5-Phase 2
+upgrades the registry to the indirection layer; this Accepted form
+just gives the lint somewhere to look up "yes, this is a known
+code-default-on toggle, not a forgotten ghost".
+
+Current entries (pre-S-B4 inventory, kept honest):
+- `WC_CRITIC` — code-default-on (`scripts/v2/critic.py:40`).
+  Rationale: critic LLM verification pass, on for prod since D-P1-7.
+  No compose entry because the default lives in code, not in env.
+- `WC_NUMERIC_AUDIT` — code-default-on
+  (`scripts/v2/numeric_audit.py:31`). Same shape and rationale.
+
+No `EXPERIMENTAL` entries today. The set exists so the *first*
+honestly-experimental flag has somewhere to live without
+re-triggering the lint.
+
+**Consequences.**
+- The compose-comment-vs-code drift class becomes mechanically
+  caught. A future operator who comments out a `WC_*` line in
+  compose to "temporarily disable" the flag will trip Rule 1 in CI
+  before the change can merge.
+- A future code change that adds `os.environ.get("WC_NEW_TOGGLE",
+  "on")` without either wiring it into compose or whitelisting it as
+  experimental trips Rule 2.
+- The full env_registry.py indirection (B5-Phase 2) lands later,
+  cleanly, against this lint — by then the rules will already exist
+  and the migration becomes "make every read look like
+  `flag_registry.WC_X.is_on()`" with the lint guarding the contract.
+- Configuration values (paths, model names, timeouts) are not
+  touched. They have always been a different lifecycle from binary
+  toggles and the v2-engine.conf incident specifically was about a
+  *toggle* (`WC_DEFAULT_ENGINE`), not a value.
+
+**Trade-offs.**
+- The lint is "binary-toggle scope" — a flag spelled as
+  `os.environ.get("WC_X", "yes")` would bypass the regex. Acceptable
+  for now; the canonical shapes are `"on"|"off"|"0"|"1"|"true"|"false"`
+  and every existing site uses one of them.
+- The registry is a 20-line allowlist, not the structured 26-entry
+  index from the Proposed draft. That's deliberate: ship the part
+  that catches the harm class today; defer the structured index
+  until S-B4 has baked.
+- Two reads (`WC_CRITIC`, `WC_NUMERIC_AUDIT`) are explicitly *not*
+  in compose. Surface-level inconsistency with the "every flag in
+  compose" framing of the original Proposed B5, but the honest model
+  is that some toggles default in code and that's fine *if it's
+  declared*. The registry IS the declaration.
+
+### D-SB4-1 — Probe gate carries `--expected-sha`; mismatch fails fast
+
+**Decision.** `scripts/predeploy_probe_suite.py` gains a new flag
+`--expected-sha <SHA>` (and a matching `WC_PROBE_EXPECTED_SHA` env
+default). When set, the suite's existing `wait_for_health` step is
+extended: as soon as `/health` returns 200, the response body is
+parsed for `git_sha`, and if it does not equal the expected value
+the suite exits 4 (same code as "health never came up") without
+firing any probe.
+
+**Why same exit code as 4 (transport/health).** Semantically the
+runtime is unreachable *for the purpose this run intended* — the
+service is up, but it is up running a different SHA than the deploy
+wanted. Probes against the wrong code are not meaningful; treating
+that as the same class as "no health at all" lets the deploy.sh
+case-statement keep the existing exit-code map. Adding exit code 8
+or similar would force every wrapper to grow a case-arm for the
+same operator-facing message ("the runtime is not the runtime you
+asked for; check your deploy").
+
+**Decision.** The flag is *optional* — the suite still runs without
+it (current behaviour for ad-hoc runs against prod). Only the
+deploy.sh-driven path supplies it. This preserves the existing
+operator workflows for "probe prod against today's HEAD without
+caring exactly which SHA the box reports".
+
+### D-SB4-2 — `verify_deployed_image.sh` drops `git rev-parse` fallback
+
+**Decision.** When called with no positional SHA arg, the script no
+longer falls back to `git rev-parse --short HEAD`. New fallback
+order:
+1. Positional `$1` if non-empty.
+2. `WC_IMAGE_TAG` from process env (deploy.sh exports it; smoke
+   script will source `.env` and pass it explicitly).
+3. Exit 2 with an explicit error: "refusing to fall back to git HEAD
+   — pass SHA or set WC_IMAGE_TAG".
+
+**Why no git fallback.** The footgun is real and documented in the
+S-B4 TZ prompt: an operator running `bash scripts/verify_deployed_image.sh`
+on the prod host *after* a `git pull` would silently compare the
+running image against a HEAD the deploy never built. The script
+should never depend on host-repo state.
+
+**Smoke caller.** `scripts/smoke_s_b2.sh` is updated to read
+`WC_IMAGE_TAG` from `.env` (or process env if exported) and pass it
+explicitly to both `deploy.sh` (already does) and
+`verify_deployed_image.sh` (the pre-S-B4 second invocation that
+was relying on the fallback).
+
+### D-SB4-3 — Probe-gate red rolls back to captured PREVIOUS_SHA, not HEAD~1
+
+**Decision.** Rollback target is the SHA tag of the image *currently
+running* at the start of the deploy attempt (captured before
+`compose up`), not a git-resolved "previous commit". The capture
+uses `docker inspect --format='{{.Config.Image}}'` against the
+running `gutenberg-lab` container ID and strips the
+`wordcracker-textlab:` prefix.
+
+**Why running image, not git HEAD~1.** The two diverge precisely
+when the operator most needs the right behaviour: the host's `main`
+branch may have advanced past what's deployed (forward-deploy
+pending), or a previous deploy may have been from a feature branch
+that's since been deleted. The running tag is the only authoritative
+"what was on prod a moment ago".
+
+**Why pre-`compose up` capture.** `compose up -d --force-recreate`
+removes the previous container and replaces its image reference;
+post-recreate `docker inspect` shows the *new* tag. The previous
+tag survives only in the local image store (kept by
+[deploy.sh:194](scripts/deploy.sh:194)'s `KEEP_LAST_N_IMAGES=5`
+pruning). Capturing the tag *before* recreate is the only point at
+which container-level state still names the previous SHA.
+
+**Failure modes.** If `PREVIOUS_SHA` is empty (cold start, no
+running container) or equals the new SHA (re-deploy of HEAD), the
+"rollback target" is recorded as unavailable. A subsequent red
+verify/probe-gate exits non-zero *without* attempting rollback —
+the operator sees an unambiguous "no rollback target; manual recovery
+required" and is not led to believe rollback succeeded against a
+phantom target.
+
+### Negative tests (R2)
+
+`tests/v2/test_deploy_b4.py` (new) carries the R2 mirror set for
+ADR-B4 / ADR-B5 / D-SB4-*:
+
+| Case | What it asserts |
+|---|---|
+| `test_verify_refuses_no_arg_no_env` | Run `verify_deployed_image.sh` with no arg, no `WC_IMAGE_TAG`: exit 2, stderr contains "refusing to fall back". |
+| `test_verify_uses_env_when_arg_missing` | With no arg but `WC_IMAGE_TAG=abc123` exported: EXPECTED == `abc123` (smoke via grep / dry-run). |
+| `test_verify_does_not_grep_HEAD_in_fallback` | NOT-X mirror: `git rev-parse --short HEAD` no longer appears in `verify_deployed_image.sh`. |
+| `test_smoke_passes_explicit_sha_to_verify` | `smoke_s_b2.sh` source-grep: both verify invocations carry a SHA arg (either `$EXPECTED_SHA` or `$WC_IMAGE_TAG`); no bare `bash scripts/verify_deployed_image.sh` call. |
+| `test_probe_suite_has_expected_sha_flag` | `predeploy_probe_suite.py` defines `--expected-sha`. |
+| `test_probe_suite_checks_git_sha_in_wait_for_health` | `wait_for_health` (or its caller) parses `/health`'s `git_sha` and asserts equality before returning True. |
+| `test_probe_suite_exits_4_on_sha_mismatch` | NOT-X mirror: simulate `/health` returning a different `git_sha`; runner exits 4 (the same exit code as "health never came up"). |
+| `test_deploy_sh_captures_previous_sha_before_compose_up` | `deploy.sh` source-grep: `docker inspect` of running `gutenberg-lab` happens BEFORE `docker compose up -d --force-recreate`. |
+| `test_deploy_sh_invokes_probe_gate_after_verify` | `deploy.sh` source-grep: `predeploy_probe_suite.py` invocation appears after the `verify_deployed_image.sh` call. |
+| `test_deploy_sh_rolls_back_on_red_verify_or_probe_gate` | `deploy.sh` source-grep: red verify OR red probe-gate path leads to a `--rollback $PREVIOUS_SHA` re-invocation. |
+| `test_deploy_sh_aborts_without_rollback_when_no_previous` | `deploy.sh` source-grep: the "no PREVIOUS_SHA captured" path exits non-zero WITHOUT calling rollback. |
+| `test_no_commented_wc_flag_in_compose` | Lint Rule 1 (ADR-B5): no line matching `^\s*#.*WC_[A-Z][A-Z0-9_]*\s*[:=]` in any `docker-compose*.yml`. |
+| `test_binary_toggle_flag_either_live_or_in_registry` | Lint Rule 2 (ADR-B5): each `os.environ.get("WC_*", "on"|"off"|...)` in `scripts/` is either live in compose env or in `flag_registry.CODE_DEFAULT_ON` / `EXPERIMENTAL`. |
+| `test_flag_registry_entries_match_actual_code_defaults` | NOT-X mirror: every entry in `CODE_DEFAULT_ON` has at least one matching `os.environ.get("WC_X", "on"|...)` in `scripts/` (no orphan whitelist entries). |
+| `test_stale_image_under_new_tag_fails_verify` | Integration-shape (offline-runnable via mock of `docker inspect` / `curl`): with a docker tag pointing at SHA-A but `/health.git_sha=SHA-B`, `verify_deployed_image.sh` exits 7 (the existing runtime-mismatch exit code from D-SB3-3). |
+
+Per R2, every "X triggers Y" has a "NOT-X does not trigger Y" mirror:
+- `test_verify_uses_env_when_arg_missing` (X — env supplies SHA) ↔
+  `test_verify_refuses_no_arg_no_env` (NOT-X — neither supplies, hard fail).
+- `test_probe_suite_checks_git_sha_in_wait_for_health` (X — matching SHA) ↔
+  `test_probe_suite_exits_4_on_sha_mismatch` (NOT-X).
+- `test_deploy_sh_rolls_back_on_red_verify_or_probe_gate` (X — rollback fires) ↔
+  `test_deploy_sh_aborts_without_rollback_when_no_previous` (NOT-X — no target, no spurious rollback).
+- `test_binary_toggle_flag_either_live_or_in_registry` (X — flag is known) ↔
+  `test_flag_registry_entries_match_actual_code_defaults` (NOT-X — orphan registry entries fail).
+
+### Acceptance gate (TZ S-B4)
+
+| Gate                                                                              | How verified                                                                            |
+|-----------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------|
+| Deploy is one command                                                             | `bash scripts/deploy.sh` does build + up + verify + probe-gate + (rollback on red).     |
+| `verify` step asserts `/health.git_sha` matches expected                          | `verify_deployed_image.sh` (D-SB3-3) + `predeploy_probe_suite.py --expected-sha` (new). |
+| Probe-gate red → auto-rollback                                                    | `test_deploy_sh_rolls_back_on_red_verify_or_probe_gate`.                                 |
+| Stale image under new tag → verify fails                                          | `test_stale_image_under_new_tag_fails_verify` (negative).                               |
+| No commented `WC_*` lines in compose                                              | `test_no_commented_wc_flag_in_compose` (Lint Rule 1).                                    |
+| Lint catches flag↔code drift                                                      | `test_binary_toggle_flag_either_live_or_in_registry` + orphan-entry mirror.              |
+| `verify_deployed_image.sh` no-arg path no longer falls back to host HEAD          | `test_verify_refuses_no_arg_no_env` + `test_verify_does_not_grep_HEAD_in_fallback`.      |
+
+### Follow-ups deliberately out of scope of S-B4
+
+- **B4-Phase 2: golden-set live tests (`WC_GOLDEN_LIVE`) + critic-flagged
+  regression smoke from `/admin/bad_answers`.** Both were in the
+  2026-05-24 Proposed ADR-B4. Both depend on the S-F2 v1↔v2 contract
+  layer to be meaningful (a golden test that calls into a wrapper
+  with no contract has the same dark-code risk as an uncontracted
+  prod call). Tracked for the F-wave.
+- **B5-Phase 2: full `env_registry.py` indirection.** ~26 reads, ~1
+  day, lands cleanly behind the lint gate of this Accepted form.
+- **Predeploy *pre-build* harness** (the original 2026-05-24 ADR-B4
+  framing — pytest + golden + env-diff before `docker build`). The
+  parts that pay off now (`pytest --collect-only`, `check_version_bump.py`)
+  are in CI already; the rest (golden, env-diff) couple to B4-Phase 2
+  and B5-Phase 2 respectively.
+- **R7 cascade counter** ("commits since last green deploy in same
+  area"). Worth doing; orthogonal to S-B4's contract. Tracked for
+  the F-wave.
+
+---
+
 ## 2026-05-25 — S-B3: runtime build identity landed (ADR-B3 accepted)
 
 Closes block **S-B3** of `docs/tz_structural_fixes_2026-05-24.md`.
