@@ -32,7 +32,11 @@ import re
 from pathlib import Path
 
 import pytest
-import yaml
+
+# yaml is imported lazily inside _compose_env_keys so that pytest
+# COLLECTION (R10) does not fail on a CI runner that has not installed
+# PyYAML yet. The collect-only gate must stay decoupled from runtime
+# deps; the actual test body imports yaml the moment it is needed.
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
@@ -94,7 +98,12 @@ def _compose_env_keys(compose_path: Path) -> set[str]:
     """All ``WC_*`` keys live in any service's ``environment:`` mapping
     (or in the ``x-app-env`` YAML anchor used by services). Returns
     only keys (not values) — the lint cares about presence.
+
+    yaml is imported lazily (R10): the test file's collection must
+    not depend on PyYAML being installed.
     """
+    import yaml  # lazy — see module-level note on R10
+
     if not compose_path.exists():
         return set()
     data = yaml.safe_load(compose_path.read_text(encoding="utf-8")) or {}
