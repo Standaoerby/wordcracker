@@ -98,6 +98,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          # S-F1 / ADR-F1 / D67: the cache_fingerprint_audit step
+          # below needs HEAD~1 for the default `--since` argument.
+          # Cheap to fetch full history on a single-host repo of this
+          # size (~50 MB packed); the audit step is otherwise blind.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -148,3 +154,25 @@ jobs:
 
       - name: Run tests/v2 (full directory, NOT a hand-list)
         run: python -m pytest tests/v2 -v
+
+      - name: Cache fingerprint audit (S-F1 / ADR-F1 / D67) — advisory
+        # Verifies that any tool whose declared sources changed since
+        # HEAD~1 has a moved AST fingerprint. Catches the failure
+        # class where a refactor edits a depth=1 helper but the walk
+        # silently doesn't pick it up. Non-blocking for 48 h after
+        # ADR-F1 lands (per the ADR's "Implementation" section);
+        # promoted to blocking in a follow-up commit once the green
+        # baseline is established. `set -o pipefail` keeps the audit's
+        # own exit code visible in the run log even though the step
+        # is `continue-on-error: true`.
+        continue-on-error: true
+        run: |
+          set +e
+          python -m scripts.v2.cache_fingerprint_audit --since=HEAD~1
+          ec=$?
+          if [ $ec -eq 0 ]; then
+            echo "::notice title=Cache fingerprint audit::OK"
+          else
+            echo "::warning title=Cache fingerprint audit::exit $ec — advisory only; see docs/v2/decisions.md → 2026-05-25 S-F1 follow-ups"
+          fi
+          exit 0

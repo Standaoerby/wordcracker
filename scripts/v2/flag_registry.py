@@ -40,6 +40,14 @@ CODE_DEFAULT_ON: Final[dict[str, str]] = {
         "rendered answers; on for prod since D-P1-7. Off via ad-hoc "
         "env when measuring critic-only effects."
     ),
+    "WC_CACHE_AST_INVALIDATION": (
+        "scripts/v2/cache.py — AST-hash cache invalidation (ADR-F1 / "
+        "D67, S-F1, 2026-05-25). On = wrapper/v1-callee source flips "
+        "cache_key automatically (E18 fix). Off = revert to "
+        "(schema, wrapper_version, args) only, the pre-S-F1 contract. "
+        "Permanent kill-switch — flipping off is a developer-debugging "
+        "action when an AST-walk regression is suspected."
+    ),
 }
 
 # Flags that are honestly experimental — opt-in only, default off, no

@@ -84,15 +84,102 @@ def _normalize_args(args: dict) -> str:
     return json.dumps(cleaned, sort_keys=True, ensure_ascii=False, default=str)
 
 
-def _ast_fingerprint_for(tool: str) -> str:
-    """Compute an AST fingerprint of (wrapper_fn, v1_callee) for `tool`.
+def _ast_invalidation_on() -> bool:
+    """Lazy read of WC_CACHE_AST_INVALIDATION (ADR-F1 kill-switch).
 
-    Returns "" when the tool isn't contract-bound (legacy/v2-native).
-    Cached at module level — fingerprints don't change at runtime.
+    Default is on (production state). Off short-circuits the AST
+    walk: `cache_key` falls back to the pre-S-F1 contract,
+    `(schema, wrapper_version, args)` only. Declared in
+    [flag_registry.CODE_DEFAULT_ON](flag_registry.py) per ADR-B5's
+    third category; the flag-lint test enforces R1 ("no dark code").
     """
+    val = os.environ.get("WC_CACHE_AST_INVALIDATION", "on").strip().lower()
+    return val not in ("0", "off", "false", "no")
+
+
+def _pin_fingerprint_mode() -> bool:
+    """Lazy read of WC_CACHE_PIN_FINGERPRINT (ADR-F1 startup snapshot).
+
+    When on, the first miss for any tool triggers a full registry sweep;
+    the resulting fingerprint dict is frozen for the process lifetime.
+    Two guarantees: (a) prod canary observes a deterministic key set
+    even under module hot-reload; (b) `inspect.getsource` per-miss cost
+    is amortized at warm-up. Default off — lazy lookup, one entry per
+    cache miss. D-SF1-2 declares this is a mode selector, not a
+    flag-lint-scoped binary toggle.
+    """
+    val = os.environ.get("WC_CACHE_PIN_FINGERPRINT", "0").strip().lower()
+    return val in ("1", "on", "true", "yes")
+
+
+_AST_FP_CACHE: dict[str, str] = {}
+_AST_FP_PINNED: bool = False
+_AST_FP_LOCK = threading.Lock()
+
+
+def _populate_ast_fp_snapshot() -> None:
+    """Walk the full REGISTRY once and freeze every tool's fingerprint.
+
+    Idempotent: subsequent calls are a no-op. Failures for individual
+    tools are logged and recorded as empty-string in the snapshot
+    (equivalent to "no AST contribution" — cache falls back to
+    `wrapper_version`-only for that tool).
+    """
+    global _AST_FP_PINNED
+    with _AST_FP_LOCK:
+        if _AST_FP_PINNED:
+            return
+        try:
+            from scripts.v2.tool_registry import REGISTRY
+        except ImportError as e:
+            log.warning("pin-fingerprint: registry import failed: %s", e)
+            _AST_FP_PINNED = True
+            return
+        try:
+            from scripts.v2.contracts.registry import (
+                wrapper_fingerprint_for_tool,
+            )
+        except ImportError as e:
+            log.warning("pin-fingerprint: contracts import failed: %s", e)
+            _AST_FP_PINNED = True
+            return
+        for tool_name in list(REGISTRY):
+            if tool_name in _AST_FP_CACHE:
+                continue
+            try:
+                _AST_FP_CACHE[tool_name] = (
+                    wrapper_fingerprint_for_tool(tool_name) or ""
+                )
+            except Exception as e:
+                log.debug(
+                    "pin-fingerprint: lookup failed for %s: %s", tool_name, e,
+                )
+                _AST_FP_CACHE[tool_name] = ""
+        _AST_FP_PINNED = True
+        log.info(
+            "cache fingerprints pinned for %d tools (WC_CACHE_PIN_FINGERPRINT)",
+            len(_AST_FP_CACHE),
+        )
+
+
+def _ast_fingerprint_for(tool: str) -> str:
+    """Compute an AST fingerprint of (wrapper_fn, v1_callee + depth=1
+    callees) for `tool`. See ADR-F1 in
+    [docs/v2/decisions.md](../../docs/v2/decisions.md).
+
+    Returns "" when the tool isn't in the registry or the lookup fails.
+    Process-cached: fingerprints derive from source on disk which is
+    immutable for the lifetime of a deployed image. When
+    `WC_CACHE_PIN_FINGERPRINT=1`, the full registry is snapshotted at
+    first call.
+    """
+    if _pin_fingerprint_mode() and not _AST_FP_PINNED:
+        _populate_ast_fp_snapshot()
+
     cached = _AST_FP_CACHE.get(tool)
     if cached is not None:
         return cached
+
     try:
         from scripts.v2.contracts.registry import wrapper_fingerprint_for_tool
         fp = wrapper_fingerprint_for_tool(tool) or ""
@@ -103,18 +190,30 @@ def _ast_fingerprint_for(tool: str) -> str:
     return fp
 
 
-_AST_FP_CACHE: dict[str, str] = {}
+def _reset_ast_fp_cache_for_tests() -> None:
+    """Test helper: drop the fingerprint snapshot.
+
+    Tests that toggle `WC_CACHE_PIN_FINGERPRINT` between cases or
+    monkey-patch source need to clear the cached fingerprints so the
+    next call re-resolves. Production code never calls this.
+    """
+    global _AST_FP_PINNED
+    with _AST_FP_LOCK:
+        _AST_FP_CACHE.clear()
+        _AST_FP_PINNED = False
 
 
 def cache_key(tool: str, args: dict, wrapper_version: str = "v1") -> str:
     norm = _normalize_args(args)
-    # Phase 2 (REFACTOR_BRIEF R-23 Tier 1A) — AST fingerprint of the
-    # wrapper + its v1 callee. Touching either source flips the
-    # fingerprint, so the next call after deploy reads through-not-
-    # from-cache automatically. Previously `wrapper_version` had to be
-    # bumped by hand (and was forgotten — Stan B100 was the original
-    # incident; coverage was opt-in across ~10/37 tools).
-    ast_fp = _ast_fingerprint_for(tool)
+    # ADR-F1 (S-F1, 2026-05-25) — AST fingerprint of the wrapper + its
+    # v1 callee + their depth=1 same-`scripts.`-module callees. Touching
+    # any of those sources flips the fingerprint, so the next call after
+    # deploy reads through-not-from-cache automatically. Previously
+    # `wrapper_version` had to be bumped by hand and was forgotten on
+    # ~10 of 37 tools (commit 2a958f8 retroactively swept those).
+    # Kill-switch: `WC_CACHE_AST_INVALIDATION=off` reverts to the
+    # pre-S-F1 contract.
+    ast_fp = _ast_fingerprint_for(tool) if _ast_invalidation_on() else ""
     h = hashlib.sha256(
         (f"{CACHE_SCHEMA_VERSION}\0{wrapper_version}\0{ast_fp}\0" + norm)
         .encode("utf-8")

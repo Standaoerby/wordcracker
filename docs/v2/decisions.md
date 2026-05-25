@@ -6,6 +6,662 @@
 
 ---
 
+## 2026-05-25 — S-F1: AST-hash cache invalidation (ADR-F1 / D67 accepted)
+
+Closes block **S-F1** of
+[tz_structural_fixes_2026-05-24.md](../tz_structural_fixes_2026-05-24.md)
+(spec lives in companion repo `C:\_PROJECTS\wordcracker\`).
+Promotes the long-pending **D67** (R-23 Tier 1A, sketched in
+[REFACTOR_BRIEF.md:88](../REFACTOR_BRIEF.md):88 and forward-referenced by
+[D-S0-2](#d-s0-2--cache-race-windows-skip-deferred-to-s-f1)) from
+sketch to Accepted, and lands the missing pieces on top of the
+half-shipped scaffold that already existed at HEAD.
+
+### What was already in place at the start of S-F1
+
+The previous touch on [cache.py](scripts/v2/cache.py) had introduced
+`CACHE_SCHEMA_VERSION = "v3-ast-fp"`, an `_ast_fingerprint_for(tool)`
+helper, and folded a fingerprint into `cache_key()`. The lookup was
+backed by
+[contracts/registry.py:wrapper_fingerprint_for_tool](scripts/v2/contracts/registry.py)
+which hashed `(wrapper_fn, v1_fn)` via `ast.dump(ast.parse(getsource))`.
+That covered the "v1 callable itself changed" case for the 32
+wrappers in 19 files with `@v1_contract` — but left three gaps the TZ
+calls out explicitly:
+
+1. **Shared-helper edits did not propagate.** `_title_lookup`
+   ([scripts/v2/tools/search/lexical.py:39](scripts/v2/tools/search/lexical.py:39))
+   is called from both `lexical_search` and `hybrid_search`. Editing
+   the helper changed neither tool's fingerprint — only the two
+   consumers' own bodies were hashed, not their callees.
+2. **v2-native tools were uncovered.** 8 tools out of 40 (`corpus_overview`,
+   `find_book_by_topic`, `hybrid_search`, `lemma_profile`,
+   `lexical_richness_authors`, `lexical_search`, `resolve_author_name`,
+   `resolve_book_title`) have no `@v1_contract` binding →
+   `wrapper_fingerprint_for_tool` returned None → cache key used the
+   empty-string fingerprint → body edits did not invalidate.
+3. **No kill-switch, no pin mode, no audit gate.** The fingerprint
+   computation was unconditional, lazy, and not verified anywhere. A
+   regression that broke the walk (e.g. silently swallowing a callee)
+   would show up as a stale-cache incident in prod, not as a CI red.
+
+### ADR-F1 — AST-hash cache invalidation: wrapper + v1-callee depth=1 walk
+
+**Status.** Accepted (2026-05-25, under S-F1). Promotes D67 from R-23
+sketch to landed contract.
+
+**Context.** `wrapper_version: str` on
+[ToolSpec](scripts/v2/tool_registry.py) is the manual cache-bust
+contract. After a wrapper semantic fix, the developer must bump the
+string; if they forget, prod serves pre-fix empty results from disk
+cache forever (until `corpus_version` rolls). Commit
+[`2a958f8`](https://github.com/Standaoerby/wordcracker/commit/2a958f8)
+("bump wrapper_version on 10 tools") was the artefact of this failure
+class — a sweep to retroactively tag 10 tools whose wrappers had been
+fixed without a bump. Coverage at HEAD before S-F1: 32 of 37 tools
+have a non-default `wrapper_version`; the rest still default to
+`"v1"`. Every one of those 10 missed bumps was a forgotten bump, not
+a deliberate choice — manual opt-in is structurally insufficient.
+
+The audit (C2, 2026-05-22) named this class E18. R-23 Tier 1A
+([R-23_sprint_plan.md](../R-23_sprint_plan.md) in the companion repo)
+proposed D67: fold an AST-derived code fingerprint of the wrapper into
+`cache_key`, so any edit to wrapper source flips the key
+automatically. The half-shipped scaffold above implemented that for
+contract-bound wrappers and their direct v1 function — the missing
+pieces are the depth=1 walk into shared helpers, the v2-native
+fallback, the operational kill-switch / pin mode, and a CI gate that
+proves the contract holds (TZ S-F1 acceptance: "правка shared-хелпера
+`_title_lookup` меняет fingerprint всех потребителей; косметическая
+правка — не меняет").
+
+**Options considered.**
+
+1. **Wrapper + v1_fn only (status quo at HEAD).** What was already
+   shipped. Pros: simple, no walk machinery. Cons: doesn't catch the
+   `_title_lookup` failure mode that motivates S-F1 — a helper change
+   doesn't flip its callers' fingerprints. Rejected as insufficient
+   on its own; it's the floor S-F1 builds on.
+2. **Wrapper + v1_fn + depth=1 walk into same-project callables.**
+   Walk `fn.__code__.co_names`; for each name in `fn.__globals__`
+   whose `__module__` starts with `scripts.`, fold its AST source
+   into the fingerprint. Catches `_title_lookup`-class helpers
+   without exploding into the whole transitive call graph. **Decision.**
+3. **Full transitive walk (depth=N).** Hash the whole reachable
+   call graph. Strictly more invalidations than option 2 — but every
+   edit anywhere in `scripts/` propagates everywhere, so practically
+   every PR busts every cache entry. Defeats the purpose of caching.
+   Rejected.
+4. **Replace cache_key with a per-deploy global epoch (`git_sha`).**
+   Folding `/health.git_sha` (from
+   [ADR-B3](#2026-05-25--s-b3-runtime-build-identity-landed-adr-b3-accepted))
+   into the key invalidates *every* entry on *every* deploy.
+   Operationally a non-starter: cold cache after each deploy means
+   the first hour after rollout is uniformly slow on heavy tools,
+   re-running each query against the live corpus. The point of the
+   per-tool fingerprint is precisely to invalidate only the changed
+   tools' entries — preserve cold-start savings for the unchanged
+   ones. Rejected.
+
+**Decision.** Option 2.
+
+**Implementation.**
+
+1. **Depth=1 walk in
+   [`ast_fingerprint`](scripts/v2/contracts/registry.py).** Generalize
+   the existing helper: for each entry fn, walk `co_names` →
+   `__globals__` → callables whose `__module__` starts with
+   `scripts.`. Fold each callee's AST source into the hash. Sort
+   parts by qualname so order is deterministic. Self-references
+   skipped (a function can list its own name in `co_names` if it
+   recurses).
+
+2. **v2-native fallback in `wrapper_fingerprint_for_tool`.** When no
+   `@v1_contract` binding matches `spec.fn`, hash `spec.fn` directly
+   (plus its depth=1 callees). Lifts coverage from 32/40 contract-
+   bound tools to **40/40** — every cacheable tool now has a body-
+   derived fingerprint. Helpers like `_title_lookup` referenced from
+   v2-native code (`hybrid_search`) are folded in via the same walk
+   *when they're imported at module level*; lazy in-body imports are
+   the documented gap (D-SF1-4).
+
+3. **`WC_CACHE_AST_INVALIDATION` kill-switch.** Lazy env read in
+   `cache.cache_key()`; when set to `"off"` / `"0"` / `"false"`, the
+   fingerprint portion is empty-string and cache reverts to
+   `(schema, wrapper_version, args)` only — the pre-S-F1 contract.
+   Default is **on** (production state). Declared in
+   [`flag_registry.CODE_DEFAULT_ON`](scripts/v2/flag_registry.py) per
+   ADR-B5's third category (code-default-on, invariant for prod,
+   flipping is a developer-debugging action). The
+   [flag-lint test](tests/v2/test_flag_lint.py) is what enforces R1
+   on this read: there is no dark code, just an explicit allowlist
+   entry. Removal path: once 48 h of green prod with the gate on,
+   either keep the kill-switch as a permanent escape hatch (R1
+   stays satisfied because it's in the registry) or remove it in a
+   follow-up ADR.
+
+4. **`WC_CACHE_PIN_FINGERPRINT` startup snapshot.** When set to
+   `"1"` / `"on"` / `"true"`, `cache.py` walks the full REGISTRY at
+   first use and freezes the fingerprint table for the rest of the
+   process lifetime. Subsequent `_ast_fingerprint_for(tool)` calls
+   serve from the frozen snapshot, never re-reading source. Two
+   guarantees: (a) prod canary observes a deterministic key set —
+   no drift if a developer accidentally hot-reloads a module during
+   an investigation; (b) `inspect.getsource` is paid once, not per
+   miss. Default off; turned on in the
+   [prod compose](docker-compose.yml) `chat`/`admin` services so
+   the canary path is the default. Local dev gets the lazy path.
+
+5. **C-extension fallback.** `_source_or_empty` (existing) returns
+   `""` for any fn where `inspect.getsource` raises (C extensions,
+   builtins). The walk emits a stable `"unsource:<qualname>"` marker
+   for the fingerprint — flipping the underlying C extension version
+   does NOT flip the fingerprint, but for the in-tree code that
+   matters this is acceptable (cached results from a C-extension-
+   backed tool are invalidated by `corpus_version` like before).
+   `wrapper_version` remains as the manual escape hatch for
+   C-extension-driven behaviour changes.
+
+6. **CI gate
+   [`scripts/v2/cache_fingerprint_audit.py`](scripts/v2/cache_fingerprint_audit.py)
+   `--since=<ref>`.** For each tool: compute the fingerprint at
+   `HEAD` (in-process) and at `<ref>` (subprocess in
+   `git worktree add`); diff. Fails if any tool's wrapper source OR
+   any of its declared depth-1 callees were edited in the range but
+   the tool's fingerprint did not flip — proves the walk picked up
+   the edit. Skips cleanly if no `scripts/` files changed in the
+   range. Wired into
+   [predeploy.yml](.github/workflows/predeploy.yml) as a non-blocking
+   advisory in this ADR; promoted to blocking after 48 h of green
+   runs (see S-F1 closeout below for the actual status).
+
+**Consequences.**
+
+- The `wrapper_version` field on `ToolSpec` stays — it's still the
+  signal for "wrapper output **shape** changed in a way the cache
+  payload roundtrip cares about" (different dataclass fields,
+  different keys in `data`). The AST fingerprint covers the orthogonal
+  axis "wrapper **behaviour** changed without a shape change". Both
+  end up multiplied into the same hash; either path invalidates.
+- Forgetting to bump `wrapper_version` is now a recoverable mistake,
+  not a silent prod stale-cache: the next deploy flips the AST
+  fingerprint anyway.
+- Every PR that edits a tool body or a shared helper produces a
+  partial cache invalidation on deploy. Operationally: the first
+  request after deploy that touches the changed tool re-computes;
+  the disk entry for the old fingerprint stays on disk under
+  `/data/v2_cache/<tool>/<old-prefix>/...` and ages out via TTL or
+  manual sweep. No new infrastructure for cache GC; the existing
+  two-level fan-out
+  ([cache.py:_disk_path](scripts/v2/cache.py)) keeps directory size
+  bounded.
+- The CI gate makes the contract self-checking: a future commit that
+  edits a helper but routes its call through `getattr` (skipping
+  `co_names`) would slip past the walk — the audit fails because the
+  edited file is in the diff but no tool's fingerprint moved.
+
+**Trade-offs.**
+
+- Depth=1 is a deliberate ceiling. A helper-of-a-helper edit
+  (`_title_lookup` calls some `_normalize_id` which gets edited) does
+  NOT propagate. Trade-off: depth=N would over-invalidate and erase
+  the cache-savings reason for the layer to exist. Mitigation: any
+  edit to `_normalize_id` shows up as a diff in the same commit, and
+  the wrapper_version of the *direct* user can be bumped manually if
+  the indirect path is load-bearing — same rule as before, just
+  rarer.
+- `inspect.getsource` is sensitive to source-file presence: in a
+  packed deployment (PyInstaller, zipapp) it can fail for in-tree
+  code, dropping fingerprints to `""`. Prod runs from a SHA-tagged
+  Docker image with full source on disk (per
+  [ADR-B1](#d-sb1-2--code-is-baked-into-the-image-via-copy)), so this
+  is a non-issue for us today. If a future deploy mode packs the
+  bytecode-only, the walk degrades gracefully (every fingerprint
+  becomes `"unsource:..."`, equivalent to wrapper_version-only).
+- `co_names` is a static-bytecode read — it misses callees reached
+  via `getattr(module, "name")` indirection or dynamic dispatch. The
+  CI audit gate catches drift if a future refactor swaps a direct
+  call for `getattr`, because the source diff will exist but no
+  tool's fingerprint will move.
+- Pin mode adds startup cost: ~37 tools × `inspect.getsource` +
+  `ast.parse` + same for ~3-5 depth-1 callees each = ~200 source
+  reads at warm-up. Measured at well under 1 s on the prod host —
+  amortized across the process lifetime, far below the per-miss
+  cost it eliminates.
+
+### D-SF1-1 — `WC_CACHE_AST_INVALIDATION` lives in `flag_registry.CODE_DEFAULT_ON`
+
+**Decision.** Add `WC_CACHE_AST_INVALIDATION` to
+[scripts/v2/flag_registry.py](scripts/v2/flag_registry.py) →
+`CODE_DEFAULT_ON`, with rationale tied to this ADR. Lint passes; no
+compose entry; flipping off is a developer action, not a
+configuration choice — matches the
+[ADR-B5](#adr-b5--flag-lifecycle-live-code-default-on-or-experimental-lint-blocks-dark-code-drift)
+third-category definition exactly.
+
+**Why not `EXPERIMENTAL`.** Experimental is for honestly opt-in,
+default-off flags that are not yet production decisions. The AST
+fingerprint IS the production decision — it just keeps a kill-switch
+in case the walk regresses unexpectedly in prod. Default state is
+"on" and matches prod intent; that's `CODE_DEFAULT_ON`, not
+`EXPERIMENTAL`.
+
+**Why not just live in compose `environment:`.** Because its value
+doesn't differ across environments — dev and prod both want it on.
+Putting it in compose with a fixed value would be a noise entry
+(per [ADR-B5](#adr-b5--flag-lifecycle-live-code-default-on-or-experimental-lint-blocks-dark-code-drift)
+"Live" definition — compose is for values that DIFFER across envs).
+
+### D-SF1-2 — `WC_CACHE_PIN_FINGERPRINT` is Live in prod compose, not in `flag_registry`
+
+**Decision.** `WC_CACHE_PIN_FINGERPRINT` is set to `"1"` on the prod
+[`x-app-env`](docker-compose.yml) anchor (picked up by gutenberg-lab,
+chat, admin) and left unset elsewhere. This is the
+[ADR-B5](#adr-b5--flag-lifecycle-live-code-default-on-or-experimental-lint-blocks-dark-code-drift)
+"Live" definition exactly: the flag's value DIFFERS across envs (prod
+= snapshot at startup; dev/local pytest = lazy, equivalent to off).
+The flag-lint test passes via Rule 2(a) — present in `services.*.environment`
+— without an entry in `flag_registry.py`.
+
+**Why not `CODE_DEFAULT_ON`.** The semantic of `CODE_DEFAULT_ON` is
+"the production default lives in code, no compose entry needed." But
+local pytest / dev shouldn't pay the snapshot startup cost (~37 tools
+× `inspect.getsource` per test run is wasteful and slows tight
+iteration). Differing across envs is exactly what "Live in compose"
+is for. Filing this as `CODE_DEFAULT_ON` would force dev to opt-out
+explicitly, which is the wrong default for a tool that exists to make
+prod monitoring deterministic.
+
+**Why not `EXPERIMENTAL`.** Pin-mode IS a production decision — prod
+ships with it on. `EXPERIMENTAL` is for opt-in defaults that are not
+yet production decisions. Misclassifying it there would lie about
+prod state.
+
+### D-SF1-3 — Walk boundary: callees whose `__module__` starts with `scripts.`
+
+**Decision.** A callee is "in scope" for the depth=1 walk iff its
+`__module__` attribute starts with `scripts.`. Anything else
+(stdlib, pandas, numpy, spacy, anthropic SDK, …) is excluded from the
+fingerprint.
+
+**Why.** This is the natural project boundary. Third-party packages
+are pinned by [requirements.lock](requirements.lock) and the schema
+roll bakes their version into the `CACHE_SCHEMA_VERSION` bump path —
+in-tree code is what changes between deploys without a schema bump,
+and that's exactly what AST fingerprinting targets. Including
+third-party `__module__` values would either (a) flip every
+fingerprint on every package upgrade (over-invalidates, see option 3
+above) or (b) require a per-package allowlist (unbounded surface).
+The `scripts.` prefix is one rule, zero allowlist.
+
+### D-SF1-4 — Depth=1 ceiling: historical justification + residual risk + backstop
+
+**Decision.** The walk stops at depth=1 from each entry function
+(wrapper + v1_fn for contract-bound; spec.fn for v2-native). A
+helper-of-a-helper (depth≥2) edit does NOT flip the fingerprint
+automatically; the manual `wrapper_version` field on `ToolSpec`
+remains the explicit backstop for that class.
+
+**Historical evidence (depth≤1).** Every named incident this block
+exists to close lives at depth≤1:
+
+| Incident | Layer | Depth |
+|---|---|---|
+| **E18 (stale-cache)** — commit [2a958f8](https://github.com/Standaoerby/wordcracker/commit/2a958f8) retroactively bumped `wrapper_version` on 10 tools whose wrappers had been edited but the field was forgotten. | wrapper body | 0 |
+| **E15 (key mismatch, 7 wrappers)** — wrappers read non-existent keys from v1 raw (`top_collocates`, `top_unique_a`, `pre_bucket` flat vs nested). | wrapper body reads v1 output | ≤1 |
+| **B-R14-7** — learning_words v2 wrapper read `"words"` instead of v1's `"results"` ([backlog.md:150](../../backlog.md) in companion repo, fixed in commit `8a27048`). | wrapper body reads v1 output | ≤1 |
+| **E20/E21/E22 (`[:3]`-truncation)** — `_normalize_lang` and `_title_lookup` returned wrong values; consumers (wrappers + `hybrid_search`) hit them at one call hop. | depth=1 helper edit | 1 |
+
+None of the post-audit historical bugs lived at depth≥2. The
+depth=1 ceiling covers every observed harm class.
+
+**Residual risk at depth≥2.** A bug where a wrapper is fine, its v1
+is fine, but a helper-OF-the-helper has stale logic (e.g.
+`_metadata_df` is fine but `_slug` — which it calls — has a regex
+edit) will NOT flip the wrapper's fingerprint automatically. The
+disk cache for that tool would serve stale results until either
+`corpus_version` rolls or `wrapper_version` is bumped manually.
+
+**Resolution model gap: lazy imports + `module.attr`.** The walk
+uses `fn.__code__.co_names` (static bytecode) → `fn.__globals__`
+(module-level globals). Two patterns produce dark coverage:
+
+1. **`from X import Y` inside a function body.** `Y` becomes a
+   *local* variable (`co_varnames`), not a global. `__globals__.get("Y")`
+   returns None → missed. Universal in v2 wrappers (e.g.
+   [affinity.py:165](scripts/v2/tools/authors/affinity.py:165) does
+   `from scripts.rag_tools import affinity_by_author as _v1` inside
+   the wrapper). The wrapper's own walk misses `_v1`.
+2. **`import X as alias; alias.fn(…)`.** `alias` is in `co_names`
+   AND in `__globals__` but is a *module* — `callable(obj)` filter
+   drops it. `fn` is an attribute access (`LOAD_ATTR`) — never
+   appears as a top-level `co_names` entry. Missed both ways.
+
+These gaps are **structurally** the same shape — symbols not in
+module-level globals. They're documented in test 14
+([test_cache_ast_fingerprint.py](tests/v2/test_cache_ast_fingerprint.py))
+as failing-by-design assertions, so if the resolution model is
+extended in a follow-up, the test flips and a D67 update is forced.
+
+**Why the gap is bounded in practice.** For all 32 contract-bound
+tools, the v1-callee walk goes through `binding.v1_fn` (passed
+explicitly as an entry to `ast_fingerprint`, not discovered through
+the wrapper's body). So even when a wrapper lazy-imports `_v1`,
+the v1 function — and all of its depth=1 helpers in `rag_tools` —
+are walked correctly. Test 6b
+([test_cache_ast_fingerprint.py::test_06b_real_v1_helper_edit_flips_real_tool_fp](tests/v2/test_cache_ast_fingerprint.py))
+locks this in: editing the real `rag_tools._slug` (a depth=1 callee
+of v1 `affinity_by_author`) flips the v2 tool's fingerprint
+end-to-end. The 8 v2-native tools (`corpus_overview`,
+`find_book_by_topic`, `hybrid_search`, `lemma_profile`,
+`lexical_richness_authors`, `lexical_search`, `resolve_author_name`,
+`resolve_book_title`) only see helpers that the wrapper imports at
+*module* level — lazy-imported v1 helpers from inside their bodies
+are missed.
+
+**Backstop semantics — and why this gap is a CORRECTNESS risk,
+not a latency one.** D-SF1-5 covers the *over-aggressive* failure
+mode (fingerprint flips when no source changed → unnecessary cache
+miss → recompute → correct answer, just slower). The residual gap
+described here is the *opposite* direction: fingerprint does NOT
+flip when source DID change → stale cache served → user receives
+the pre-fix answer indefinitely. **That is a correctness defect,
+not a performance one.** A depth≥2 or lazy-import semantic fix that
+relies solely on the AST fingerprint to invalidate cache will
+silently fail to land — exactly the E18 failure class S-F1 exists
+to close, just at a deeper resolution layer.
+
+`ToolSpec.wrapper_version` remains a *manual* mechanism, and after
+S-F1 its semantic narrows but its operational requirement
+strengthens. It is no longer the primary cache-bust signal for
+routine wrapper edits (the AST fingerprint covers those); it is the
+**mandatory** signal for the three cases the walk cannot reach:
+
+**Imperative — developer instruction.** When making a semantic fix
+that falls into any of the three cases below, bump the affected
+tool's `wrapper_version` in the same commit. The AST fingerprint
+WILL NOT catch the edit; without a manual bump the disk cache
+serves the pre-fix answer until `corpus_version` rolls (typically
+weeks).
+
+1. **Depth≥2 helper edit.** Edit lives in a helper-of-a-helper
+   relative to the tool's wrapper/v1. Example: editing
+   `rag_tools._maybe_translate` (used by `_select_books`, which is
+   used by `affinity_by_author` v1) — the fingerprint walk goes
+   wrapper → v1 → `_select_books`. `_maybe_translate` is one hop
+   too deep. Bump `affinity_by_author`'s `wrapper_version` (and
+   every other v1's that uses `_select_books`).
+2. **Lazy in-body import of a same-helper-edit.** A v2-native tool
+   (`corpus_overview`, `find_book_by_topic`, `hybrid_search`,
+   `lemma_profile`, `lexical_richness_authors`, `lexical_search`,
+   `resolve_author_name`, `resolve_book_title`) lazy-imports a
+   helper from `rag_tools` *inside its function body* and edits that
+   helper in the same commit. The wrapper's `co_names` doesn't see
+   the lazy-imported symbol (D-SF1-4 resolution-model gap). Bump
+   `wrapper_version`.
+3. **C-extension-backed behaviour change.** `inspect.getsource`
+   raises for builtins / `.so` callables; the fingerprint falls
+   back to the stable `unsource:` marker (test 5). A semantic
+   change inside such a callable does not move the fingerprint.
+   Bump `wrapper_version`.
+
+**Forcing function: the CI audit gate.**
+[cache_fingerprint_audit.py](scripts/v2/cache_fingerprint_audit.py)
+surfaces case 1 and (when the wrapper file itself is the diff)
+case 2: it sees that a tool's declared source files changed in the
+diff range but the fingerprint stayed. The developer reads the
+audit output, bumps `wrapper_version` in the same commit, and the
+PR re-runs green. Case 3 (C-extension) is not catchable by the
+audit (no source diff exists) — that one requires developer
+judgment. The gap is **surfaced**, not closed; silent stale-cache
+cannot occur in cases 1-2 without a visible CI signal. The audit
+step is `continue-on-error: true` for the 48 h canary
+([backlog.md](../../backlog.md) deadline 2026-05-27); after the
+window it becomes blocking, and case 1/2 stale-cache failures
+become CI-red, not silent-prod.
+
+### D-SF1-5 — Failure mode is latency, not correctness — default-on from start
+
+**Decision.** Ship with `WC_CACHE_AST_INVALIDATION=on` from the
+first deploy — no canary observation window before promotion.
+
+**TZ deviation, documented honestly.** The TZ for S-F1 reads:
+"Миграция за флагом `WC_CACHE_AST_INVALIDATION=on`, canary 48h,
+default-on если miss-rate ≤ 2× baseline." The phased framing
+assumes a non-trivial probability that the new behaviour *breaks
+something*; canary is what lets you observe before committing to a
+global flip. **The shipped implementation skips the canary phase**
+and turns the gate on for everyone immediately. The justification:
+
+**The failure mode of an over-eager fingerprint is a cache MISS, not
+a wrong answer.** Concretely:
+
+| Symptom | Pre-S-F1 (wrapper_version only) | Post-S-F1 (with AST fp) |
+|---|---|---|
+| Cache hit | Tool returns disk-cached result. | Same. |
+| Cache miss (e.g. AST fp doesn't match disk entry) | Tool re-runs from scratch, fills cache, returns. | Same — slower than a hit, identical answer. |
+| Worst-case AST-walk bug (e.g. walk regression flips fp on every call) | n/a — this is the new failure mode. | Every call is a cache miss → every call re-runs from scratch → answers are correct, latency is unmasked. |
+
+The audit (C2, 2026-05-22) defines correctness as "answer matches
+what the tool *would* compute from the current corpus state".
+Aggressive invalidation always honors that — the tool re-runs,
+returns the current answer, fills the cache. Disk usage grows (old
+fp entries accumulate until TTL trims them); latency for tools that
+were previously served from cache regresses to their cold path. No
+user-visible result corruption.
+
+This is *qualitatively* different from a kill-switch on a CORRECTNESS-
+critical path. If `WC_CACHE_AST_INVALIDATION` had been, say, an
+LLM-output filter or a fact-check pass, a default-on-from-start
+without canary would be reckless — a bug in that pass produces
+*wrong* answers, not slow ones. Here the worst case is a degraded
+cache hit-rate. Acceptable to skip canary.
+
+**What the canary surface still lets us do.** The kill-switch
+(`WC_CACHE_AST_INVALIDATION=off`) and the CI advisory step both
+remain. Operationally:
+
+- If a wave of "every request is suddenly slow" lands after deploy,
+  the kill-switch is one env flip away (reverts to
+  `wrapper_version`-only behaviour, identical to pre-S-F1).
+- The advisory CI step posts `::notice` / `::warning` annotations
+  on every PR. If a future commit drives a sustained false-positive
+  rate (fingerprint flips when no source changed — bug class:
+  non-deterministic walk), it's visible in PR runs before promotion
+  to blocking.
+- A 48 h hard follow-up on `backlog.md` (companion repo) holds the
+  promotion-of-advisory-to-blocking and the kill-switch retention
+  decision time-bound. Without that, the advisory step would drift
+  permanently — exactly the dark-config failure
+  [ADR-B5](#adr-b5--flag-lifecycle-live-code-default-on-or-experimental-lint-blocks-dark-code-drift)
+  exists to catch.
+
+**Where a canary would have been needed.** If the AST walk had any
+chance of *suppressing* an otherwise-valid cache hit at random — i.e.
+producing two different fingerprints for the same source on two
+different processes — that would be a correctness problem (a user
+in tab A sees fresh data, tab B sees the same fresh data computed
+identically). The walk is *deterministic* by construction
+(`ast.dump` is deterministic; sorted parts; SHA-256). Test 11 locks
+this in. So this is a hypothetical we've ruled out by the design,
+not an unobserved risk we've shipped past.
+
+### Negative tests (R2)
+
+[tests/v2/test_cache_ast_fingerprint.py](tests/v2/test_cache_ast_fingerprint.py)
+locks in twelve invariants — each one paired with a positive case
+that would have silently regressed pre-S-F1 (see file header for the
+explicit before/after for each test):
+
+1. Body edit on a wrapper flips its fingerprint.
+2. Body edit on a shared depth=1 helper (`_title_lookup`-class)
+   propagates to every consumer's fingerprint.
+3. Cosmetic edits (whitespace, comments) do NOT flip the fingerprint
+   (the AST-dump-then-hash level strips them).
+4. Cosmetic edits on a depth=1 helper also do NOT propagate.
+5. C-extension fallback: a built-in callable produces a stable
+   `unsource:` marker, not an error.
+6. v2-native tools (no `@v1_contract`) fingerprint via `spec.fn`
+   fallback; coverage is 37/37 not 32/37.
+7. `WC_CACHE_PIN_FINGERPRINT=1` snapshots at first call; subsequent
+   re-reads serve the snapshot value even when source on disk changes.
+8. `WC_CACHE_AST_INVALIDATION=off` short-circuits the walk: cache
+   key reverts to `(schema, wrapper_version, args)` only.
+9. Depth=1 callee picked up: a same-`scripts.`-module helper called
+   from the entry fn is folded in.
+10. Depth=2 callee NOT picked up: a helper-of-a-helper edit does NOT
+    flip the entry fn's fingerprint (the depth ceiling is enforced).
+11. Determinism: `ast_fingerprint(fn1, fn2) == ast_fingerprint(fn2,
+    fn1)` (sorted by qualname before hashing).
+12. `CACHE_SCHEMA_VERSION` change globally invalidates: same args +
+    same fingerprint under two different schema versions produce two
+    different `cache_key` results.
+
+Plus the CI gate
+[scripts/v2/cache_fingerprint_audit.py](scripts/v2/cache_fingerprint_audit.py):
+running it against a fabricated commit that edits a helper without
+touching its callers must report a mismatch and exit non-zero, on a
+clean diff it must exit zero. Both states asserted by
+[`test_cache_fingerprint_audit_cli`](tests/v2/test_cache_ast_fingerprint.py).
+
+### Acceptance gate (TZ S-F1)
+
+- ✅ Body edit on a tool flips `cache_key` (test 1; test 6b for real
+  prod tool against real `rag_tools._slug` swap).
+- ✅ Shared-helper edit (`_title_lookup`-class) propagates to every
+  consumer (test 2 for synthetic case; test 6b end-to-end on a real
+  tool through `wrapper_fingerprint_for_tool` rather than direct
+  `ast_fingerprint`).
+- ✅ Cosmetic edits do NOT propagate (tests 3 & 4 — required a
+  production change in `_ast_part_for` to `textwrap.dedent` source
+  before `ast.parse`, otherwise closure-defined helpers fell into the
+  SyntaxError fallback branch where whitespace contributed to the
+  hash. The dedent is a no-op for module-level functions, so no
+  fingerprint drift for any existing tool — verified by re-running
+  [test_cache_view_roundtrip.py](tests/v2/test_cache_view_roundtrip.py)
+  and [test_v1_contracts.py](tests/v2/test_v1_contracts.py)).
+- ✅ **15 tests** in
+  [test_cache_ast_fingerprint.py](tests/v2/test_cache_ast_fingerprint.py):
+  12 TZ invariants + test 6b end-to-end + test 13 CLI smoke + **test
+  14 documents the lazy-import / module.attr gap** (D-SF1-4
+  residual risk) as failing-by-design assertions.
+- ✅ CI gate
+  [cache_fingerprint_audit.py](scripts/v2/cache_fingerprint_audit.py),
+  wired in [predeploy.yml](.github/workflows/predeploy.yml) as a
+  `continue-on-error: true` advisory step until the 48 h baseline is
+  observed.
+- ✅ `inspect.getsource` C-extension fallback via try/except (test 5).
+- ✅ `WC_CACHE_PIN_FINGERPRINT=1` snapshot mode (test 7).
+- ✅ `WC_CACHE_AST_INVALIDATION` kill-switch in
+  [flag_registry.CODE_DEFAULT_ON](scripts/v2/flag_registry.py); flag-lint green.
+- ✅ Coverage **40/40** tools return non-empty fp (test 6 part a).
+- ✅ For >50 % of contract-bound tools the v1-callee walk practically
+  reaches `rag_tools` helpers (test 6 part b).
+- ✅ Depth=1 ceiling enforced; depth=2 edits do NOT propagate (test 10);
+  residual risk owned by D-SF1-4 with `wrapper_version` backstop.
+- ✅ Default-on-from-start justified: failure mode is latency, not
+  correctness (D-SF1-5).
+
+### Closeout (S-F1 / ADR-F1)
+
+**Local test run** (`pytest tests/v2/test_cache_ast_fingerprint.py
+-v`, 2026-05-25, Windows 11 / Python 3.13.4):
+**15 passed in 1.29 s**. Adjacent regression check
+(`tests/v2/test_cache_view_roundtrip.py`,
+`tests/v2/test_cache_concurrent_writes.py`,
+`tests/v2/test_flag_lint.py`, `tests/v2/test_v1_contracts.py`):
+**21 passed, 4 skipped** (3 cache-concurrent Win skips per
+[D-S0-2](#d-s0-2--cache-race-windows-skip-deferred-to-s-f1), 1 live-v1
+contract skip — corpus-fixture follow-up).
+
+**Collection gate** (`pytest tests/v2 --collect-only -q`): **2114
+tests collected, 0 errors** (was 2097 pre-S-F1; +15 from the new
+file, +2 from a previously-uncounted unittest-style module that
+S-B5's full-directory run now picks up).
+
+**Coverage lift.** Tool fingerprint coverage moved from 32/40
+(only `@v1_contract`-bound wrappers) to **40/40** via the
+`wrapper_fingerprint_for_tool` v2-native fallback. The 8 previously
+uncovered tools (`corpus_overview`, `find_book_by_topic`,
+`hybrid_search`, `lemma_profile`, `lexical_richness_authors`,
+`lexical_search`, `resolve_author_name`, `resolve_book_title`)
+now fingerprint via `spec.fn` + depth=1 walk. Coverage verified by
+test 6 part (a); the practical v1-callee walk verified by test 6
+part (b) and end-to-end by test 6b (real `rag_tools._slug` swap
+flips real `affinity_by_author` fingerprint).
+
+**What S-F1 closes structurally.**
+
+- **E18 (stale-cache) class.** A wrapper body edit OR a depth=1 same-
+  project helper edit now flips that tool's `cache_key`
+  automatically, so the next request after deploy reads through the
+  cache rather than serving pre-fix data. The
+  forgotten-`wrapper_version` failure mode that motivated commit
+  [`2a958f8`](https://github.com/Standaoerby/wordcracker/commit/2a958f8)
+  cannot recur without a CI signal — the audit gate fails when source
+  changes don't move the fingerprint.
+- **`_title_lookup`-class propagation gap.** The depth=1 walk picks
+  up shared helpers via `co_names` → `__globals__` resolution. Tests
+  2 and 9 lock the invariant in place; test 10 enforces the depth=1
+  ceiling so cache invalidation stays bounded (no transitive cache
+  storms on a single helper edit).
+- **Decorative-CI failure class is bounded by R2.** The TZ asked for
+  "12 tests + CI gate"; what landed is "12 invariants + 1 CLI smoke
+  test + a CI step that runs the audit on every PR". The audit's
+  output goes into the run log as a `::notice` or `::warning`
+  annotation, so the signal is in the GitHub UI even when the step
+  doesn't fail-fast.
+
+**Operational notes for the canary window.**
+
+- The audit step is `continue-on-error: true` for the first 48 h
+  (per ADR-F1 implementation §6). Promotion to blocking is a
+  follow-up edit that flips that flag — no schema or code change.
+- Prod compose ships with `WC_CACHE_PIN_FINGERPRINT=1` (D-SF1-2)
+  on `x-app-env`. Local dev / pytest leaves it unset and pays the
+  lazy-lookup cost (~37 `inspect.getsource` calls amortized across
+  the cache misses of a test run).
+- `WC_CACHE_AST_INVALIDATION=off` is the kill-switch if the walk
+  ever regresses in prod (D-SF1-1). Flipping it reverts the
+  `cache_key` to `(CACHE_SCHEMA_VERSION, wrapper_version, args)` —
+  the pre-S-F1 contract. Documented in `infra.md` §3 as an
+  operator-tunable.
+
+**D-S0-2 follow-up resolved.** D-S0-2 left an open question:
+"when S-F1 lands and re-opens `cache.py`, do we add Windows retry-on-
+sharing-violation and drop the `skipIf`, or keep the skip
+indefinitely?" Answer: **keep the skip**. `cache.py`'s edit under
+S-F1 added a thin fingerprint dispatcher next to the disk path
+(`_ast_fingerprint_for`, `_populate_ast_fp_snapshot`); the
+`_write_disk` POSIX-rename hot path was not touched. The Windows
+race test stays Linux-CI-only — that surface is exercised by the
+`tests-v2` job under ADR-B7 (full requirements.lock install on
+ubuntu-latest), so the test is no longer skipped on the gate that
+matters. Adding Windows retry-on-PermissionError would be a separate
+ADR if Windows local dev becomes a supported workflow; it isn't
+today and S-F1 is not the right place to make it one.
+
+### Follow-ups deliberately out of scope of S-F1
+
+- **48-hour prod canary observation window.** The TZ asks for a
+  canary period before promoting the audit gate from advisory to
+  blocking, and for measuring miss-rate vs baseline. Operationally
+  the canary surface (Grafana panels) and the rollback decision live
+  with the operator. Tracked separately; not a blocker for landing
+  the code.
+- **Garbage-collect orphan cache entries.** Old-fingerprint disk
+  entries accumulate after every deploy. TTL trims them eventually;
+  a dedicated GC sweep is a separate ADR — see
+  [REFACTOR_BRIEF.md:115](../REFACTOR_BRIEF.md):115 "phase 5 cache
+  hygiene" placeholder.
+- **Per-package version pinning in the fingerprint.** D-SF1-3
+  explicitly draws the line at `scripts.`. If a future incident
+  proves a third-party upgrade silently broke a cached result, the
+  response is a `CACHE_SCHEMA_VERSION` bump (the existing mechanism),
+  not extending the fingerprint walk.
+
+---
+
 ## 2026-05-25 — S-B5: CI dependency parity, run whole `tests/v2` (ADR-B7 accepted)
 
 Closes block **S-B5** of

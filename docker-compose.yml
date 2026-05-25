@@ -37,6 +37,13 @@ x-app-env: &app-env
   # flags — Phase 1 already collapsed the feature-flag landscape (R1).
   WC_LLM_MODEL: wordcracker:v2
   WC_CRITIC_MODEL: wordcracker:v2
+  # ADR-F1 / D-SF1-2 (S-F1, 2026-05-25): snapshot the AST-fingerprint
+  # registry at process start so prod canary observes a deterministic
+  # cache-key set even if a module hot-reload happens mid-investigation.
+  # Default in code is off (lazy lookup, one entry per cache miss); prod
+  # opts in here so the warmup cost is paid once at startup. Local pytest
+  # / dev compose leaves it unset (= "0").
+  WC_CACHE_PIN_FINGERPRINT: "1"
 
 x-app-volumes: &app-volumes
   # D-SB1-1 / D-SB2-1: only corpus / state bind-mounts in the prod base.
