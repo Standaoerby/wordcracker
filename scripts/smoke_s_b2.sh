@@ -45,10 +45,28 @@ echo "[smoke] STEP 1/3 — bash scripts/deploy.sh HEAD"
 echo "[smoke]            (build + .env bump + force-recreate + deploy.sh internal verify)"
 bash scripts/deploy.sh HEAD
 
+# D-SB4-2: read the SHA deploy.sh just wrote into .env and pass it
+# explicitly to the belt-and-suspenders verify. Before D-SB4-2 the
+# verify_deployed_image.sh fallback was `git rev-parse --short HEAD`,
+# which would silently agree with the deploy as long as the host's HEAD
+# hadn't moved since deploy.sh resolved it — leaving a window where a
+# concurrent `git pull` on the host between the two calls could flip
+# the expectation under verify's feet. .env is the durable
+# source of truth for "what tag we just deployed".
+if [[ ! -f .env ]]; then
+    echo "[smoke] FAIL: .env missing after deploy.sh — cannot pass explicit SHA to verify" >&2
+    exit 5
+fi
+EXPECTED_SHA="$(grep '^WC_IMAGE_TAG=' .env | tail -1 | cut -d= -f2-)"
+if [[ -z "$EXPECTED_SHA" ]]; then
+    echo "[smoke] FAIL: .env has no WC_IMAGE_TAG line — deploy.sh did not write it" >&2
+    exit 5
+fi
+
 echo
-echo "[smoke] STEP 2/3 — bash scripts/verify_deployed_image.sh"
+echo "[smoke] STEP 2/3 — bash scripts/verify_deployed_image.sh ${EXPECTED_SHA}"
 echo "[smoke]            (re-check: gutenberg-lab + chat + admin all on the same SHA tag)"
-bash scripts/verify_deployed_image.sh
+bash scripts/verify_deployed_image.sh "${EXPECTED_SHA}"
 
 echo
 echo "[smoke] STEP 3/3 — poll chat:8890/health, admin:8891/health, jupyter:8888/api"

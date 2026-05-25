@@ -32,7 +32,10 @@ Exit codes
     2  — at least one regression PASS->FAIL vs baseline (deploy BLOCKED)
     3  — version label did not bump vs baseline (deploy BLOCKED;
          only when --require-version-bump is set, which is the default)
-    4  — health check never came up (deploy BLOCKED — target unreachable)
+    4  — health check never came up OR /health.git_sha did not match
+         the SHA passed via --expected-sha / WC_PROBE_EXPECTED_SHA.
+         Both classes are "the runtime under test is not the runtime
+         the caller asked for" — see D-SB4-1.
     5  — probe config has empty/__FILL_FROM_SOURCE__ slots (probes not
          configured — fill in scripts/predeploy_probes.json from the source
          taxonomy file before using this in CD)
@@ -219,20 +222,61 @@ def evaluate_across_runs(probe: dict, payloads: list[dict]) -> list[str]:
 # HTTP
 # ---------------------------------------------------------------------------
 
-def wait_for_health(base_url: str, timeout_total_s: int = 60) -> bool:
-    """Poll /health until 200 OK or timeout. Mirrors run_functional_40.py
-    behaviour — ChromaDB warmup is ~12s on cold start."""
+def wait_for_health(base_url: str, timeout_total_s: int = 60) -> tuple[bool, dict | None]:
+    """Poll /health until 200 OK or timeout. Returns (ok, body_dict).
+
+    body_dict is the parsed JSON when /health responded with a JSON
+    payload (post-S-B3 contract — see ADR-B3 / D-SB3-2). On older
+    runtimes that return bare ``b"ok"``, parsing fails and body_dict is
+    None — `_check_expected_sha` treats that as "cannot verify" and
+    the caller decides.
+
+    Mirrors run_functional_40.py behaviour — ChromaDB warmup is ~12s on
+    cold start.
+    """
     url = f"{base_url.rstrip('/')}/health"
     deadline = time.time() + timeout_total_s
     while time.time() < deadline:
         try:
             with urllib.request.urlopen(url, timeout=2) as r:
                 if r.status == 200:
-                    return True
+                    raw = r.read()
+                    try:
+                        return True, json.loads(raw)
+                    except (json.JSONDecodeError, ValueError):
+                        # Older runtime returning bare "ok" — treat as
+                        # "up but identity-opaque". Caller decides.
+                        return True, None
         except (urllib.error.URLError, urllib.error.HTTPError, ConnectionError, OSError):
             pass
         time.sleep(2)
-    return False
+    return False, None
+
+
+def _check_expected_sha(body: dict | None, expected: str) -> tuple[bool, str]:
+    """D-SB4-1: after /health is up, assert its reported git_sha matches
+    the SHA the caller is about to probe. Without this, the 12 probes
+    can be 12/12 PASS against the *previous* image (silent-failure
+    deploy: tag bumped, container not actually replaced) — exactly the
+    class of failure runs 2-5 of the 2026-05-22 deploy epic exhibited.
+
+    Returns (ok, message). ok=False means "do not run probes; the
+    runtime is not what the caller asked for".
+    """
+    if body is None:
+        return False, ("/health did not return JSON; cannot verify git_sha "
+                       "matches expected. Older runtime? Bump runtime to "
+                       "post-S-B3 (ADR-B3 / D-SB3-2) so /health emits JSON.")
+    got = body.get("git_sha")
+    if not got:
+        return False, (f"/health JSON has no 'git_sha' key (got keys: "
+                       f"{sorted(body.keys())!r}); cannot verify against "
+                       f"expected {expected!r}.")
+    if got != expected:
+        return False, (f"/health.git_sha mismatch: expected {expected!r}, "
+                       f"got {got!r}. The runtime is not the SHA the deploy "
+                       f"asked for — probes would run against the wrong image.")
+    return True, f"/health.git_sha={got} matches expected"
 
 
 def fire_probe(base_url: str, question: str, engine: str, timeout: int) -> tuple[dict, float, str | None]:
@@ -366,6 +410,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--update-baseline", action="store_true",
                     help="rewrite baseline if the run is clean (12/12 PASS, version bumped, no regressions)")
     ap.add_argument("--no-health", action="store_true", help="skip /health poll")
+    ap.add_argument("--expected-sha", default=os.environ.get("WC_PROBE_EXPECTED_SHA"),
+                    help="D-SB4-1: after /health is up, assert its reported git_sha equals "
+                         "this value before firing any probe. Without this, 12 probes can "
+                         "PASS against the *previous* image after a silent-failure deploy. "
+                         "deploy.sh always passes WC_IMAGE_TAG here; ad-hoc runs may omit.")
     ap.add_argument("--require-version-bump", dest="require_version_bump", action="store_true", default=True,
                     help="block deploy if ANALYTICS_VERSION did not change vs baseline (default ON)")
     ap.add_argument("--no-require-version-bump", dest="require_version_bump", action="store_false",
@@ -396,8 +445,15 @@ def main(argv: list[str] | None = None) -> int:
     # Health check (skipped on subset runs by default? no — always run unless --no-health).
     if not args.no_health:
         print(f"[predeploy] waiting for {args.base_url}/health ...", flush=True)
-        if not wait_for_health(args.base_url):
+        ok, health_body = wait_for_health(args.base_url)
+        if not ok:
             die(4, f"health check never came up at {args.base_url}/health")
+        # D-SB4-1: identity gate before behaviour gate.
+        if args.expected_sha:
+            ok_sha, msg = _check_expected_sha(health_body, args.expected_sha)
+            if not ok_sha:
+                die(4, msg)
+            print(f"[predeploy] {msg}", flush=True)
         print(f"[predeploy] chat up — running {len(probes)} probe(s) against {args.base_url}", flush=True)
 
     results: list[dict] = []

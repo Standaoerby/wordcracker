@@ -8,8 +8,17 @@
 # the same expected SHA.
 #
 # Usage:
-#     bash scripts/verify_deployed_image.sh              # expects HEAD short-SHA
-#     bash scripts/verify_deployed_image.sh <expected>   # expects given tag
+#     bash scripts/verify_deployed_image.sh <expected>   # explicit SHA (preferred)
+#     bash scripts/verify_deployed_image.sh              # falls back to $WC_IMAGE_TAG
+#
+# D-SB4-2: there is NO git-HEAD fallback. When called with no arg AND
+# no WC_IMAGE_TAG in env, the script exits 2 with "refusing to fall
+# back to git HEAD". Previously the script grabbed
+# `git rev-parse --short HEAD` of the host repo, which silently
+# compared the running image against whatever the host happened to
+# have checked out — wrong after a host-side `git pull` advanced HEAD
+# past the deployed SHA. deploy.sh always passes the SHA it built;
+# smoke_s_b2.sh sources .env's WC_IMAGE_TAG and passes it explicitly.
 #
 # Exit 0 on match across all services; non-zero on first mismatch.
 #
@@ -36,11 +45,25 @@ SERVICES=("gutenberg-lab" "chat" "admin")
 
 EXPECTED="${1:-}"
 if [[ -z "$EXPECTED" ]]; then
-    if ! command -v git >/dev/null 2>&1; then
-        echo "ERROR: no <expected> arg and git not on PATH" >&2
-        exit 2
-    fi
-    EXPECTED="$(git rev-parse --short HEAD)"
+    # D-SB4-2: no git-HEAD fallback. Use WC_IMAGE_TAG from env (deploy.sh
+    # exports it; smoke_s_b2.sh sources .env's value and passes it
+    # explicitly via $1). If neither surface supplies a value, fail
+    # loudly — the previous behaviour silently compared against the
+    # host's working-tree HEAD, which diverges from "what was deployed"
+    # after any `git pull` on the host between the deploy and the
+    # verify run.
+    EXPECTED="${WC_IMAGE_TAG:-}"
+fi
+if [[ -z "$EXPECTED" ]]; then
+    cat >&2 <<'EOF'
+ERROR: refusing to fall back to git HEAD for the expected SHA.
+       Pass the expected tag explicitly:
+           bash scripts/verify_deployed_image.sh <sha>
+       or export WC_IMAGE_TAG=<sha> in the environment (deploy.sh and
+       the .env-driven path do this automatically; if you're running
+       verify by hand, source .env or pass the SHA as the first arg).
+EOF
+    exit 2
 fi
 
 resolve_running_image() {
