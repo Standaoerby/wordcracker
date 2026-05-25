@@ -437,35 +437,176 @@ but the literal request is cheap to satisfy and produces a CLI
 runnable for deploy-host use (`python -m tests.v2._v1_contract_lint`).
 Same DRY discipline as ADR-F1's `cache_fingerprint_audit` CLI.
 
-### D-SF2-4 — Live-v1 sweep stays env-gated, runs on deploy host not CI
+### D-SF2-4 — Recorded golden-fixtures replay, hard-gated in CI
 
-**Decision.** `LiveV1Contracts` remains skipped unless
-`WC_CONTRACT_LIVE_V1=1`. CI on ubuntu-latest runs the static AST
-gate + schema-mock gate but NOT the live sweep. The deploy-host
-[`predeploy_gate.sh`](scripts/predeploy_gate.sh) carries the flag
-flip in a follow-up commit.
+**Decision (revised 2026-05-25, agreed with user).** The live-v1
+contract sweep runs on CI **by default, hard-gated**, against
+golden JSON fixtures recorded from real prod v1 output. CI fails
+red when (a) any contract-bound wrapper has no recorded fixture
+([`FixtureCoverageGate`](tests/v2/test_v1_contracts.py)) or (b)
+a recorded fixture diverges from its declared schema
+([`RecordedFixtureReplay`](tests/v2/test_v1_contracts.py)). The
+recording itself happens on the prod host via
+[`scripts/v2/contracts/record_fixtures.py`](scripts/v2/contracts/record_fixtures.py).
 
-**Why not default-on in CI.** Real v1 functions touch the SPGC
-corpus on disk (pandas / chroma reads), an Ollama instance for
-etymology, and a few network calls. ubuntu-latest has none of
-these — making the live sweep CI-default would either red the
-suite immediately (no corpus) or hide failures behind a
-silent-skip pattern (the dark-test anti-pattern S-B5 ADR-B7
-exists to forbid). The sweep is *meaningful* only against the
-prod-equivalent corpus state; the deploy host is the only place
-both the corpus and the contract-bound wrappers live.
+**Prior decision and why it changed.** An earlier draft of D-SF2-4
+shipped as "live-v1 sweep stays env-gated, runs on deploy host
+not CI" — `WC_CONTRACT_LIVE_V1=1` was an opt-in tag that nothing
+forced. User flagged this 2026-05-25 (after the first S-F2
+commit) for two structural reasons:
 
-**What still runs in CI.** Static AST gate (every wrapper),
-schema-mock validation (every schema), binding visibility,
-registry coverage floor, import-path canonical sweep, R2
-negative test. That's enough to catch a phantom-key wrapper or
-a schema-drop at PR-time. The live sweep catches *v1* drift —
-which only matters once the deployed image is up against the
-prod corpus.
+1. **It silently changed a TZ acceptance criterion.** TZ S-F2 #2
+   reads "CI гоняет их против реального v1 на каждом PR" —
+   literally "CI runs them against real v1 on every PR." The
+   prior D-SF2-4 redefined that as "deploy-host runs them after
+   rollout," which is a different gate (post-merge, not pre-merge)
+   and a different verifier (the host script, not the CI workflow).
+   Changing TZ criteria belongs in a STOP-and-discuss
+   conversation, not a unilateral ADR. Recorded explicitly:
+   D-SF2-4 prior text **was unilateral**; this revision is the
+   STOP-and-agreed replacement.
+2. **An env-gated test that nothing forces rots into decoration.**
+   The recorder bug discovered while drafting S-F2 — the
+   pre-revision `LiveV1Contracts` test called
+   `binding.v1_fn(**args)` against a value that is a string, not a
+   callable (`v1_fn` is `"scripts.rag_tools.X"`, lazily resolved
+   via `binding.resolved_v1_fn()`). The test would have
+   `TypeError`'d on first run. It never ran. The bug lived
+   undetected because `WC_CONTRACT_LIVE_V1` is not set anywhere
+   automatic. That is precisely the "тест не падает, тест
+   исчезает" failure class S-F2 exists to kill, and the prior
+   D-SF2-4 reproduced it.
 
-**No new flag (R1).** `WC_CONTRACT_LIVE_V1` already exists from
-the pre-S-F2 scaffold; S-F2 grows the `LIVE_ARGS` table inside
-the gated class but doesn't add a new env var.
+**Why TZ literal "CI on every PR" needs the recording layer.**
+Real v1 (`scripts/rag_tools.py` / `scripts/learning_tools.py`)
+requires `/workspace/spgc/SPGC-counts-2018-07-18/` (~10-15 GB
+of per-book counts), `/workspace/spgc/SPGC-tokens-2018-07-18/`
+(~20 GB), `/workspace/chroma_db/` (~5 GB embedding index),
+SentenceTransformer model on CUDA (cold-load ~30 s, OOM on CPU
+in some configurations), and Ollama HTTP for etymology paths.
+GitHub `ubuntu-latest` hosted runners ship ~14 GB free root,
+about 5 GB remaining after `requirements.lock` install
+([predeploy.yml](.github/workflows/predeploy.yml) S-B5 step):
+the SPGC corpus alone doesn't fit, and there is no GPU. Running
+real v1 inside CI is not feasible on the current runner class.
+
+Three resolution paths considered (user picked option 1):
+
+1. **Recorded golden-fixtures (selected).** Record real v1
+   outputs once on prod, commit the JSON to the repo
+   (`scripts/v2/contracts/fixtures/`), CI replays them via
+   `assert_matches_schema`. Hard-gate on CI: zero v1 calls on
+   the runner, full contract coverage on every PR. When v1
+   renames a key in a future prod deploy, the next
+   `record_fixtures` run writes a new shape; the resulting
+   fixture diff fails replay until schema + wrapper update.
+   Cost: one-time recorder build + per-deploy recording step.
+2. **Self-hosted GPU runner with corpus mounted.** Strictly
+   stronger than option 1 (no fixture staleness possible since
+   v1 is called fresh). Cost: provision and maintain a beefy
+   self-hosted runner; operational lift outsizes the gate's
+   value.
+3. **Hybrid metadata-light/corpus-heavy split.** 7 v1 functions
+   read only `SPGC-metadata-2018-07-18.csv` (~3 MB, checkin'able);
+   the other 25 need the full corpus. Light subset runs against
+   real v1 on hosted CI; heavy subset uses recorded fixtures.
+   Adds complexity for marginal extra coverage.
+
+**Implementation.**
+
+1. [`live_args.py`](scripts/v2/contracts/live_args.py) — single
+   source of truth for the per-binding sample args (32 entries).
+   Both the recorder and the replay test import it; cannot drift.
+   Anchored on the four golden PG books named in the TZ
+   (PG1342 / PG174 / PG345 / PG84).
+2. [`record_fixtures.py`](scripts/v2/contracts/record_fixtures.py)
+   CLI — iterates `LIVE_ARGS`, calls real v1, serialises the
+   result to `fixtures/<v1_qualname>.json`. Refuses to write a
+   fixture when v1 returns a dict with `"error"` key (those are
+   v1's error-branch shape; `assert_matches_schema` skips them
+   via `allow_error=True`, so committing them would let CI
+   silently pass on a no-data recording — exactly the
+   anti-pattern this ADR exists to kill). Writes
+   `_manifest.json` with per-binding status (`ok` /
+   `v1_returned_error` / `v1_raised` / `no_binding`).
+3. [`FixtureCoverageGate`](tests/v2/test_v1_contracts.py) — for
+   each binding in `V1_CONTRACTS` with a `LIVE_ARGS` entry, asserts
+   `fixtures/<v1_qualname>.json` exists. Hard-gate. Missing files
+   produce a single test failure with the missing list and the
+   operator command in the assertion message.
+4. [`RecordedFixtureReplay`](tests/v2/test_v1_contracts.py) — for
+   each fixture JSON, `json.load(...)` →
+   `assert_matches_schema(raw, binding.schema)`. Schema-drift in
+   v1 → red CI. Skips bindings with no fixture file silently
+   (`FixtureCoverageGate` already failed loudly on them, so
+   this test's signal stays unambiguous: red == schema-drift).
+
+**What S-F2 first-PR ships RED.** The recorder runs on prod;
+local Windows / hosted-CI machines do not have the corpus, so
+they cannot produce fixtures. The S-F2 PR therefore opens with
+`FixtureCoverageGate` RED — 32 fixtures missing — and merges
+only after the operator runs `record_fixtures` on prod and
+commits the JSON. This is intentional, documented in the PR
+description, and recorded under [D-SF2-5](#d-sf2-5--recorder-workflow--bootstrap-red-pr-convention).
+
+**No new feature flag (R1).** The pre-S-F2 `WC_CONTRACT_LIVE_V1`
+env-gate is **removed** in this revision — no env var anywhere.
+The hard-gate is presence-of-file, not env-flag. Closes one
+flag, adds zero. `LIVE_ARGS` and the test classes consume the
+fixtures unconditionally.
+
+### D-SF2-5 — Recorder workflow + bootstrap-red PR convention
+
+**Decision.** The fixture-recording step is a documented
+operator action that runs (a) once at S-F2 first merge, and (b)
+on every deploy that touches v1 source. CI failure mode is
+"red until operator records"; PR merges block on the recording.
+
+**Why the bootstrap PR is intentionally red.**
+[`FixtureCoverageGate`](tests/v2/test_v1_contracts.py) hard-gates
+on the presence of 32 recorded JSON files. Locally and on
+hosted CI, those files cannot be produced — no corpus. So the
+first S-F2 PR opens with `FixtureCoverageGate` failing. This is
+the structural anti-pattern's mirror image: instead of "test
+exists but never runs" (decorative-green), we ship
+"test runs every PR and fails until the operator action lands"
+(loud-red until intentional unblock).
+
+**Operator workflow (prod host).**
+
+```bash
+# 1. Pull the S-F2 branch
+cd /opt/wordcracker && git fetch && git checkout s-f2-v1-contracts
+
+# 2. Record fixtures inside the running gutenberg-lab container
+#    (has /workspace/spgc/ + /workspace/chroma_db/ mounted, GPU)
+docker compose exec gutenberg-lab \
+    python -m scripts.v2.contracts.record_fixtures
+
+# 3. Review the manifest
+cat scripts/v2/contracts/fixtures/_manifest.json
+
+# 4. Commit the fixtures and push
+git add scripts/v2/contracts/fixtures/*.json
+git commit -m "chore(s-f2): record v1 golden fixtures from prod"
+git push
+```
+
+The push triggers a new CI run on the PR — coverage gate
+flips green, replay-gate runs schema validation on all 32
+fixtures, S-F2 closes.
+
+**Ongoing maintenance.** After each prod deploy that changes a
+v1 function signature or output shape, the operator re-runs
+`record_fixtures` and commits the diff. The fixture diff *is*
+the contract-drift signal — if the JSON changes, schema +
+wrapper update follow in the same PR.
+
+**Why not auto-record from CI.** Would require either (a) the
+hosted runner mounting prod corpus over the network (security
+risk + slow), or (b) a self-hosted runner (operational lift —
+option 2 in [D-SF2-4](#d-sf2-4--recorded-golden-fixtures-replay-hard-gated-in-ci)).
+The manual step is the floor; CI gates around it.
 
 ### Negative tests (R2)
 
@@ -491,10 +632,18 @@ the gated class but doesn't add a new env var.
 - ✅ 7 E15-class wrappers under `@v1_contract` — and 12 more for
   coverage beyond the named seven. Total 19 wrapper files, 32
   schema bindings (some files declare multiple tools).
-- ✅ CI runs the contract sweep on every PR — static AST gate,
-  schema-mock gate, binding visibility, coverage floor, import-path
-  canonical. Six tests in `test_v1_contracts.py` run by default; the
-  seventh is the env-gated live sweep.
+- ⏳ **CI runs the contract sweep against real v1 on every PR.**
+  Static layer (AST gate, schema-mock gate, binding visibility,
+  coverage floor, import-path canonical, R2 negative,
+  fixture-coverage hard-gate, recorded-fixture replay) runs by
+  default. Live-v1 portion is satisfied via *recorded golden
+  fixtures* (D-SF2-4) — equivalent to live calls structurally
+  (the fixtures ARE real v1 output) without dragging the corpus
+  onto the hosted runner. **Status pending the first operator
+  recording on prod.** Until then, `FixtureCoverageGate` is RED
+  and the PR cannot merge — this is the
+  [D-SF2-5](#d-sf2-5--recorder-workflow--bootstrap-red-pr-convention)
+  bootstrap-red convention.
 - ✅ Artificial `raw.get("xyz_nonexistent")` in a wrapper → CI fails
   loud — via `PhantomKeyNegativeGate` (synthesised inline so the
   failure path is locked in) and via the existing
@@ -505,36 +654,54 @@ the gated class but doesn't add a new env var.
   dicts are forbidden by the import-path sweep.
 - ✅ Standalone lint at `tests/v2/_v1_contract_lint.py` — orchestrator
   with CLI entry point, reused by `StaticContractGate`.
-- ✅ `@pytest.mark.v1_contract` marker — declared in `pyproject.toml`
-  and applied to every test class in `test_v1_contracts.py`.
-- ✅ Golden books fixture (PG1342 / PG174 / PG345 / PG84) — driven
-  through `LIVE_ARGS` for every contract-bound wrapper.
+- ✅ `@pytest.mark.v1_contract` marker — declared in `conftest.py`
+  and applied module-level in `test_v1_contracts.py`.
+- ✅ Golden books fixture (PG1342 / PG174 / PG345 / PG84) — anchors
+  the per-binding `LIVE_ARGS` table consumed by both the recorder
+  and the replay gate.
 
 ### Closeout (S-F2 / ADR-F2)
 
+**Bootstrap state (S-F2 first PR, 2026-05-25).** Local Windows
+machine + hosted CI runner are corpus-less; the recorder cannot
+produce fixtures from there. Therefore:
+
+- `FixtureCoverageGate` — **RED** (32 bindings missing). The
+  assertion message names every missing fixture and the operator
+  command to fix it.
+- `RecordedFixtureReplay` — vacuously **PASS** (no fixtures to
+  replay yet; the gate is decoupled from coverage so signals
+  stay unambiguous).
+- All other gates — `StaticContractGate`, `SchemaShapeGate`,
+  `ContractBindingVisibility`, `RegistryCoverage`,
+  `V1ImportPathCanonical` (×2), `PhantomKeyNegativeGate` — **PASS**.
+
 **Local test run** (`pytest tests/v2/test_v1_contracts.py -v`,
-2026-05-25, Windows 11 / Python 3.13.4): **7 passed, 1 skipped**
-(skip = `LiveV1Contracts` w/o `WC_CONTRACT_LIVE_V1=1`). The +1
-compared to the pre-S-F2 baseline is `PhantomKeyNegativeGate`.
+2026-05-25, Windows 11 / Python 3.13.4): **8 passed, 1 failed**
+— the one failure is the intentional `FixtureCoverageGate`
+bootstrap-red described above.
 
-**Marker-targeted run** (`pytest tests/v2 -m v1_contract`): **7
-passed, 1 skipped, 2107 deselected**. Marker correctly scopes the
-sweep to the contract layer — deploy-host invocation works without
-pulling the rest of the suite.
+**Marker-targeted run** (`pytest tests/v2 -m v1_contract`):
+matches the per-file count — same set of tests with the same
+single intentional failure.
 
-**Full directory run** (`pytest tests/v2 -q`): **2084 passed, 30
-skipped, 1 xfailed** in 94 s. Compared to the S-B5 baseline
-(2083 passed, 2026-05-25 closeout, [docs/v2/decisions.md → 2026-05-25
-S-B5](#2026-05-25--s-b5-ci-dependency-parity-run-whole-testsv2-adr-b7-accepted)):
-exactly +1 (the new R2 negative test). Zero regressions; zero new
-silent skips; the existing 30 skips are the same Windows / GPU /
-corpus quarantines documented in
-[S-B5 closeout](#2026-05-25--s-b5-ci-dependency-parity-run-whole-testsv2-adr-b7-accepted)
-plus the env-gated `LiveV1Contracts`.
+**Full directory run pending CI.** Per the user's 2026-05-25
+correction, the S-B5 baseline comparison was incorrect framing:
+the relevant baseline is S-F1 Linux CI (2097 passed / 16
+skipped), not S-F1 Windows local (2083 passed / 30 skipped).
+Local Windows numbers from this commit (with the intentional
+red CoverageGate, 31 skipped because LiveV1Contracts is gone)
+will not match Linux CI numbers and are not the verification
+artefact. The verification is the PR's CI run with all green
+after operator records.
 
-**Collection gate** (`pytest tests/v2 --collect-only -q`): **2115
-tests collected, 0 errors** (was 2114 pre-S-F2; +1 from
-`PhantomKeyNegativeGate`).
+**Collection gate** (`pytest tests/v2 --collect-only -q`): **2116
+tests collected, 0 errors** (was 2114 at S-F1; +1 for
+`PhantomKeyNegativeGate`, +1 for `FixtureCoverageGate`, −0:
+`LiveV1Contracts` removed in this revision because env-gated
+tests rot; replaced by `RecordedFixtureReplay` which is +1; net
++2 vs S-F1, total +1 collected delta since
+`RecordedFixtureReplay` subsumes `LiveV1Contracts`).
 
 **Standalone lint** (`python tests/v2/_v1_contract_lint.py`): exit
 **0**, output `[v1_contract_lint] OK`. CLI surface is callable from
@@ -585,27 +752,36 @@ deploy-host shell without pytest dependencies.
   amount to "add a key to the schema, update the wrapper's read,
   add a negative test on the row that came back empty", and benefit
   from the framework S-F2 lands.
-- The deploy-host live sweep wire-up (`scripts/predeploy_gate.sh`
-  flips `WC_CONTRACT_LIVE_V1=1` after rollout) is a one-line
-  follow-up to that script — not in this commit because the script
-  edit belongs to a B-namespace block (deploy plumbing), not F-namespace.
-  Tracked in `backlog.md` follow-up `F2-DEPLOY-LIVE-SWEEP`.
+- **Stale-fixture detection.** The recorded fixtures pin v1
+  output at the timestamp of the last `record_fixtures` run. If
+  v1 source changes in a deploy and the operator forgets to
+  re-record, the fixtures and live v1 silently diverge until the
+  next time someone runs the recorder. The ADR-F1 AST-fingerprint
+  walk catches some of this (a v1 body edit changes the
+  fingerprint, invalidating the cache; that doesn't help the
+  fixture though). Mitigation: deploy-host integration in the
+  follow-up `F2-DEPLOY-RERECORD` runs `record_fixtures` as part
+  of `scripts/deploy.sh` post-rollout and blocks the deploy on
+  any diff to fixtures — turning "operator forgot" into a deploy-
+  time CI signal. Out of scope for this commit (deploy script
+  belongs to the B-namespace); tracked.
 
 **Follow-ups (durable).**
 
+- `F2-DEPLOY-RERECORD` — wire `python -m scripts.v2.contracts.record_fixtures`
+  into `scripts/deploy.sh` after image rollout; fail the deploy
+  if any fixture changed and the PR did not commit the update.
+  Closes the stale-fixture stamping window described above.
 - `F2-INTERNAL-KEYS-AUDIT` — audit the ~80-entry `INTERNAL_V2_KEYS`
   allow-list in `scripts/v2/contracts/__init__.py`. Each entry is
   documented at its addition site; the audit is to confirm none
   has decayed into "needed for a wrapper that has since been
   rewritten" status. Cheap, mechanical, low-risk.
-- `F2-DEPLOY-LIVE-SWEEP` — wire
-  `WC_CONTRACT_LIVE_V1=1 pytest -m v1_contract` into
-  `predeploy_gate.sh` after the green canary observation window.
 - `F2-V6-RESOLVERS-LIVE-ARGS` — extend `LIVE_ARGS` to cover the v6
   resolver bindings (V6ResolveAuthor / V6ResolveBook). They are
-  v2-internal so the live sweep doesn't gain anything obvious from
-  exercising them against the corpus, but completeness of the
-  table aids consistency review.
+  v2-internal so the fixture sweep doesn't gain anything obvious
+  from exercising them against the corpus, but completeness of
+  the table aids consistency review.
 
 ---
 

@@ -25,21 +25,34 @@ For every (wrapper, v1_fn, schema) triple in `V1_CONTRACTS`:
      the import-time enforcement — a future regression that catches
      and logs instead of raising flips this test red.
 
+  5. Fixture-coverage hard-gate (TZ S-F2 D-SF2-4 revised — agreed
+     with user 2026-05-25): every binding in V1_CONTRACTS with a
+     LIVE_ARGS entry MUST have a recorded fixture under
+     scripts/v2/contracts/fixtures/. Missing = CI red. Recording
+     happens on prod via
+     `python -m scripts.v2.contracts.record_fixtures`. This is the
+     load-bearing v1↔v2 contract gate — it catches "declared
+     contract diverged from what v1 actually returns", which the
+     static-AST / schema-mock gates above cannot.
+
+  6. Recorded-fixture replay (TZ S-F2 D-SF2-4): for each fixture
+     JSON, load + `assert_matches_schema(raw, binding.schema)`.
+     Fails red when v1 renamed a key, dropped a required field, or
+     when the wrapper's declared schema diverged from reality. Runs
+     by default — no env gate.
+
 All classes carry `@pytest.mark.v1_contract` (declared in
 [conftest.py](tests/v2/conftest.py)) so the contract sweep is
 targetable from CI / deploy host via `pytest -m v1_contract`.
 
-Designed to be fast (no network, no v1 actually called) and deterministic.
-The optional `WC_CONTRACT_LIVE_V1=1` env var swaps in real v1 calls for
-contract verification against live data — kept opt-in because a few v1
-calls touch disk / pandas / network. Under S-F2 the gated `LIVE_ARGS`
-table covers all 19 wrappers driven by the four golden PG books named in
-the TZ (PG1342 *Pride and Prejudice*, PG174 *The Picture of Dorian
-Gray*, PG345 *Dracula*, PG84 *Frankenstein*).
+Static / schema-mock / coverage gates are fast (no v1 called).
+Replay reads JSON files on disk — likewise fast. The recorder CLI
+([scripts/v2/contracts/record_fixtures.py](scripts/v2/contracts/record_fixtures.py))
+is the only step that touches real v1, and runs on prod only.
 """
 from __future__ import annotations
 
-import os
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -57,8 +70,15 @@ from scripts.v2.contracts import (
     assert_matches_schema,
     mock_from_schema,
 )
+from scripts.v2.contracts.live_args import LIVE_ARGS, fixture_filename
 from scripts.v2.contracts.registry import V1_CONTRACTS
 from _v1_contract_lint import scan_all_contracts
+
+
+_FIXTURES_DIR = (
+    Path(__file__).resolve().parents[2]
+    / "scripts" / "v2" / "contracts" / "fixtures"
+)
 
 
 # Module-level marker — `pytest -m v1_contract` runs every class in
@@ -257,135 +277,120 @@ class PhantomKeyNegativeGate(unittest.TestCase):
         self.assertIn("V1FindBook", msg)
 
 
-# Golden-book regexes — PG1342 / PG174 / PG345 / PG84 anchor the live
-# sweep per TZ S-F2 "фикстура «golden books»". The four books cover
-# distinct author regexes so author-scope contracts exercise real-name
-# matching (not just the regex syntax). PG174 (Dorian Gray) does not
-# appear in every wrapper's args directly — book-scope wrappers rotate
-# through PG1342/PG345/PG84 so coverage spans more than one (id, raw)
-# pair against real corpus shape.
-_AUSTEN = "^Austen,"          # PG1342
-_WILDE = "^Wilde, Oscar$"     # PG174
-_STOKER = "^Stoker, Bram$"    # PG345
-_SHELLEY = "^Shelley, Mary"   # PG84
+class FixtureCoverageGate(unittest.TestCase):
+    """Hard-gate (TZ S-F2 D-SF2-4 revised, 2026-05-25): every binding
+    in V1_CONTRACTS with a LIVE_ARGS entry MUST have a recorded
+    fixture under scripts/v2/contracts/fixtures/.
 
+    What this catches that nothing else does:
 
-@unittest.skipUnless(os.environ.get("WC_CONTRACT_LIVE_V1") == "1",
-                     "live v1 contract sweep is opt-in (slow, touches disk/network)")
-class LiveV1Contracts(unittest.TestCase):
-    """Optional: call each v1 with golden-book args; verify against schema.
+      Static AST and schema-mock gates verify the wrapper reads only
+      keys it declared. They DO NOT verify the declaration matches
+      what v1 actually returns — that's the E14/E15 failure class.
+      Without a recorded artefact tied to the actual v1 output, the
+      contract is a hypothesis that can be wrong while every other
+      gate stays green.
 
-    Gated by WC_CONTRACT_LIVE_V1 because several v1 functions read
-    pandas / chroma / disk. CI green path doesn't need it; the deploy
-    host flips the env var via `predeploy_gate.sh` so the sweep runs
-    against the live corpus the prod chat is serving.
+    Recording is performed on the prod host (where /workspace/spgc/
+    and /workspace/chroma_db/ live) via
 
-    The LIVE_ARGS table covers every binding in V1_CONTRACTS — one
-    entry per `v1_qualname`. Args are tuned to hit the four golden
-    PG books (PG1342 Pride and Prejudice, PG174 The Picture of Dorian
-    Gray, PG345 Dracula, PG84 Frankenstein) and their authors. Live
-    failures are recorded as `(key, diff)` tuples and surface with a
-    schema-mismatch diff in the test failure — the TZ S-F2 acceptance
-    criterion in literal form.
+        python -m scripts.v2.contracts.record_fixtures
+
+    and the resulting JSON files are committed. A wrapper added
+    without a recording flips THIS test red on the next PR — the
+    contract-coverage promise that S-F2 / ADR-F2 lands.
+
+    Bootstrap state (S-F2 first PR): expected RED until the operator
+    runs record_fixtures on prod the first time. After that, every
+    deploy that touches v1 source re-runs record_fixtures so the
+    fixtures stay in sync with reality.
     """
 
-    LIVE_ARGS: dict[str, dict] = {
-        # rag_tools — word-scope (words sampled from the golden corpus)
-        "scripts.rag_tools.word_collocates":
-            {"word": "love", "window": 4},
-        "scripts.rag_tools.emotion_collocates":
-            {"emotion": "fear"},
-        "scripts.rag_tools.word_contexts":
-            {"word": "love", "author_regex": _AUSTEN},
-        "scripts.rag_tools.word_contexts_global":
-            {"word": "blood"},
-        "scripts.rag_tools.word_pos_distribution":
-            {"word": "love"},
-        "scripts.rag_tools.word_freq_timeline":
-            {"word": "monster"},
-        "scripts.rag_tools.words_disappearing_after":
-            {"year": 1920, "top": 5},
-        "scripts.rag_tools.words_appearing_after":
-            {"year": 1920, "top": 5},
-        "scripts.rag_tools.word_etymology":
-            {"word": "sword"},
-        "scripts.rag_tools.find_words_by_etymology":
-            {"family": "Old_English"},
-
-        # rag_tools — author-scope (regexes hit the four golden authors)
-        "scripts.rag_tools.affinity_by_author":
-            {"author_regex": _AUSTEN, "top": 5, "min_corpus_count": 500},
-        "scripts.rag_tools.compare_authors":
-            {"author1_regex": _AUSTEN, "author2_regex": _WILDE},
-        "scripts.rag_tools.corpus_stats_by_author":
-            {"author_regex": _STOKER},
-        "scripts.rag_tools.author_profile":
-            {"author_regex": _SHELLEY},
-        "scripts.rag_tools.author_influences":
-            {"author_regex": _AUSTEN},
-        "scripts.rag_tools.author_attribution":
-            {"text_sample": "It is a truth universally acknowledged."},
-        "scripts.rag_tools.author_metadata":
-            {"author_regex": _WILDE},
-        "scripts.rag_tools.top_ngrams_by_author":
-            {"author_regex": _AUSTEN, "n": 2},
-        "scripts.rag_tools.lexical_diversity":
-            {"author_regex": _STOKER},
-
-        # rag_tools — book-scope (golden PG ids)
-        "scripts.rag_tools.book_readability":
-            {"pg_id": "PG1342"},
-        "scripts.rag_tools.book_emotion_profile":
-            {"pg_id": "PG345"},
-
-        # rag_tools — global search / top-N (no scope arg needed)
-        "scripts.rag_tools.semantic_search":
-            {"query": "vampire"},
-        "scripts.rag_tools.find_book":
-            {"title": "Pride and Prejudice"},
-        "scripts.rag_tools.top_authors_by":
-            {"metric": "books"},
-        "scripts.rag_tools.top_authors_by_country":
-            {"country": "GB"},
-        "scripts.rag_tools.top_books_by_downloads":
-            {"top_n": 5},
-        "scripts.rag_tools.top_books_by_recency":
-            {"top_n": 5},
-
-        # learning_tools — covers PG84 + PG174 to round out the four
-        "scripts.learning_tools.learning_words":
-            {"scope": "book:PG1342", "level": "intermediate"},
-        "scripts.learning_tools.enrich_word":
-            {"word": "pleasure"},
-        "scripts.learning_tools.export_word_list":
-            {"entries": [{"word": "love"}], "format": "anki_csv"},
-        "scripts.learning_tools.affinity_by_book":
-            {"pg_id": "PG174"},
-        "scripts.learning_tools.book_archaic_words":
-            {"pg_id": "PG84", "top": 10},
-    }
-
-    def test_live_v1_outputs_match_schema(self):
-        failures = []
+    def test_every_live_args_binding_has_a_fixture(self):
+        missing = []
+        no_live_args = []
         for binding in V1_CONTRACTS.values():
             key = binding.v1_qualname
-            args = self.LIVE_ARGS.get(key)
-            if args is None:
-                # V6 resolvers (`scripts.v2.entity_resolver_v6.*`) are
-                # not in LIVE_ARGS — they're v2-internal and have their
-                # own test paths. The sweep skips them by design.
+            if key not in LIVE_ARGS:
+                # V6 resolvers (`scripts.v2.entity_resolver_v6.*`)
+                # are v2-internal and live outside LIVE_ARGS by
+                # design — they have their own test paths. Surface
+                # them in the assertion message so coverage gaps
+                # remain visible (zero-cost; the assertion still
+                # passes as long as `missing` is empty).
+                no_live_args.append(key)
+                continue
+            fixture_path = _FIXTURES_DIR / fixture_filename(key)
+            if not fixture_path.exists():
+                missing.append(key)
+        self.assertEqual(
+            missing, [],
+            f"missing recorded fixtures for {len(missing)} bindings: "
+            f"{missing}.\n"
+            f"Record them on the prod host:\n"
+            f"    docker compose exec gutenberg-lab \\\n"
+            f"        python -m scripts.v2.contracts.record_fixtures\n"
+            f"then commit scripts/v2/contracts/fixtures/*.json. "
+            f"(v2-internal bindings without LIVE_ARGS are excluded "
+            f"by design: {sorted(no_live_args)})",
+        )
+
+
+class RecordedFixtureReplay(unittest.TestCase):
+    """Replay recorded golden fixtures through schema validation.
+
+    For every fixture file present under
+    `scripts/v2/contracts/fixtures/`, load + `assert_matches_schema`
+    against the binding's declared schema. When a future prod
+    deploy makes v1 rename a key, the next
+    `record_fixtures` run writes a new shape into the fixture; that
+    fixture then fails THIS test red, forcing both schema AND
+    wrapper to be updated in lockstep with v1.
+
+    Bindings whose fixture is missing are SILENTLY skipped here
+    (`FixtureCoverageGate` is what fails when they're missing) so
+    this test's signal is unambiguous: red == schema-drift,
+    not == missing-recording.
+    """
+
+    def test_every_recorded_fixture_satisfies_schema(self):
+        if not _FIXTURES_DIR.exists():
+            # First-ever recording hasn't happened yet — the directory
+            # itself doesn't exist. CoverageGate carries the loud
+            # complaint; this test passes vacuously so the signal
+            # stays "0 schema-drift detected" rather than mixing the
+            # two failure modes.
+            return
+
+        failures = []
+        replayed = 0
+        for binding in V1_CONTRACTS.values():
+            key = binding.v1_qualname
+            fixture_path = _FIXTURES_DIR / fixture_filename(key)
+            if not fixture_path.exists():
                 continue
             try:
-                raw = binding.resolved_v1_fn()(**args)
-            except Exception as e:
-                failures.append((key, f"v1 raised: {e}"))
+                with open(fixture_path, encoding="utf-8") as fh:
+                    raw = json.load(fh)
+            except (OSError, json.JSONDecodeError) as e:
+                failures.append((key, f"fixture unreadable: {e}"))
                 continue
             try:
-                assert_matches_schema(raw, binding.schema,
-                                       context=binding.schema_name)
+                assert_matches_schema(
+                    raw, binding.schema, context=binding.schema_name,
+                )
+                replayed += 1
             except AssertionError as e:
                 failures.append((key, str(e)))
-        self.assertEqual(failures, [], f"live-v1 contract drift: {failures}")
+        self.assertEqual(
+            failures, [],
+            f"recorded fixtures diverge from declared schemas — v1 "
+            f"output drifted, or the wrapper's schema is wrong. "
+            f"({replayed} fixtures passed, {len(failures)} failed.) "
+            f"Re-record on prod with "
+            f"`python -m scripts.v2.contracts.record_fixtures` and "
+            f"compare the diff:\n{failures}",
+        )
 
 
 if __name__ == "__main__":
