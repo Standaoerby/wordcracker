@@ -254,9 +254,23 @@ WC_IMAGE_TAG="${SHA}" docker compose -f docker-compose.yml up -d --force-recreat
 # Failure here means the deploy did NOT stick — drop into rollback
 # instead of aborting flat (a flat abort under set -e would leave
 # prod on the half-deployed state with no recovery action).
+#
+# D-SB3-3 amendment 2026-05-25: rollback to a pre-B3 target (e.g.
+# `bac0b80` returns /health as plain "ok", no JSON) must not crash
+# verify. The verify script supports a degraded mode for non-JSON
+# /health, but it is GATED — only legitimate when rolling back to
+# an image that predates the JSON surface. We set the gate env var
+# here in MODE=rollback only; forward deploys never accept non-JSON
+# /health (silent-success class otherwise — a B3 init failure where
+# chat starts but serves a non-JSON error would pass verify).
 echo "[deploy] verifying running image tag + /health.git_sha ..."
 verify_rc=0
-bash scripts/verify_deployed_image.sh "${SHA}" || verify_rc=$?
+if [[ "$MODE" == "rollback" ]]; then
+    VERIFY_ALLOW_PRE_B3_DEGRADED=1 \
+        bash scripts/verify_deployed_image.sh "${SHA}" || verify_rc=$?
+else
+    bash scripts/verify_deployed_image.sh "${SHA}" || verify_rc=$?
+fi
 
 # --- rollback-mode strict-exit on verify failure (D-SB4-3) ---
 # In MODE=rollback the probe-gate AND the rollback-decision blocks

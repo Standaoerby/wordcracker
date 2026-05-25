@@ -449,6 +449,14 @@ def test_stale_image_under_new_tag_fails_verify(tmp_path):
           *inspect*Config.Image*)
             printf 'wordcracker-textlab:{new_sha}\\n'
             ;;
+          *inspect*State.Health*)
+            # D-SB3-3 amendment (2026-05-25) — poll_until_healthy reads
+            # `.State.Health.Status` to wait for compose's healthcheck.
+            # For this test the runtime probe is what must catch the
+            # sha mismatch, so we report healthy immediately and let
+            # the curl path do its job.
+            printf 'healthy\\n'
+            ;;
           *image*ls*--format*)
             # Used in error-path image listings; harmless empty.
             ;;
