@@ -27,7 +27,15 @@ and the full v2 suite depend on them.
 ## 1. Re-record golden fixtures (refresh stale fingerprints)
 
 ```bash
-git fetch origin && git checkout s-t2-tier2-contracts && git pull
+# MUST fetch first, then HARD-checkout the PR branch. record_fixtures stamps
+# fingerprints of the CURRENTLY checked-out v1 source — recording on the wrong
+# branch produces fixtures that don't match the PR and won't green the gate.
+git fetch origin
+git checkout s-t2-tier2-contracts
+git reset --hard origin/s-t2-tier2-contracts
+# GUARD: confirm Group B v1 edits are present before recording (expect 10).
+test "$(grep -c '_lang_mask(df' scripts/rag_tools.py)" = "10" || { echo "WRONG BRANCH/CODE — abort"; exit 1; }
+
 docker compose -f docker-compose.yml -f docker-compose.dev.yml \
     run --rm gutenberg-lab \
     python -m scripts.v2.contracts.record_fixtures
