@@ -1,0 +1,50 @@
+{
+  "author_regex": null,
+  "lang": "en",
+  "metric": "pg_id",
+  "note": "PG id != publication year. Use metric='pub_year' for real publication date.",
+  "sort": "PG id descending (recently added to Project Gutenberg)",
+  "top": [
+    {
+      "author": "Walker, Alexander",
+      "author_birth": 1779,
+      "downloads": 0,
+      "id": "PG78678",
+      "pub_year": null,
+      "title": "Outline of a natural system of medical science : $b Forming the preliminary lectures to two courses: one on anatomy and "
+    },
+    {
+      "author": "Tuttle, W. C. (Wilbur C.)",
+      "author_birth": 1883,
+      "downloads": 0,
+      "id": "PG78677",
+      "pub_year": null,
+      "title": "Magpie—diplomat"
+    },
+    {
+      "author": "Tuttle, W. C. (Wilbur C.)",
+      "author_birth": 1883,
+      "downloads": 0,
+      "id": "PG78676",
+      "pub_year": null,
+      "title": "Ike Harper's historical holiday"
+    },
+    {
+      "author": "Mazuchelli, Nina Elizabeth",
+      "author_birth": 1832,
+      "downloads": 0,
+      "id": "PG78675",
+      "pub_year": null,
+      "title": "\"Magyarland,\" volume 2 (of 2) : $b being the narrative of our travels through the highlands and lowlands of Hungary"
+    },
+    {
+      "author": "Hobbes, Thomas",
+      "author_birth": 1588,
+      "downloads": 0,
+      "id": "PG78674",
+      "pub_year": null,
+      "title": "The English works of Thomas Hobbes of Malmesbury, Volume 07 (of 11)"
+    }
+  ],
+  "top_n": 5
+}

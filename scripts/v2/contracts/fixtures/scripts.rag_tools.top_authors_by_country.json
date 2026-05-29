@@ -1,0 +1,128 @@
+{
+  "country": "GB",
+  "geo_coverage_for_country": 3541,
+  "metric": "books",
+  "top": [
+    {
+      "author": "Dickens, Charles",
+      "books": 146,
+      "country_code": "GB",
+      "downloads": 49357
+    },
+    {
+      "author": "Oliphant, Mrs. (Margaret)",
+      "books": 141,
+      "country_code": "GB",
+      "downloads": 32689
+    },
+    {
+      "author": "Parker, Gilbert",
+      "books": 133,
+      "country_code": "GB",
+      "downloads": 1063
+    },
+    {
+      "author": "Kingston, William Henry Giles",
+      "books": 132,
+      "country_code": "GB",
+      "downloads": 1684
+    },
+    {
+      "author": "Fenn, George Manville",
+      "books": 128,
+      "country_code": "GB",
+      "downloads": 2137
+    },
+    {
+      "author": "Doyle, Arthur Conan",
+      "books": 122,
+      "country_code": "GB",
+      "downloads": 62941
+    },
+    {
+      "author": "Meredith, George",
+      "books": 112,
+      "country_code": "GB",
+      "downloads": 2133
+    },
+    {
+      "author": "Jacobs, W. W. (William Wymark)",
+      "books": 112,
+      "country_code": "GB",
+      "downloads": 2594
+    },
+    {
+      "author": "Henty, G. A. (George Alfred)",
+      "books": 110,
+      "country_code": "GB",
+      "downloads": 8249
+    },
+    {
+      "author": "Ballantyne, R. M. (Robert Michael)",
+      "books": 100,
+      "country_code": "GB",
+      "downloads": 3305
+    },
+    {
+      "author": "Wells, H. G. (Herbert George)",
+      "books": 99,
+      "country_code": "GB",
+      "downloads": 34193
+    },
+    {
+      "author": "Stevenson, Robert Louis",
+      "books": 93,
+      "country_code": "GB",
+      "downloads": 23685
+    },
+    {
+      "author": "Le Queux, William",
+      "books": 92,
+      "country_code": "GB",
+      "downloads": 18358
+    },
+    {
+      "author": "Trollope, Anthony",
+      "books": 88,
+      "country_code": "GB",
+      "downloads": 7922
+    },
+    {
+      "author": "Lang, Andrew",
+      "books": 78,
+      "country_code": "GB",
+      "downloads": 7357
+    },
+    {
+      "author": "Churchill, Winston",
+      "books": 75,
+      "country_code": "GB",
+      "downloads": 4930
+    },
+    {
+      "author": "Kipling, Rudyard",
+      "books": 73,
+      "country_code": "GB",
+      "downloads": 21140
+    },
+    {
+      "author": "MacDonald, George",
+      "books": 71,
+      "country_code": "GB",
+      "downloads": 4013
+    },
+    {
+      "author": "Yonge, Charlotte M. (Charlotte Mary)",
+      "books": 68,
+      "country_code": "GB",
+      "downloads": 5284
+    },
+    {
+      "author": "Hume, Fergus",
+      "books": 67,
+      "country_code": "GB",
+      "downloads": 2461
+    }
+  ],
+  "top_n": 20
+}

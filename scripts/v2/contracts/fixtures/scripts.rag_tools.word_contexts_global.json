@@ -1,0 +1,96 @@
+{
+  "filter_stats": {
+    "dropped_lang": 0,
+    "dropped_metalinguistic": 3,
+    "lang": "en"
+  },
+  "k": 12,
+  "samples": [
+    {
+      "author": "Various",
+      "distance": 0.2755,
+      "pg_id": "PG47281",
+      "snippet": "that blood is a medicine, as it is also among the primitive aborigines of Australia, so carefully investigated by Baldwin Spencer and Gillen. Among th",
+      "title": "The Popular Science Monthly, September, 1900: Vol. 57, May, 1900 to October, 1900"
+    },
+    {
+      "author": "Machen, J. Gresham (John Gresham)",
+      "distance": 0.2829,
+      "pg_id": "PG43503",
+      "snippet": "here lies at the basis of all forms of our English Bible, \"blood\" can hardly refer to anything except meat that has the blood left in it or else blood that might be prepared separately for food; for \"thin",
+      "title": "The Origin of Paul's Religion"
+    },
+    {
+      "author": "Burton, Robert",
+      "distance": 0.2909,
+      "pg_id": "PG10800",
+      "snippet": "calls them. _Blood_.] Blood is a hot, sweet, temperate, red humour, prepared in the mesaraic veins, and made of the most temperate parts of the chylus in the",
+      "title": "The Anatomy of Melancholy"
+    },
+    {
+      "author": "Trumbull, H. Clay (Henry Clay)",
+      "distance": 0.3107,
+      "pg_id": "PG48236",
+      "snippet": "been the world’s thought in all the ages. 2. VIVIFYING POWER OF BLOOD. The belief seems to have been universal, not only that the blood is the life of the organism in which it originally flows, but that in its",
+      "title": "The Blood Covenant: A Primitive Rite and its Bearings on Scripture"
+    },
+    {
+      "author": "Burr, Agnes Rush",
+      "distance": 0.3449,
+      "pg_id": "PG11421",
+      "snippet": "fight against oppression and injustice. \"Blood\" is after all but family traditions and family ideals, and this fighting ancestor handed down to his descendants an inheritance of greater",
+      "title": "Russell H. Conwell, Founder of the Institutional Church in America: The Work and the Man"
+    },
+    {
+      "author": "Dyer, T. F. Thiselton (Thomas Firminger Thiselton)",
+      "distance": 0.3521,
+      "pg_id": "PG32183",
+      "snippet": "and bones.” Again, the phrase “to be in blood” was a term of the chase, meaning, to be in good condition, to be vigorous. In “1 Henry VI.” (iv. 2), Talbot exclaims: “If we be English de",
+      "title": "Folk-lore of Shakespeare"
+    },
+    {
+      "author": "Coleridge, Samuel Taylor",
+      "distance": 0.3794,
+      "pg_id": "PG10801",
+      "snippet": "equivalent to blood in its twofold form, or rather as formed and formless. 'Water and blood' has, therefore, two meanings in St. John, but which 'in idem coinc",
+      "title": "The Literary Remains of Samuel Taylor Coleridge, Volume 4"
+    },
+    {
+      "author": "Smith, Grafton Elliot, Sir",
+      "distance": 0.3913,
+      "pg_id": "PG22038",
+      "snippet": "actual blood of an animal sacrifice in place of the human blood. Secondly, the blood of the Great Mother herself (personified in the special _avatar_ th",
+      "title": "The Evolution of the Dragon"
+    },
+    {
+      "author": "Chaucer, Geoffrey",
+      "distance": 0.3924,
+      "pg_id": "PG2383",
+      "snippet": "blood of Christ, by which it was then a fashion to swear. 2. Mediaeval medical writers; see note 36 to the Prologue to the Tales. 3. Boist: box;",
+      "title": "The Canterbury Tales, and Other Poems"
+    },
+    {
+      "author": "Darrow, Clarence",
+      "distance": 0.3934,
+      "pg_id": "PG54074",
+      "snippet": "as they’d heard so many rows before. And then they told about findin’ a piece of brown paper covered with blood, and then they brought in a doctor, or someone who said he’d examined it with a magnifyin’ glass and it was human blood. He wa’n’t quite su",
+      "title": "An Eye for an Eye: Big Blue Book no. B-24"
+    },
+    {
+      "author": "Blaisdell, Albert F. (Albert Franklin)",
+      "distance": 0.3939,
+      "pg_id": "PG10453",
+      "snippet": "the life of the body from the fact that upon it depends our bodily existence. The blood is so essentially the nutrient element that it is called sometimes very aptly “liquid flesh.” It is a red, warm, heavy, alkaline fluid, sli",
+      "title": "A Practical Physiology: A Text-Book for Higher Schools"
+    },
+    {
+      "author": "MacDonald, George",
+      "distance": 0.3978,
+      "pg_id": "PG8913",
+      "snippet": "human blood. Hence it, or, if not it, a sort of semi-material exhalation or essence of it, retaining its form and material relations, crept from its to",
+      "title": "The Portent and Other Stories"
+    }
+  ],
+  "unique_authors": 12,
+  "word": "blood"
+}

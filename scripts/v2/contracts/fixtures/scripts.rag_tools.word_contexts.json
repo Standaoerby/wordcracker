@@ -1,0 +1,32 @@
+{
+  "author_regex": "^Austen,",
+  "samples": [
+    {
+      "context": "indeed had scarcely any influence with elizabeth and seemed to [LOVE] her rather because she would love her than because elizabeth",
+      "pg_id": "PG105",
+      "title": "Persuasion"
+    },
+    {
+      "context": "elizabeth and seemed to love her rather because she would [LOVE] her than because elizabeth deserved it she had never received",
+      "pg_id": "PG105",
+      "title": "Persuasion"
+    },
+    {
+      "context": "had nothing to do and she had hardly anybody to [LOVE] but the encounter of such lavish recommendations could not fail",
+      "pg_id": "PG105",
+      "title": "Persuasion"
+    },
+    {
+      "context": "were gradually acquainted and when acquainted rapidly and deeply in [LOVE] it would be difficult to say which had seen highest",
+      "pg_id": "PG105",
+      "title": "Persuasion"
+    },
+    {
+      "context": "friendship any representations from one who had almost a mother [LOVE] and mother rights it would be prevented captain wentworth had",
+      "pg_id": "PG105",
+      "title": "Persuasion"
+    }
+  ],
+  "total_occurrences": 41,
+  "word": "love"
+}

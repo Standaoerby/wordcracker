@@ -1,0 +1,20 @@
+{
+  "family_chain": [
+    "old_english",
+    "proto_germanic",
+    "proto_indo_european"
+  ],
+  "from_cache": true,
+  "primary_family": "germanic",
+  "raw_codes": [
+    "enm-wmi",
+    "ang",
+    "gmw-pro",
+    "gem-pro",
+    "ine-pro",
+    "swerd",
+    "sweard"
+  ],
+  "wiktionary_url": "https://en.wiktionary.org/wiki/sword",
+  "word": "sword"
+}

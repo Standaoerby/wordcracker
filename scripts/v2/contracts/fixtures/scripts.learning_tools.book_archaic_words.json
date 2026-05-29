@@ -1,0 +1,69 @@
+{
+  "_elapsed_s": 0.0,
+  "checked_book_vocab": 3993,
+  "enriched_now": 0,
+  "id": "PG84",
+  "seed_or_cache_hits": 21,
+  "top": [
+    {
+      "book_count": 20,
+      "note": "",
+      "source": "seed",
+      "word": "alas"
+    },
+    {
+      "book_count": 18,
+      "note": "",
+      "source": "seed",
+      "word": "thy"
+    },
+    {
+      "book_count": 14,
+      "note": "",
+      "source": "seed",
+      "word": "thou"
+    },
+    {
+      "book_count": 13,
+      "note": "",
+      "source": "seed",
+      "word": "behold"
+    },
+    {
+      "book_count": 13,
+      "note": "",
+      "source": "seed",
+      "word": "ought"
+    },
+    {
+      "book_count": 10,
+      "note": "",
+      "source": "seed",
+      "word": "thee"
+    },
+    {
+      "book_count": 8,
+      "note": "",
+      "source": "seed",
+      "word": "amidst"
+    },
+    {
+      "book_count": 7,
+      "note": "",
+      "source": "seed",
+      "word": "art"
+    },
+    {
+      "book_count": 6,
+      "note": "",
+      "source": "seed",
+      "word": "nay"
+    },
+    {
+      "book_count": 5,
+      "note": "",
+      "source": "seed",
+      "word": "fortnight"
+    }
+  ]
+}

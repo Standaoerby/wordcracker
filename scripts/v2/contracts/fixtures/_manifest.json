@@ -1,0 +1,263 @@
+{
+  "exempt": [
+    "scripts.learning_tools.enrich_word"
+  ],
+  "live_args_total": 32,
+  "results": [
+    {
+      "reason": "fixture-coverage waived (FIXTURE_EXEMPT): LLM-generative / non-deterministic output",
+      "status": "exempt",
+      "v1_qualname": "scripts.learning_tools.enrich_word"
+    },
+    {
+      "elapsed_s": 4.822,
+      "path": "v2/contracts/fixtures/scripts.learning_tools.affinity_by_book.json",
+      "size_bytes": 5920,
+      "status": "ok",
+      "v1_fingerprint": "a42127221a4d",
+      "v1_qualname": "scripts.learning_tools.affinity_by_book"
+    },
+    {
+      "elapsed_s": 0.004,
+      "path": "v2/contracts/fixtures/scripts.learning_tools.book_archaic_words.json",
+      "size_bytes": 1136,
+      "status": "ok",
+      "v1_fingerprint": "607da0c977f8",
+      "v1_qualname": "scripts.learning_tools.book_archaic_words"
+    },
+    {
+      "elapsed_s": 0.003,
+      "path": "v2/contracts/fixtures/scripts.learning_tools.export_word_list.json",
+      "size_bytes": 134,
+      "status": "ok",
+      "v1_fingerprint": "e83660819b8f",
+      "v1_qualname": "scripts.learning_tools.export_word_list"
+    },
+    {
+      "elapsed_s": 0.342,
+      "path": "v2/contracts/fixtures/scripts.learning_tools.learning_words.json",
+      "size_bytes": 15825,
+      "status": "ok",
+      "v1_fingerprint": "1f475614d683",
+      "v1_qualname": "scripts.learning_tools.learning_words"
+    },
+    {
+      "elapsed_s": 0.252,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.affinity_by_author.json",
+      "size_bytes": 846,
+      "status": "ok",
+      "v1_fingerprint": "4e163f9f47b8",
+      "v1_qualname": "scripts.rag_tools.affinity_by_author"
+    },
+    {
+      "elapsed_s": 0.022,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.author_attribution.json",
+      "size_bytes": 629,
+      "status": "ok",
+      "v1_fingerprint": "03afb95707ff",
+      "v1_qualname": "scripts.rag_tools.author_attribution"
+    },
+    {
+      "elapsed_s": 0.001,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.author_influences.json",
+      "size_bytes": 1127,
+      "status": "ok",
+      "v1_fingerprint": "a673b322c5e4",
+      "v1_qualname": "scripts.rag_tools.author_influences"
+    },
+    {
+      "elapsed_s": 0.194,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.author_metadata.json",
+      "size_bytes": 648,
+      "status": "ok",
+      "v1_fingerprint": "a646956c29c8",
+      "v1_qualname": "scripts.rag_tools.author_metadata"
+    },
+    {
+      "elapsed_s": 3.612,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.author_profile.json",
+      "size_bytes": 9151,
+      "status": "ok",
+      "v1_fingerprint": "1fe0070bc4fb",
+      "v1_qualname": "scripts.rag_tools.author_profile"
+    },
+    {
+      "elapsed_s": 0.005,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.book_emotion_profile.json",
+      "size_bytes": 4527,
+      "status": "ok",
+      "v1_fingerprint": "79c543b939d5",
+      "v1_qualname": "scripts.rag_tools.book_emotion_profile"
+    },
+    {
+      "elapsed_s": 0.03,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.book_readability.json",
+      "size_bytes": 357,
+      "status": "ok",
+      "v1_fingerprint": "3b4aeb9720e9",
+      "v1_qualname": "scripts.rag_tools.book_readability"
+    },
+    {
+      "elapsed_s": 1.128,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.compare_authors.json",
+      "size_bytes": 5701,
+      "status": "ok",
+      "v1_fingerprint": "68eab4f05a75",
+      "v1_qualname": "scripts.rag_tools.compare_authors"
+    },
+    {
+      "elapsed_s": 0.046,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.corpus_stats_by_author.json",
+      "size_bytes": 856,
+      "status": "ok",
+      "v1_fingerprint": "5a6de125d552",
+      "v1_qualname": "scripts.rag_tools.corpus_stats_by_author"
+    },
+    {
+      "elapsed_s": 0.246,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.emotion_collocates.json",
+      "size_bytes": 2370,
+      "status": "ok",
+      "v1_fingerprint": "e45991bf39f9",
+      "v1_qualname": "scripts.rag_tools.emotion_collocates"
+    },
+    {
+      "elapsed_s": 0.017,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.find_book.json",
+      "size_bytes": 1229,
+      "status": "ok",
+      "v1_fingerprint": "69af5c0eb033",
+      "v1_qualname": "scripts.rag_tools.find_book"
+    },
+    {
+      "elapsed_s": 9.897,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.find_words_by_etymology.json",
+      "size_bytes": 2222,
+      "status": "ok",
+      "v1_fingerprint": "4fdad89e04ac",
+      "v1_qualname": "scripts.rag_tools.find_words_by_etymology"
+    },
+    {
+      "elapsed_s": 0.057,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.lexical_diversity.json",
+      "size_bytes": 1449,
+      "status": "ok",
+      "v1_fingerprint": "60b9aa1fd5c9",
+      "v1_qualname": "scripts.rag_tools.lexical_diversity"
+    },
+    {
+      "elapsed_s": 22.276,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.semantic_search.json",
+      "size_bytes": 5845,
+      "status": "ok",
+      "v1_fingerprint": "efa6ac915fdd",
+      "v1_qualname": "scripts.rag_tools.semantic_search"
+    },
+    {
+      "elapsed_s": 0.872,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.top_authors_by.json",
+      "size_bytes": 791,
+      "status": "ok",
+      "v1_fingerprint": "c3a37c0f4704",
+      "v1_qualname": "scripts.rag_tools.top_authors_by"
+    },
+    {
+      "elapsed_s": 0.179,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.top_authors_by_country.json",
+      "size_bytes": 2635,
+      "status": "ok",
+      "v1_fingerprint": "9660b7bcdc36",
+      "v1_qualname": "scripts.rag_tools.top_authors_by_country"
+    },
+    {
+      "elapsed_s": 0.034,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.top_books_by_downloads.json",
+      "size_bytes": 886,
+      "status": "ok",
+      "v1_fingerprint": "036c89f48829",
+      "v1_qualname": "scripts.rag_tools.top_books_by_downloads"
+    },
+    {
+      "elapsed_s": 2.875,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.top_books_by_recency.json",
+      "size_bytes": 1448,
+      "status": "ok",
+      "v1_fingerprint": "e3f697ce8fa1",
+      "v1_qualname": "scripts.rag_tools.top_books_by_recency"
+    },
+    {
+      "elapsed_s": 1.755,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.top_ngrams_by_author.json",
+      "size_bytes": 1292,
+      "status": "ok",
+      "v1_fingerprint": "47c270900545",
+      "v1_qualname": "scripts.rag_tools.top_ngrams_by_author"
+    },
+    {
+      "elapsed_s": 0.159,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.word_collocates.json",
+      "size_bytes": 1237,
+      "status": "ok",
+      "v1_fingerprint": "9be3fe29ba81",
+      "v1_qualname": "scripts.rag_tools.word_collocates"
+    },
+    {
+      "elapsed_s": 0.017,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.word_contexts.json",
+      "size_bytes": 1158,
+      "status": "ok",
+      "v1_fingerprint": "b0de42dadaab",
+      "v1_qualname": "scripts.rag_tools.word_contexts"
+    },
+    {
+      "elapsed_s": 357.941,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.word_contexts_global.json",
+      "size_bytes": 4714,
+      "status": "ok",
+      "v1_fingerprint": "294cadde5550",
+      "v1_qualname": "scripts.rag_tools.word_contexts_global"
+    },
+    {
+      "elapsed_s": 0.0,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.word_etymology.json",
+      "size_bytes": 346,
+      "status": "ok",
+      "v1_fingerprint": "389817571af7",
+      "v1_qualname": "scripts.rag_tools.word_etymology"
+    },
+    {
+      "elapsed_s": 49.04,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.word_freq_timeline.json",
+      "size_bytes": 3258,
+      "status": "ok",
+      "v1_fingerprint": "9ea950f8a58c",
+      "v1_qualname": "scripts.rag_tools.word_freq_timeline"
+    },
+    {
+      "elapsed_s": 0.544,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.word_pos_distribution.json",
+      "size_bytes": 1218,
+      "status": "ok",
+      "v1_fingerprint": "4a52ff1961e2",
+      "v1_qualname": "scripts.rag_tools.word_pos_distribution"
+    },
+    {
+      "elapsed_s": 20.162,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.words_appearing_after.json",
+      "size_bytes": 1138,
+      "status": "ok",
+      "v1_fingerprint": "1bc5899e9573",
+      "v1_qualname": "scripts.rag_tools.words_appearing_after"
+    },
+    {
+      "elapsed_s": 20.482,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.words_disappearing_after.json",
+      "size_bytes": 1147,
+      "status": "ok",
+      "v1_fingerprint": "9a1ee0a0891f",
+      "v1_qualname": "scripts.rag_tools.words_disappearing_after"
+    }
+  ],
+  "targets_attempted": 31,
+  "v1_contracts_loaded": 32
+}

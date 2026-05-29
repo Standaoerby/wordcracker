@@ -1,0 +1,47 @@
+{
+  "_elapsed_s": 0.54,
+  "max_occurrences": 200,
+  "pos_distribution": [
+    {
+      "count": 139,
+      "pos": "NOUN",
+      "samples": [
+        {
+          "pg_id": "PG105",
+          "sentence": "gradually acquainted, and when acquainted, rapidly and deeply in love."
+        },
+        {
+          "pg_id": "PG105",
+          "sentence": "one who had almost a mother’s love, and mother’s rights, it would be"
+        },
+        {
+          "pg_id": "PG105",
+          "sentence": "turned by him; and off they ran, quite as full of glee as of love, and"
+        }
+      ],
+      "share": 0.695
+    },
+    {
+      "count": 61,
+      "pos": "VERB",
+      "samples": [
+        {
+          "pg_id": "PG105",
+          "sentence": "seemed to love her, rather because she would love her, than because"
+        },
+        {
+          "pg_id": "PG105",
+          "sentence": "he had nothing to do, and she had hardly anybody to love; but the"
+        },
+        {
+          "pg_id": "PG105",
+          "sentence": "“I love your indignation,” said he; “it is very natural."
+        }
+      ],
+      "share": 0.305
+    }
+  ],
+  "scope": "author:^Austen, (28 books)",
+  "total_occurrences": 200,
+  "word": "love"
+}

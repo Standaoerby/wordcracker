@@ -1,0 +1,52 @@
+{
+  "author_filter": null,
+  "matches": [
+    {
+      "author": "Austen, Jane",
+      "authoryearofbirth": 1775.0,
+      "downloads": 31755,
+      "id": "PG1342",
+      "language": "['en']",
+      "pub_year": null,
+      "title": "Pride and Prejudice"
+    },
+    {
+      "author": "Austen, Jane",
+      "authoryearofbirth": 1775.0,
+      "downloads": 1154,
+      "id": "PG42671",
+      "language": "['en']",
+      "pub_year": null,
+      "title": "Pride and Prejudice"
+    },
+    {
+      "author": "Austen, Jane",
+      "authoryearofbirth": 1775.0,
+      "downloads": 577,
+      "id": "PG20686",
+      "language": "['en']",
+      "pub_year": null,
+      "title": "Pride and Prejudice"
+    },
+    {
+      "author": "Austen, Jane",
+      "authoryearofbirth": 1775.0,
+      "downloads": 201,
+      "id": "PG37431",
+      "language": "['en']",
+      "pub_year": null,
+      "title": "Pride and Prejudice, a play founded on Jane Austen's novel"
+    },
+    {
+      "author": "Austen, Jane",
+      "authoryearofbirth": 1775.0,
+      "downloads": 150,
+      "id": "PG26301",
+      "language": "['en']",
+      "pub_year": null,
+      "title": "Pride and Prejudice"
+    }
+  ],
+  "title_query": "Pride and Prejudice",
+  "total_matches": 6
+}

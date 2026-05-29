@@ -1,4 +1,4 @@
-"""Phase 2 contract sweep — REFACTOR_BRIEF Gate.
+"""Phase 2 contract sweep — REFACTOR_BRIEF Gate + TZ S-F2 / ADR-F2 closeout.
 
 For every (wrapper, v1_fn, schema) triple in `V1_CONTRACTS`:
 
@@ -6,7 +6,9 @@ For every (wrapper, v1_fn, schema) triple in `V1_CONTRACTS`:
      the wrapper body reads only keys declared in the schema (plus the
      well-known internal/error-branch sets). Phantom keys → import-time
      ContractError, which means this test file would also fail to
-     collect — we re-run the check explicitly for clarity.
+     collect — we re-run the check explicitly for clarity, via the
+     standalone lint helper `_v1_contract_lint.scan_all_contracts`
+     (one body, two callers — TZ S-F2 D-SF2-3).
 
   2. Drift gate (the "remove any key from v1 → exactly one contract test
      fails" half of Phase 2 gate): a minimal mock built from the schema
@@ -17,28 +19,74 @@ For every (wrapper, v1_fn, schema) triple in `V1_CONTRACTS`:
   3. Decorator visibility: every wrapper exposes its (v1_fn, schema)
      binding through `__v1_contract__`.
 
-Designed to be fast (no network, no v1 actually called) and deterministic.
-The optional `WC_CONTRACT_LIVE_V1=1` env var swaps in real v1 calls for
-contract verification against live data — kept opt-in because a few v1
-calls touch disk / pandas / network.
+  4. R2 negative gate (TZ S-F2 acceptance): synthesise a wrapper that
+     reads a phantom key, apply `@v1_contract`, assert `ContractError`
+     is raised with both phantom keys named in the message. Locks in
+     the import-time enforcement — a future regression that catches
+     and logs instead of raising flips this test red.
+
+  5. Fixture-coverage hard-gate (TZ S-F2 D-SF2-4 revised — agreed
+     with user 2026-05-25): every binding in V1_CONTRACTS with a
+     LIVE_ARGS entry MUST have a recorded fixture under
+     scripts/v2/contracts/fixtures/. Missing = CI red. Recording
+     happens on prod via
+     `python -m scripts.v2.contracts.record_fixtures`. This is the
+     load-bearing v1↔v2 contract gate — it catches "declared
+     contract diverged from what v1 actually returns", which the
+     static-AST / schema-mock gates above cannot.
+
+  6. Recorded-fixture replay (TZ S-F2 D-SF2-4): for each fixture
+     JSON, load + `assert_matches_schema(raw, binding.schema)`.
+     Fails red when v1 renamed a key, dropped a required field, or
+     when the wrapper's declared schema diverged from reality. Runs
+     by default — no env gate.
+
+All classes carry `@pytest.mark.v1_contract` (declared in
+[conftest.py](tests/v2/conftest.py)) so the contract sweep is
+targetable from CI / deploy host via `pytest -m v1_contract`.
+
+Static / schema-mock / coverage gates are fast (no v1 called).
+Replay reads JSON files on disk — likewise fast. The recorder CLI
+([scripts/v2/contracts/record_fixtures.py](scripts/v2/contracts/record_fixtures.py))
+is the only step that touches real v1, and runs on prod only.
 """
 from __future__ import annotations
 
-import os
+import json
 import sys
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+# Allow `from _v1_contract_lint import …` — the standalone lint helper
+# lives next to this test module (TZ S-F2 D-SF2-3 path).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import pytest
 
 # Importing tools populates V1_CONTRACTS.
 import scripts.v2.tools  # noqa: F401
 from scripts.v2.contracts import (
     assert_matches_schema,
-    check_wrapper_against_schema,
     mock_from_schema,
 )
+from scripts.v2.contracts.live_args import (
+    LIVE_ARGS, FIXTURE_EXEMPT, fixture_filename,
+)
 from scripts.v2.contracts.registry import V1_CONTRACTS
+from _v1_contract_lint import scan_all_contracts
+
+
+_FIXTURES_DIR = (
+    Path(__file__).resolve().parents[2]
+    / "scripts" / "v2" / "contracts" / "fixtures"
+)
+
+
+# Module-level marker — `pytest -m v1_contract` runs every class in
+# this file and nothing else. Declared in conftest.py so unknown-marker
+# warnings stay clean.
+pytestmark = pytest.mark.v1_contract
 
 
 class StaticContractGate(unittest.TestCase):
@@ -51,13 +99,7 @@ class StaticContractGate(unittest.TestCase):
     """
 
     def test_every_wrapper_reads_only_declared_keys(self):
-        offenders = {}
-        for key, binding in V1_CONTRACTS.items():
-            rogue = check_wrapper_against_schema(
-                binding.wrapper_fn, binding.schema,
-            )
-            if rogue:
-                offenders[key] = rogue
+        offenders = scan_all_contracts()
         self.assertEqual(
             offenders, {},
             f"wrappers reading phantom keys not in their schema: {offenders}. "
@@ -194,41 +236,273 @@ class V1ImportPathCanonical(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(os.environ.get("WC_CONTRACT_LIVE_V1") == "1",
-                     "live v1 contract sweep is opt-in (slow, touches disk/network)")
-class LiveV1Contracts(unittest.TestCase):
-    """Optional: call each v1 with safe defaults; verify against schema.
+class PhantomKeyNegativeGate(unittest.TestCase):
+    """R2 negative test (TZ S-F2 acceptance, ADR-F2 §"Negative tests").
 
-    Gated by WC_CONTRACT_LIVE_V1 because several v1 functions read
-    pandas / chroma / disk. CI green path doesn't need it; ops can flip
-    the env var to spot drift in actual prod v1 outputs.
+    Synthesise a tiny wrapper that reads two phantom keys not in the
+    schema and not in INTERNAL_V2_KEYS / ERROR_BRANCH_KEYS. Apply
+    `@v1_contract(...)` to it. The decorator MUST raise `ContractError`
+    at decoration time (NOT at first call, NOT silently logged) and the
+    error message MUST list both phantom keys.
+
+    Locks in the import-time enforcement: a future regression that
+    catches and logs instead of raising, or one that carelessly
+    broadens INTERNAL_V2_KEYS, will flip this test red — proving the
+    static gate is the structural defence the audit named (C2).
     """
 
-    LIVE_ARGS = {
-        "scripts.rag_tools.affinity_by_author":
-            {"author_regex": "^Doyle,", "top": 5, "min_corpus_count": 500},
-        "scripts.rag_tools.word_etymology": {"word": "sword"},
-        "scripts.rag_tools.corpus_overview": {},
-    }
+    def test_phantom_key_raises_contract_error(self):
+        from scripts.v2.contracts import v1_contract, ContractError
+        from scripts.v2.contracts.schemas import V1FindBook
 
-    def test_live_v1_outputs_match_schema(self):
-        failures = []
+        def synthetic_phantom_wrapper(**_kw):
+            raw = {"matches": []}
+            # Neither key appears in V1FindBook nor in the global
+            # INTERNAL_V2_KEYS / ERROR_BRANCH_KEYS allowances.
+            _ = raw.get("xyz_nonexistent_phantom")
+            _ = raw["yyy_other_phantom"]
+            return raw
+
+        with self.assertRaises(ContractError) as ctx:
+            v1_contract(
+                v1_fn="scripts.rag_tools.find_book",
+                schema=V1FindBook,
+            )(synthetic_phantom_wrapper)
+
+        msg = str(ctx.exception)
+        # Diff is part of the contract — error message names BOTH
+        # phantom keys, not just the first one we found.
+        self.assertIn("xyz_nonexistent_phantom", msg)
+        self.assertIn("yyy_other_phantom", msg)
+        # Schema name appears so the developer reading the failure
+        # knows which schema to widen (or which wrapper to fix).
+        self.assertIn("V1FindBook", msg)
+
+
+class FixtureCoverageGate(unittest.TestCase):
+    """Hard-gate (TZ S-F2 D-SF2-4 revised, 2026-05-25): every binding
+    in V1_CONTRACTS with a LIVE_ARGS entry MUST have a recorded
+    fixture under scripts/v2/contracts/fixtures/.
+
+    What this catches that nothing else does:
+
+      Static AST and schema-mock gates verify the wrapper reads only
+      keys it declared. They DO NOT verify the declaration matches
+      what v1 actually returns — that's the E14/E15 failure class.
+      Without a recorded artefact tied to the actual v1 output, the
+      contract is a hypothesis that can be wrong while every other
+      gate stays green.
+
+    Recording is performed on the prod host (where /workspace/spgc/
+    and /workspace/chroma_db/ live) via
+
+        python -m scripts.v2.contracts.record_fixtures
+
+    and the resulting JSON files are committed. A wrapper added
+    without a recording flips THIS test red on the next PR — the
+    contract-coverage promise that S-F2 / ADR-F2 lands.
+
+    Bootstrap state (S-F2 first PR): expected RED until the operator
+    runs record_fixtures on prod the first time. After that, every
+    deploy that touches v1 source re-runs record_fixtures so the
+    fixtures stay in sync with reality.
+    """
+
+    def test_every_live_args_binding_has_a_fixture(self):
+        missing = []
+        no_live_args = []
+        exempt = []
         for binding in V1_CONTRACTS.values():
             key = binding.v1_qualname
-            args = self.LIVE_ARGS.get(key)
-            if args is None:
+            if key in FIXTURE_EXEMPT:
+                # Explicitly waived (see live_args.FIXTURE_EXEMPT) — e.g.
+                # enrich_word is LLM-generative, a frozen fixture would
+                # false-fail RecordedFixtureReplay. Wrapper stays bound;
+                # only the recorded-fixture requirement is dropped.
+                exempt.append(key)
+                continue
+            if key not in LIVE_ARGS:
+                # V6 resolvers (`scripts.v2.entity_resolver_v6.*`)
+                # are v2-internal and live outside LIVE_ARGS by
+                # design — they have their own test paths. Surface
+                # them in the assertion message so coverage gaps
+                # remain visible (zero-cost; the assertion still
+                # passes as long as `missing` is empty).
+                no_live_args.append(key)
+                continue
+            fixture_path = _FIXTURES_DIR / fixture_filename(key)
+            if not fixture_path.exists():
+                missing.append(key)
+        self.assertEqual(
+            missing, [],
+            f"missing recorded fixtures for {len(missing)} bindings: "
+            f"{missing}.\n"
+            f"Record them on the prod host (one-off ephemeral "
+            f"container — does NOT touch the running chat/admin):\n"
+            f"    git fetch origin && git checkout s-f2-v1-contracts-fixtures\n"
+            f"    docker compose -f docker-compose.yml -f docker-compose.dev.yml \\\n"
+            f"        run --rm gutenberg-lab \\\n"
+            f"        python -m scripts.v2.contracts.record_fixtures\n"
+            f"    cat scripts/v2/contracts/fixtures/_manifest.json   # review\n"
+            f"    git add scripts/v2/contracts/fixtures/\n"
+            f"    git commit -m 'chore(s-f2): record v1 golden fixtures'\n"
+            f"    git push origin s-f2-v1-contracts-fixtures\n"
+            f"    git checkout main\n"
+            f"(v2-internal bindings without LIVE_ARGS are excluded "
+            f"by design: {sorted(no_live_args)}; "
+            f"fixture-exempt bindings — see live_args.FIXTURE_EXEMPT — "
+            f"are waived by design: {sorted(exempt)})",
+        )
+
+
+class RecordedFixtureReplay(unittest.TestCase):
+    """Replay recorded golden fixtures through schema validation.
+
+    For every fixture file present under
+    `scripts/v2/contracts/fixtures/`, load + `assert_matches_schema`
+    against the binding's declared schema. When a future prod
+    deploy makes v1 rename a key, the next
+    `record_fixtures` run writes a new shape into the fixture; that
+    fixture then fails THIS test red, forcing both schema AND
+    wrapper to be updated in lockstep with v1.
+
+    Bindings whose fixture is missing are SILENTLY skipped here
+    (`FixtureCoverageGate` is what fails when they're missing) so
+    this test's signal is unambiguous: red == schema-drift,
+    not == missing-recording.
+    """
+
+    def test_every_recorded_fixture_satisfies_schema(self):
+        if not _FIXTURES_DIR.exists():
+            # First-ever recording hasn't happened yet — the directory
+            # itself doesn't exist. CoverageGate carries the loud
+            # complaint; this test passes vacuously so the signal
+            # stays "0 schema-drift detected" rather than mixing the
+            # two failure modes.
+            return
+
+        failures = []
+        replayed = 0
+        for binding in V1_CONTRACTS.values():
+            key = binding.v1_qualname
+            fixture_path = _FIXTURES_DIR / fixture_filename(key)
+            if not fixture_path.exists():
                 continue
             try:
-                raw = binding.v1_fn(**args)
-            except Exception as e:
-                failures.append((key, f"v1 raised: {e}"))
+                with open(fixture_path, encoding="utf-8") as fh:
+                    raw = json.load(fh)
+            except (OSError, json.JSONDecodeError) as e:
+                failures.append((key, f"fixture unreadable: {e}"))
                 continue
             try:
-                assert_matches_schema(raw, binding.schema,
-                                       context=binding.schema_name)
+                assert_matches_schema(
+                    raw, binding.schema, context=binding.schema_name,
+                )
+                replayed += 1
             except AssertionError as e:
                 failures.append((key, str(e)))
-        self.assertEqual(failures, [], f"live-v1 contract drift: {failures}")
+        self.assertEqual(
+            failures, [],
+            f"recorded fixtures diverge from declared schemas — v1 "
+            f"output drifted, or the wrapper's schema is wrong. "
+            f"({replayed} fixtures passed, {len(failures)} failed.) "
+            f"Re-record on prod with "
+            f"`python -m scripts.v2.contracts.record_fixtures` and "
+            f"compare the diff:\n{failures}",
+        )
+
+
+class FixtureFreshnessGate(unittest.TestCase):
+    """D-SF2-6 — hard-gate against stale fixtures.
+
+    Each fixture is recorded with a stamped `v1_fingerprint` (AST-hash
+    of `(wrapper_fn, v1_fn)` plus their depth=1 callees — same formula
+    as ADR-F1's cache fingerprint). At CI time, recompute the
+    fingerprint from the current source tree and compare. Drift means
+    v1 source or wrapper body was edited since the recording, so the
+    fixture is structurally stale — operator must re-run
+    `record_fixtures` on prod and commit the diff.
+
+    Layered defence against silent stale fixtures:
+
+      1. **CoverageGate** (presence): fixture file exists.
+      2. **RecordedFixtureReplay** (shape): JSON matches declared schema.
+      3. **FixtureFreshnessGate** (this class): fingerprint matches
+         current source. Catches the "v1 helper edited, re-record
+         forgotten" case at depth≤1.
+      4. **F2-DEPLOY-RERECORD** (deploy.sh follow-up): re-runs
+         record_fixtures post-rollout and fails the deploy on any
+         JSON diff. Catches depth≥2 / lazy-import / C-extension v1
+         edits that the AST walk cannot reach (ADR-F1 D-SF1-4
+         residual risk).
+
+    Layers 1-3 run on every PR. Layer 4 runs on every prod deploy.
+    Together they close the stale-fixture failure class structurally
+    — there is no path where v1 source changes and the fixture stays
+    untouched without a loud CI/deploy signal.
+    """
+
+    def test_every_fixture_fingerprint_matches_current(self):
+        manifest_path = _FIXTURES_DIR / "_manifest.json"
+        if not manifest_path.exists():
+            # Bootstrap state — no recordings yet. CoverageGate is
+            # the loud signal; this test stays silent so the failure
+            # surface remains unambiguous (1 red, not 2).
+            return
+
+        try:
+            with open(manifest_path, encoding="utf-8") as fh:
+                manifest = json.load(fh)
+        except (OSError, json.JSONDecodeError) as e:
+            self.fail(f"_manifest.json unreadable: {e}")
+
+        recorded_fingerprints = {
+            r["v1_qualname"]: r.get("v1_fingerprint")
+            for r in manifest.get("results", [])
+            if r.get("status") == "ok"
+        }
+
+        # Importing here keeps the test self-contained — the registry
+        # module is the canonical home of ast_fingerprint (same formula
+        # used by the cache key, by design).
+        from scripts.v2.contracts.registry import ast_fingerprint
+
+        drift = []
+        for binding in V1_CONTRACTS.values():
+            key = binding.v1_qualname
+            stamped = recorded_fingerprints.get(key)
+            if stamped is None:
+                # Either the fixture wasn't recorded yet (CoverageGate
+                # will fail loudly), or this binding has no LIVE_ARGS
+                # entry (v2-internal resolvers — by design). Either
+                # way, skip — the freshness signal is meaningful only
+                # when a recording exists.
+                continue
+            try:
+                current = ast_fingerprint(
+                    binding.wrapper_fn, binding.v1_fn,
+                )
+            except Exception as e:  # noqa: BLE001 — surface any failure
+                drift.append((key, f"fingerprint failed: "
+                                    f"{type(e).__name__}: {e}"))
+                continue
+            if stamped != current:
+                drift.append((
+                    key,
+                    f"stamped={stamped} current={current} — "
+                    f"v1 or wrapper edited since recording",
+                ))
+
+        self.assertEqual(
+            drift, [],
+            f"{len(drift)} fixture(s) stale — source has changed "
+            f"since recording. Re-run on prod:\n"
+            f"    docker compose -f docker-compose.yml -f docker-compose.dev.yml \\\n"
+            f"        run --rm gutenberg-lab \\\n"
+            f"        python -m scripts.v2.contracts.record_fixtures\n"
+            f"then commit the updated fixtures + _manifest.json. "
+            f"Drift detail:\n{drift}",
+        )
 
 
 if __name__ == "__main__":

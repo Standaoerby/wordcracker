@@ -1,0 +1,73 @@
+{
+  "books_used": 13,
+  "bottom_5_least_varied": [
+    {
+      "pg_id": "PG3095",
+      "tokens": 126932,
+      "ttr": 0.065815,
+      "types": 8354
+    },
+    {
+      "pg_id": "PG68779",
+      "tokens": 184063,
+      "ttr": 0.064722,
+      "types": 11913
+    },
+    {
+      "pg_id": "PG42455",
+      "tokens": 155853,
+      "ttr": 0.060711,
+      "types": 9462
+    },
+    {
+      "pg_id": "PG45839",
+      "tokens": 159771,
+      "ttr": 0.056406,
+      "types": 9012
+    },
+    {
+      "pg_id": "PG345",
+      "tokens": 159075,
+      "ttr": 0.056401,
+      "types": 8972
+    }
+  ],
+  "note": "TTR collapses to a single number across the whole author; per-book averages or higher-order measures (MATTR, MTLD) are more comparable across books of different length",
+  "scope": "author:^Stoker, Bram$",
+  "tokens": 1380470,
+  "top_5_most_varied": [
+    {
+      "pg_id": "PG59671",
+      "tokens": 946,
+      "ttr": 0.382664,
+      "types": 362
+    },
+    {
+      "pg_id": "PG51391",
+      "tokens": 77638,
+      "ttr": 0.116309,
+      "types": 9030
+    },
+    {
+      "pg_id": "PG10150",
+      "tokens": 56616,
+      "ttr": 0.106366,
+      "types": 6022
+    },
+    {
+      "pg_id": "PG1188",
+      "tokens": 55318,
+      "ttr": 0.098811,
+      "types": 5466
+    },
+    {
+      "pg_id": "PG68966",
+      "tokens": 96961,
+      "ttr": 0.07272,
+      "types": 7051
+    }
+  ],
+  "ttr_aggregate": 0.020046,
+  "ttr_avg_per_book": 0.099579,
+  "types": 27673
+}

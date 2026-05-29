@@ -1,0 +1,258 @@
+{
+  "author1": {
+    "regex": "^Austen,",
+    "slug": "austen",
+    "top_unique": [
+      {
+        "affinity": 347.42,
+        "author_count": 1363,
+        "corpus_count": 10018,
+        "word": "elinor"
+      },
+      {
+        "affinity": 345.71,
+        "author_count": 264,
+        "corpus_count": 1950,
+        "word": "ferrars"
+      },
+      {
+        "affinity": 345.48,
+        "author_count": 511,
+        "corpus_count": 3777,
+        "word": "dashwood"
+      },
+      {
+        "affinity": 338.3,
+        "author_count": 270,
+        "corpus_count": 2038,
+        "word": "lizzy"
+      },
+      {
+        "affinity": 131.45,
+        "author_count": 467,
+        "corpus_count": 9072,
+        "word": "jennings"
+      },
+      {
+        "affinity": 100.5,
+        "author_count": 22,
+        "corpus_count": 559,
+        "word": "palmers"
+      },
+      {
+        "affinity": 99.39,
+        "author_count": 26,
+        "corpus_count": 668,
+        "word": "curricle"
+      },
+      {
+        "affinity": 93.01,
+        "author_count": 428,
+        "corpus_count": 11750,
+        "word": "willoughby"
+      },
+      {
+        "affinity": 85.32,
+        "author_count": 85,
+        "corpus_count": 2544,
+        "word": "hertfordshire"
+      },
+      {
+        "affinity": 85.08,
+        "author_count": 593,
+        "corpus_count": 17798,
+        "word": "crawford"
+      },
+      {
+        "affinity": 73.38,
+        "author_count": 15,
+        "corpus_count": 522,
+        "word": "agreable"
+      },
+      {
+        "affinity": 68.49,
+        "author_count": 14,
+        "corpus_count": 522,
+        "word": "dawlish"
+      },
+      {
+        "affinity": 68.18,
+        "author_count": 515,
+        "corpus_count": 19289,
+        "word": "collins"
+      },
+      {
+        "affinity": 67.69,
+        "author_count": 192,
+        "corpus_count": 7243,
+        "word": "mansfield"
+      },
+      {
+        "affinity": 63.94,
+        "author_count": 16,
+        "corpus_count": 639,
+        "word": "benn"
+      },
+      {
+        "affinity": 62.97,
+        "author_count": 20,
+        "corpus_count": 811,
+        "word": "tur"
+      },
+      {
+        "affinity": 58.56,
+        "author_count": 182,
+        "corpus_count": 7936,
+        "word": "austen"
+      },
+      {
+        "affinity": 58.37,
+        "author_count": 28,
+        "corpus_count": 1225,
+        "word": "gentlemanlike"
+      },
+      {
+        "affinity": 54.03,
+        "author_count": 19,
+        "corpus_count": 898,
+        "word": "charade"
+      },
+      {
+        "affinity": 50.99,
+        "author_count": 189,
+        "corpus_count": 9465,
+        "word": "gardiner"
+      }
+    ]
+  },
+  "author2": {
+    "regex": "^Wilde, Oscar$",
+    "slug": "wilde",
+    "top_unique": [
+      {
+        "affinity": 406.85,
+        "author_count": 445,
+        "corpus_count": 2840,
+        "word": "goring"
+      },
+      {
+        "affinity": 186.27,
+        "author_count": 66,
+        "corpus_count": 920,
+        "word": "worthing"
+      },
+      {
+        "affinity": 169.69,
+        "author_count": 63,
+        "corpus_count": 964,
+        "word": "chasuble"
+      },
+      {
+        "affinity": 148.01,
+        "author_count": 258,
+        "corpus_count": 4526,
+        "word": "cecily"
+      },
+      {
+        "affinity": 111.97,
+        "author_count": 212,
+        "corpus_count": 4916,
+        "word": "arbuthnot"
+      },
+      {
+        "affinity": 101.51,
+        "author_count": 45,
+        "corpus_count": 1151,
+        "word": "tetrarch"
+      },
+      {
+        "affinity": 100.42,
+        "author_count": 21,
+        "corpus_count": 543,
+        "word": "tzŭ"
+      },
+      {
+        "affinity": 98.58,
+        "author_count": 275,
+        "corpus_count": 7243,
+        "word": "algernon"
+      },
+      {
+        "affinity": 96.38,
+        "author_count": 34,
+        "corpus_count": 916,
+        "word": "margravine"
+      },
+      {
+        "affinity": 75.72,
+        "author_count": 31,
+        "corpus_count": 1063,
+        "word": "cardew"
+      },
+      {
+        "affinity": 74.13,
+        "author_count": 39,
+        "corpus_count": 1366,
+        "word": "bunbury"
+      },
+      {
+        "affinity": 73.94,
+        "author_count": 138,
+        "corpus_count": 4846,
+        "word": "individualism"
+      },
+      {
+        "affinity": 70.3,
+        "author_count": 15,
+        "corpus_count": 554,
+        "word": "handicraftsmen"
+      },
+      {
+        "affinity": 67.7,
+        "author_count": 17,
+        "corpus_count": 652,
+        "word": "daubeny"
+      },
+      {
+        "affinity": 65.27,
+        "author_count": 23,
+        "corpus_count": 915,
+        "word": "petro"
+      },
+      {
+        "affinity": 64.01,
+        "author_count": 32,
+        "corpus_count": 1298,
+        "word": "arcady"
+      },
+      {
+        "affinity": 63.98,
+        "author_count": 217,
+        "corpus_count": 8806,
+        "word": "wilde"
+      },
+      {
+        "affinity": 63.24,
+        "author_count": 33,
+        "corpus_count": 1355,
+        "word": "modernity"
+      },
+      {
+        "affinity": 61.36,
+        "author_count": 22,
+        "corpus_count": 931,
+        "word": "nihilists"
+      },
+      {
+        "affinity": 55.57,
+        "author_count": 217,
+        "corpus_count": 10140,
+        "word": "mall"
+      }
+    ]
+  },
+  "cosine_note": "low cosine (< 0.05) reflects that each author's top affinity vector is dominated by author-unique words; this is structural, not a measure of overall stylistic distance. Use `shared_high_affinity` to see common stylistic markers if any exist.",
+  "cosine_similarity": 0.0,
+  "min_corpus_count": 500,
+  "shared_high_affinity": []
+}

@@ -1,0 +1,32 @@
+{
+  "authors_in_index": 3602,
+  "tokens_in_text": 207,
+  "top": [
+    {
+      "author": "Human Genome Project",
+      "books_in_training": 73,
+      "delta": 2.4652
+    },
+    {
+      "author": "Gower, John",
+      "books_in_training": 5,
+      "delta": 2.4937
+    },
+    {
+      "author": "Scott, Greenwood & Co.",
+      "books_in_training": 3,
+      "delta": 2.5013
+    },
+    {
+      "author": "Library of Congress. Copyright Office",
+      "books_in_training": 82,
+      "delta": 2.5082
+    },
+    {
+      "author": "Adams, Oscar Fay",
+      "books_in_training": 3,
+      "delta": 2.5324
+    }
+  ],
+  "words_in_vector": 200
+}

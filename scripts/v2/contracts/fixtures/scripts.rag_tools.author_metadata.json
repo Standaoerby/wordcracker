@@ -1,0 +1,25 @@
+{
+  "author_regex": "^Wilde, Oscar$",
+  "authors_matched": [
+    "Wilde, Oscar"
+  ],
+  "books_matched": 43,
+  "languages": [
+    "['en']"
+  ],
+  "sample_titles": [
+    "The Picture of Dorian Gray",
+    "The Ballad of Reading Gaol",
+    "Lord Arthur Savile's Crime; The Portrait of Mr. W.H., and Other Stories",
+    "Essays and Lectures",
+    "Lady Windermere's Fan",
+    "The Importance of Being Earnest: A Trivial Comedy for Serious People",
+    "A Woman of No Importance",
+    "A House of Pomegranates",
+    "The Duchess of Padua",
+    "An Ideal Husband"
+  ],
+  "total_downloads": 28676,
+  "year_of_birth_min": 1854,
+  "year_of_death_max": 1900
+}

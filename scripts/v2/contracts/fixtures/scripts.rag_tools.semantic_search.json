@@ -1,0 +1,71 @@
+{
+  "author_filter": null,
+  "query": "vampire",
+  "results": [
+    {
+      "author": "O'Donnell, Elliott",
+      "chunk": 28500,
+      "distance": 0.2721,
+      "pg_id": "PG26629",
+      "snippet": "a grave at night to suck the blood of a living person. It never touches the dead. A werwolf has already been defined. It has an existence entirely separate from the vampire. The werwolf feeds on both the living and dead, which it bites and mangles after the nature of all beasts of prey. Vampirism is infectious; every one who has been sucked by a vampire, on physical dissolution, becomes a vampire, and remains one until his corpse is destroyed in a certain prescribed manner. Lycanthropy is not in",
+      "title": "Werwolves"
+    },
+    {
+      "author": "Le Fanu, Joseph Sheridan",
+      "chunk": 27500,
+      "distance": 0.2993,
+      "pg_id": "PG10007",
+      "snippet": "inconsolable grief. It is the nature of vampires to increase and multiply, but according to an ascertained and ghostly law. “Assume, at starting, a territory perfectly free from that pest. How does it begin, and how does it multiply itself? I will tell you. A person, more or less wicked, puts an end to himself. A suicide, under certain circumstances, becomes a vampire. That specter visits living people in their slumbers; they die, and almost invariably, in the grave, develop into vampires. This",
+      "title": "Carmilla"
+    },
+    {
+      "author": "Humphreys, Phebe Westcott",
+      "chunk": 29500,
+      "distance": 0.3095,
+      "pg_id": "PG50776",
+      "snippet": "famous Vampires of which various travellers have given such wonderful accounts. Gardner says: “The molar teeth of the true Vampire, or Spectre Bat, are of the most carnivorous character, the first being short and almost plain, the others sharp and cutting, and terminating in two or three points. Their rough tongue has been supposed to be the instrument employed for abrading the skin, so as to enable them more readily to abstract the blood; but Zoologists are now agreed that such supposition is a",
+      "title": "A Natural History for Young People: Our Animal Friends in Their Native Homes: including mammals, birds and fishes"
+    },
+    {
+      "author": "Birkhead, Edith",
+      "chunk": 51500,
+      "distance": 0.3101,
+      "pg_id": "PG14154",
+      "snippet": "nineteenth century. A writer in the _Dublin University Magazine_ tells of a vampire who plays an admirable game of whist! There is an \"explained\" vampire in one of George Macdonald's stories, _Adela Cathcart_. The prince of vampires is, however, Bram Stoker's _Dracula_, round whom centres a story of absorbing interest. De Quincey, who might have selected from the novel of terror many admirable illustrations for his essay on _Murder, Considered as one of the Fine Arts_, and who seems to have been",
+      "title": "The Tale of Terror: A Study of the Gothic Romance"
+    },
+    {
+      "author": "Scarborough, Dorothy",
+      "chunk": 50000,
+      "distance": 0.3103,
+      "pg_id": "PG47204",
+      "snippet": "impress upon English literature, while the vampire has been a definite motif. The vampire superstition goes back to ancient times, being referred to on Chaldean and Assyrian tablets. William of Newbury, of the twelfth century in England, relates several stories of them; one vampire was burned in Melrose Abbey, and tourists in Ireland are still shown the grave of a vampire. Perhaps the vampire superstition goes back to the savagery of remote times, and is an animistic survival of human sacrifices",
+      "title": "The Supernatural in Modern English Fiction"
+    },
+    {
+      "author": "Ingersoll, Ernest",
+      "chunk": 95500,
+      "distance": 0.3202,
+      "pg_id": "PG48196",
+      "snippet": "of the banana and similar fruits. Two species of this family are the famous \"vampires\" of the American tropics. The name recalls the superstition rife in Europe in the Middle Ages as to blood-exhausting fiends which were fabled to lull their victims into unconsciousness by the slow flapping of their wings, and then deprive them of life. The foremost of these vampires is a small reddish species (_Desmodus rufus_), whose front teeth are like keen daggers, while the cheek teeth have disappeared, ha",
+      "title": "Zoölogy: The Science of Animal Life: Popular Science Library, Volume XII (of 16), P. F. Collier & Son Company, 1922"
+    },
+    {
+      "author": "Various",
+      "chunk": 1448000,
+      "distance": 0.3309,
+      "pg_id": "PG29765",
+      "snippet": "and filling away again on the same tack. -- False vampire (Zoöl.), the Vampyrus spectrum of South America, formerly erroneously supposed to have blood-sucking habits; -- called also vampire, and ghost vampire. The genuine blood-sucking bats belong to the genera Desmodus and Diphylla. See Vampire. -- False window. (Arch.) See False door, above. -- False wing. (Zoöl.) See Alula, and Bastard wing, under Bastard. -- False works (Civil Engin.), construction works to facilitate the erection of the mai",
+      "title": "Webster's Unabridged Dictionary"
+    },
+    {
+      "author": "Hoffmann, E. T. A. (Ernst Theodor Amadeus)",
+      "chunk": 171000,
+      "distance": 0.3636,
+      "pg_id": "PG31668",
+      "snippet": "to ashes. Those horrible beings very often do not appear in their own proper forms, but _en masque_. A certain officer, I happen to remember, writing from Belgrade to a celebrated doctor in Leipzig for information as to the true nature of vampires, expresses himself thus: 'In a village called Kinklina it chanced that two brothers were troubled by a vampire, so that one of them used to sit up by the other at night whilst he slept. The one who was watching used to see something like a dog opening",
+      "title": "The Serapion Brethren, Vol. II"
+    }
+  ],
+  "retrieval_query": "vampire"
+}

@@ -1,0 +1,41 @@
+{
+  "author_regex": "^Austen,",
+  "cached": true,
+  "effective_min_corpus_count": 500,
+  "pos_filter": null,
+  "proper_noun_filter": "corpus-diff heuristic dropped 0, spaCy PROPN dropped 9",
+  "slug": "austen",
+  "top": [
+    {
+      "affinity": 347.42,
+      "author_count": 1363,
+      "corpus_count": 10018,
+      "word": "elinor"
+    },
+    {
+      "affinity": 345.71,
+      "author_count": 264,
+      "corpus_count": 1950,
+      "word": "ferrars"
+    },
+    {
+      "affinity": 345.48,
+      "author_count": 511,
+      "corpus_count": 3777,
+      "word": "dashwood"
+    },
+    {
+      "affinity": 338.3,
+      "author_count": 270,
+      "corpus_count": 2038,
+      "word": "lizzy"
+    },
+    {
+      "affinity": 131.45,
+      "author_count": 467,
+      "corpus_count": 9072,
+      "word": "jennings"
+    }
+  ],
+  "total_unique_words": 7230
+}

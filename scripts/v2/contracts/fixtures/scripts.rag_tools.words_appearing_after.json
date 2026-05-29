@@ -1,0 +1,56 @@
+{
+  "_elapsed_s": 20.15,
+  "basis": "auto",
+  "min_post_per_million": 50.0,
+  "post_bucket": {
+    "books": 3880,
+    "total_tokens": 94771205
+  },
+  "pre_bucket": {
+    "books": 5000,
+    "total_tokens": 481641101
+  },
+  "top": [
+    {
+      "post_count": 9415,
+      "post_per_million": 99.34,
+      "pre_count": 0,
+      "pre_per_million": 0.0,
+      "rise_ratio": 993.45,
+      "word": "bahá"
+    },
+    {
+      "post_count": 7117,
+      "post_per_million": 75.1,
+      "pre_count": 359,
+      "pre_per_million": 0.75,
+      "rise_ratio": 100.75,
+      "word": "rick"
+    },
+    {
+      "post_count": 6044,
+      "post_per_million": 63.77,
+      "pre_count": 460,
+      "pre_per_million": 0.96,
+      "rise_ratio": 66.77,
+      "word": "freddy"
+    },
+    {
+      "post_count": 7811,
+      "post_per_million": 82.42,
+      "pre_count": 667,
+      "pre_per_million": 1.38,
+      "rise_ratio": 59.52,
+      "word": "dave"
+    },
+    {
+      "post_count": 5400,
+      "post_per_million": 56.98,
+      "pre_count": 520,
+      "pre_per_million": 1.08,
+      "rise_ratio": 52.78,
+      "word": "hermione"
+    }
+  ],
+  "year_cutoff": 1920
+}

@@ -1,0 +1,170 @@
+{
+  "anchor_pool_in_lexicon": 1442,
+  "anchors_in_scope": [
+    {
+      "count": 366,
+      "word": "terrible"
+    },
+    {
+      "count": 258,
+      "word": "pain"
+    },
+    {
+      "count": 246,
+      "word": "darkness"
+    },
+    {
+      "count": 202,
+      "word": "anxious"
+    },
+    {
+      "count": 198,
+      "word": "grave"
+    },
+    {
+      "count": 197,
+      "word": "cliff"
+    },
+    {
+      "count": 166,
+      "word": "confidence"
+    },
+    {
+      "count": 159,
+      "word": "anxiety"
+    },
+    {
+      "count": 155,
+      "word": "surprise"
+    },
+    {
+      "count": 145,
+      "word": "lose"
+    },
+    {
+      "count": 145,
+      "word": "guard"
+    },
+    {
+      "count": 143,
+      "word": "ill"
+    },
+    {
+      "count": 138,
+      "word": "warning"
+    },
+    {
+      "count": 136,
+      "word": "unknown"
+    },
+    {
+      "count": 135,
+      "word": "suspicion"
+    }
+  ],
+  "emotion": "fear",
+  "scope": "author:^Stoker, Bram$ (15 books)",
+  "top_collocates": [
+    {
+      "count": 130,
+      "word": "time"
+    },
+    {
+      "count": 89,
+      "word": "seemed"
+    },
+    {
+      "count": 82,
+      "word": "through"
+    },
+    {
+      "count": 80,
+      "word": "about"
+    },
+    {
+      "count": 77,
+      "word": "am"
+    },
+    {
+      "count": 65,
+      "word": "over"
+    },
+    {
+      "count": 64,
+      "word": "night"
+    },
+    {
+      "count": 63,
+      "word": "see"
+    },
+    {
+      "count": 63,
+      "word": "only"
+    },
+    {
+      "count": 63,
+      "word": "should"
+    },
+    {
+      "count": 53,
+      "word": "too"
+    },
+    {
+      "count": 52,
+      "word": "come"
+    },
+    {
+      "count": 50,
+      "word": "face"
+    },
+    {
+      "count": 48,
+      "word": "fear"
+    },
+    {
+      "count": 48,
+      "word": "far"
+    },
+    {
+      "count": 47,
+      "word": "man"
+    },
+    {
+      "count": 45,
+      "word": "looked"
+    },
+    {
+      "count": 45,
+      "word": "something"
+    },
+    {
+      "count": 44,
+      "word": "full"
+    },
+    {
+      "count": 44,
+      "word": "look"
+    },
+    {
+      "count": 43,
+      "word": "know"
+    },
+    {
+      "count": 43,
+      "word": "saw"
+    },
+    {
+      "count": 42,
+      "word": "began"
+    },
+    {
+      "count": 42,
+      "word": "like"
+    },
+    {
+      "count": 41,
+      "word": "here"
+    }
+  ],
+  "total_anchor_hits": 4607
+}
