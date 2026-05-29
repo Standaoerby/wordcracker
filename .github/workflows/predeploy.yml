@@ -105,10 +105,6 @@ jobs:
           # size (~50 MB packed); the audit step is otherwise blind.
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
       - name: Free disk space for the full lock install
         # requirements.lock pulls ~7 GB onto disk (torch 2.12 + the
         # nvidia-*-cu13 wheels — manylinux2014_x86_64 .so files that
@@ -117,10 +113,29 @@ jobs:
         # tests skipif-out). ubuntu-latest ships with ~14 GB free root;
         # /opt/hostedtoolcache holds another ~5 GB of language SDKs we
         # don't use. Drop it to keep ~12 GB headroom for pip.
+        #
+        # MUST run BEFORE actions/setup-python: setup-python installs the
+        # 3.11 toolchain INTO /opt/hostedtoolcache. When this cleanup ran
+        # *after* setup-python it deleted that interpreter, so `python`
+        # fell back to the runner's system /usr/bin/python (3.12.3) and
+        # the whole suite silently ran on 3.12 — false-failing
+        # FixtureFreshnessGate (fixtures are AST-fingerprinted on 3.11.11;
+        # ast.dump output differs across minors). Clean first, install 3.11
+        # after, and invoke pytest through the setup-python interpreter.
         run: |
           df -h /
           sudo rm -rf /opt/hostedtoolcache
           df -h /
+
+      - uses: actions/setup-python@v5
+        id: setup
+        with:
+          python-version: "3.11"
+
+      - name: Show interpreter (must be 3.11.x — guards the 3.12 regression)
+        run: |
+          "${{ steps.setup.outputs.python-path }}" --version
+          "${{ steps.setup.outputs.python-path }}" -c "import sys; assert sys.version_info[:2] == (3, 11), sys.version; print('interpreter OK:', sys.version)"
 
       - name: Cache pip wheels
         uses: actions/cache@v4
@@ -136,8 +151,8 @@ jobs:
         # message (the same loud-fail property the prod image relies
         # on per ADR-B6).
         run: |
-          python -m pip install --upgrade pip
-          pip install --require-hashes -r requirements.lock
+          "${{ steps.setup.outputs.python-path }}" -m pip install --upgrade pip
+          "${{ steps.setup.outputs.python-path }}" -m pip install --require-hashes -r requirements.lock
 
       - name: Install spaCy models (URL-pinned, mirrors Dockerfile:50-52)
         # Models are published on GitHub Releases, not PyPI, so they
@@ -145,15 +160,15 @@ jobs:
         # embedded in the URL is the pin (en_core_web_sm/trf-3.8.0
         # matches spacy==3.8.14 from the lock).
         run: |
-          pip install \
+          "${{ steps.setup.outputs.python-path }}" -m pip install \
             https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl \
             https://github.com/explosion/spacy-models/releases/download/en_core_web_trf-3.8.0/en_core_web_trf-3.8.0-py3-none-any.whl
 
       - name: Collect tests/v2 (R10 — 0 collection errors)
-        run: python -m pytest tests/v2 --collect-only -q
+        run: '"${{ steps.setup.outputs.python-path }}" -m pytest tests/v2 --collect-only -q'
 
       - name: Run tests/v2 (full directory, NOT a hand-list)
-        run: python -m pytest tests/v2 -v
+        run: '"${{ steps.setup.outputs.python-path }}" -m pytest tests/v2 -v'
 
       - name: Cache fingerprint audit (S-F1 / ADR-F1 / D67) — advisory
         # Verifies that any tool whose declared sources changed since
@@ -168,7 +183,7 @@ jobs:
         continue-on-error: true
         run: |
           set +e
-          python -m scripts.v2.cache_fingerprint_audit --since=HEAD~1
+          "${{ steps.setup.outputs.python-path }}" -m scripts.v2.cache_fingerprint_audit --since=HEAD~1
           ec=$?
           if [ $ec -eq 0 ]; then
             echo "::notice title=Cache fingerprint audit::OK"
