@@ -1528,48 +1528,17 @@ def _normalize_lang(raw: str) -> str:
     return s.split(",")[0].strip()
 
 
-# ISO-639-2/B (+ a few /T) → ISO-639-1, for legacy metadata and corrupted
-# EPUB uploads whose <dc:language> was stored 3-letter (e.g. "['eng']").
-# Kept minimal to the languages that actually occur in the SPGC corpus;
-# unknown 3-letter codes are dropped (never guessed) so a bad tag can't
-# masquerade as a real language.
-_ISO_639_2_TO_1 = {
-    "eng": "en", "rus": "ru", "fre": "fr", "fra": "fr", "ger": "de",
-    "deu": "de", "spa": "es", "ita": "it", "por": "pt", "dut": "nl",
-    "nld": "nl", "lat": "la", "gre": "el", "ell": "el", "swe": "sv",
-    "dan": "da", "nor": "no", "fin": "fi", "pol": "pl", "cze": "cs",
-    "ces": "cs", "hun": "hu", "ara": "ar", "heb": "he", "chi": "zh",
-    "zho": "zh", "jpn": "ja", "kor": "ko", "tgl": "tl",
-}
-
-
-def _lang_codes(raw) -> set[str]:
-    """All language codes in `raw`, normalized to lower-case ISO-639-1.
-
-    Handles every shape the `language` column / a lang arg can take:
-      "en"  ·  "['en']"  ·  "['en', 'fr']"  ·  "['eng']" (639-2)  ·
-      ""  ·  "nan"  ·  garbage.
-    2-letter codes pass through; known 3-letter 639-2/B codes map down;
-    unknown/garbage codes are dropped (not guessed). Returns a set so a
-    multi-language book matches a query for any of its languages.
-    """
-    if not raw:
-        return set()
-    s = str(raw).strip().lower()
-    if s in {"nan", "none"}:
-        return set()
-    s = s.replace("[", "").replace("]", "").replace("'", "").replace('"', "")
-    codes: set[str] = set()
-    for part in s.split(","):
-        c = part.strip()
-        if not c:
-            continue
-        if len(c) == 2:
-            codes.add(c)
-        elif c in _ISO_639_2_TO_1:
-            codes.add(_ISO_639_2_TO_1[c])
-        # else: unknown 3+-letter / garbage → drop (no false match)
-    return codes
+# Language-code normalization lives in scripts/lang_norm.py (stdlib-only,
+# single source of truth — TZ S-T2 Group B/C, Phase-2 R6). Re-export under
+# the private names this module already uses. try/except covers both import
+# styles (this file is loaded as `scripts.rag_tools` and, in legacy paths,
+# bare `rag_tools` with scripts/ on sys.path).
+try:
+    from scripts.lang_norm import ISO_639_2_TO_1 as _ISO_639_2_TO_1
+    from scripts.lang_norm import lang_codes as _lang_codes
+except ImportError:  # pragma: no cover — bare-name fallback
+    from lang_norm import ISO_639_2_TO_1 as _ISO_639_2_TO_1
+    from lang_norm import lang_codes as _lang_codes
 
 
 def _lang_mask(df, lang):
