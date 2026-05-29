@@ -9,3 +9,11 @@ __pycache__/
 # D-SB1-3: .env carries the per-host WC_IMAGE_TAG (and any future
 # per-host secrets). .env.example is committed as a template.
 .env
+
+# S-B7: prod-root clutter that kept ~24 files showing as untracked in
+# `git status` (and so in deploy.sh's dirty-check noise). Anchored to the
+# repo root with a leading `/` so we don't mask a legitimately-tracked
+# *.bak / test_report_*.md somewhere under the tree. The files themselves
+# are deleted on prod separately.
+/test_report_*.md
+/*.bak
