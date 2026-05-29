@@ -144,6 +144,25 @@ LIVE_ARGS: dict[str, dict[str, Any]] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Fixture-coverage exemptions (single source of truth — honored by BOTH
+# record_fixtures.py and tests/v2/test_v1_contracts.py::FixtureCoverageGate).
+#
+# enrich_word is LLM-generative (qwen3) — non-deterministic output; a frozen
+# golden fixture would false-fail RecordedFixtureReplay on every re-record.
+# Shape-only contract TODO (validate declared keys without pinning values).
+# The wrapper stays registered in V1_CONTRACTS — the static AST gate, the
+# decorator binding (__v1_contract__), and the cache fingerprint all still
+# apply; only the recorded-fixture requirement is waived. Keeping its
+# LIVE_ARGS entry above means `record_fixtures --only <qualname>` can still
+# force a one-off recording (e.g. to eyeball the shape) without the default
+# sweep depending on a warm Ollama.
+# ---------------------------------------------------------------------------
+FIXTURE_EXEMPT: frozenset[str] = frozenset({
+    "scripts.learning_tools.enrich_word",
+})
+
+
 def fixture_filename(v1_qualname: str) -> str:
     """Canonical fixture filename for a binding.
 
@@ -159,4 +178,4 @@ def fixture_filename(v1_qualname: str) -> str:
     return f"{v1_qualname}.json"
 
 
-__all__ = ["LIVE_ARGS", "fixture_filename"]
+__all__ = ["LIVE_ARGS", "FIXTURE_EXEMPT", "fixture_filename"]

@@ -70,7 +70,9 @@ from scripts.v2.contracts import (
     assert_matches_schema,
     mock_from_schema,
 )
-from scripts.v2.contracts.live_args import LIVE_ARGS, fixture_filename
+from scripts.v2.contracts.live_args import (
+    LIVE_ARGS, FIXTURE_EXEMPT, fixture_filename,
+)
 from scripts.v2.contracts.registry import V1_CONTRACTS
 from _v1_contract_lint import scan_all_contracts
 
@@ -309,8 +311,16 @@ class FixtureCoverageGate(unittest.TestCase):
     def test_every_live_args_binding_has_a_fixture(self):
         missing = []
         no_live_args = []
+        exempt = []
         for binding in V1_CONTRACTS.values():
             key = binding.v1_qualname
+            if key in FIXTURE_EXEMPT:
+                # Explicitly waived (see live_args.FIXTURE_EXEMPT) — e.g.
+                # enrich_word is LLM-generative, a frozen fixture would
+                # false-fail RecordedFixtureReplay. Wrapper stays bound;
+                # only the recorded-fixture requirement is dropped.
+                exempt.append(key)
+                continue
             if key not in LIVE_ARGS:
                 # V6 resolvers (`scripts.v2.entity_resolver_v6.*`)
                 # are v2-internal and live outside LIVE_ARGS by
@@ -339,7 +349,9 @@ class FixtureCoverageGate(unittest.TestCase):
             f"    git push origin s-f2-v1-contracts-fixtures\n"
             f"    git checkout main\n"
             f"(v2-internal bindings without LIVE_ARGS are excluded "
-            f"by design: {sorted(no_live_args)})",
+            f"by design: {sorted(no_live_args)}; "
+            f"fixture-exempt bindings — see live_args.FIXTURE_EXEMPT — "
+            f"are waived by design: {sorted(exempt)})",
         )
 
 

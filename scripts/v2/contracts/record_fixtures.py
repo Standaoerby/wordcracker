@@ -199,7 +199,7 @@ def main(argv: list[str]) -> int:
     # empty registry and reports every binding as no_binding.
     try:
         import scripts.v2.tools  # noqa: F401
-        from scripts.v2.contracts.live_args import LIVE_ARGS
+        from scripts.v2.contracts.live_args import LIVE_ARGS, FIXTURE_EXEMPT
         from scripts.v2.contracts.registry import V1_CONTRACTS
     except Exception as e:
         print(f"[record_fixtures] FATAL: could not load v2 contracts "
@@ -211,7 +211,16 @@ def main(argv: list[str]) -> int:
             print(f"{key}\t{payload}")
         return 0
 
-    targets = sorted(args.only) if args.only else sorted(LIVE_ARGS)
+    # FIXTURE_EXEMPT bindings (e.g. LLM-generative enrich_word) are skipped
+    # in the default sweep — their output is non-deterministic so a frozen
+    # fixture is meaningless / false-fails replay. An explicit `--only
+    # <qualname>` still force-records them (for a one-off shape eyeball).
+    if args.only:
+        targets = sorted(args.only)
+        skipped_exempt = []
+    else:
+        targets = [k for k in sorted(LIVE_ARGS) if k not in FIXTURE_EXEMPT]
+        skipped_exempt = sorted(k for k in LIVE_ARGS if k in FIXTURE_EXEMPT)
 
     try:
         _FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
@@ -224,8 +233,19 @@ def main(argv: list[str]) -> int:
         "v1_contracts_loaded": len(V1_CONTRACTS),
         "live_args_total": len(LIVE_ARGS),
         "targets_attempted": len(targets),
+        "exempt": sorted(FIXTURE_EXEMPT),
         "results": [],
     }
+
+    for v1_qualname in skipped_exempt:
+        manifest["results"].append({
+            "v1_qualname": v1_qualname,
+            "status": "exempt",
+            "reason": "fixture-coverage waived (FIXTURE_EXEMPT): "
+                      "LLM-generative / non-deterministic output",
+        })
+        print(f"[record_fixtures] SKIP {v1_qualname}: exempt "
+              f"(FIXTURE_EXEMPT — non-deterministic)")
 
     ok = 0
     failed = 0
