@@ -50,11 +50,17 @@ class E38CompareAuthorsViewMetrics(unittest.TestCase):
     def test_cosine_and_shared_present_in_entity_metrics(self):
         from scripts.v2.tools.authors.affinity import compare_authors
 
+        # E27 (S-R4) interaction: compare_authors now scrubs character /
+        # creature names from each side (cthulhu is in the curated surname
+        # blocklist). Use genuine stylistic markers as the signature-word
+        # placeholders so the side isn't emptied — this test is about the
+        # metric KEYS appearing in both entity rows, not the words.
         v1_nested = {
             "author1": {"regex": "^Poe,", "slug": "poe-edgar-allan",
-                         "top_unique": [{"word": "raven", "affinity": 18.0}]},
+                         "top_unique": [{"word": "tintinnabulation",
+                                         "affinity": 18.0}]},
             "author2": {"regex": "^Lovecraft,", "slug": "lovecraft-h-p",
-                         "top_unique": [{"word": "cthulhu", "affinity": 22.0}]},
+                         "top_unique": [{"word": "eldritch", "affinity": 22.0}]},
             "shared_high_affinity": [{"word": "horror", "affinity_1": 5.0,
                                        "affinity_2": 6.0}],
             "cosine_similarity": 0.012,
