@@ -49,15 +49,15 @@ LIVE_ARGS: dict[str, dict[str, Any]] = {
     # rag_tools — word-scope (words sampled from the golden corpus)
     # --------------------------------------------------------------
     "scripts.rag_tools.word_collocates":
-        {"word": "love", "window": 4},
+        {"scope": {"author": _AUSTEN}, "word": "love", "window": 4},
     "scripts.rag_tools.emotion_collocates":
-        {"emotion": "fear"},
+        {"scope": {"author": _STOKER}, "emotion": "fear"},
     "scripts.rag_tools.word_contexts":
         {"word": "love", "author_regex": _AUSTEN},
     "scripts.rag_tools.word_contexts_global":
         {"word": "blood"},
     "scripts.rag_tools.word_pos_distribution":
-        {"word": "love"},
+        {"scope": {"author": _AUSTEN}, "word": "love"},
     "scripts.rag_tools.word_freq_timeline":
         {"word": "monster"},
     "scripts.rag_tools.words_disappearing_after":
@@ -67,7 +67,7 @@ LIVE_ARGS: dict[str, dict[str, Any]] = {
     "scripts.rag_tools.word_etymology":
         {"word": "sword"},
     "scripts.rag_tools.find_words_by_etymology":
-        {"family": "Old_English"},
+        {"scope": {"author": _AUSTEN}, "family": "germanic"},
 
     # --------------------------------------------------------------
     # rag_tools — author-scope (regexes hit the four golden authors)
@@ -83,13 +83,15 @@ LIVE_ARGS: dict[str, dict[str, Any]] = {
     "scripts.rag_tools.author_influences":
         {"author_regex": _AUSTEN},
     "scripts.rag_tools.author_attribution":
-        {"text_sample": "It is a truth universally acknowledged."},
+        {"text": "It is a truth universally acknowledged, that a single "
+                 "man in possession of a good fortune, must be in want "
+                 "of a wife."},
     "scripts.rag_tools.author_metadata":
         {"author_regex": _WILDE},
     "scripts.rag_tools.top_ngrams_by_author":
         {"author_regex": _AUSTEN, "n": 2},
     "scripts.rag_tools.lexical_diversity":
-        {"author_regex": _STOKER},
+        {"scope": {"author": _STOKER}},
 
     # --------------------------------------------------------------
     # rag_tools — book-scope (golden PG ids)
@@ -111,19 +113,19 @@ LIVE_ARGS: dict[str, dict[str, Any]] = {
     "scripts.rag_tools.top_authors_by_country":
         {"country": "GB"},
     "scripts.rag_tools.top_books_by_downloads":
-        {"top_n": 5},
+        {"top": 5},
     "scripts.rag_tools.top_books_by_recency":
-        {"top_n": 5},
+        {"top": 5},
 
     # --------------------------------------------------------------
     # learning_tools — covers PG84 + PG174 to round out the four
     # --------------------------------------------------------------
     "scripts.learning_tools.learning_words":
-        {"scope": "book:PG1342", "level": "intermediate"},
+        {"scope": {"book": "PG1342"}, "level": "intermediate"},
     "scripts.learning_tools.enrich_word":
         {"word": "pleasure"},
     "scripts.learning_tools.export_word_list":
-        {"entries": [{"word": "love"}], "format": "anki_csv"},
+        {"words": [{"word": "love"}], "format": "anki_csv"},
     "scripts.learning_tools.affinity_by_book":
         {"pg_id": "PG174"},
     "scripts.learning_tools.book_archaic_words":
