@@ -163,6 +163,36 @@ FIXTURE_EXEMPT: frozenset[str] = frozenset({
 })
 
 
+# ---------------------------------------------------------------------------
+# Heavy bindings — full-corpus scans that dominate a record_fixtures sweep
+# (S-B7 F2-DEPLOY-RERECORD). Measured wall-clock from a prod recording
+# (scripts/v2/contracts/fixtures/_manifest.json `elapsed_s`):
+#
+#     word_contexts_global      ~356-403 s   (every-book context grep)
+#     word_freq_timeline        ~49 s        (per-year frequency rollup)
+#     find_words_by_etymology   ~10-39 s     (etymology-family corpus scan)
+#
+# The deploy-time re-record gate (`record_fixtures --skip-heavy`, invoked
+# from scripts/deploy.sh between probe-gate and prune) skips these so the
+# gate cannot hang a deploy on a multi-minute corpus scan. The skip is
+# NOT a blind spot: code-level edits to these v1 funcs are still caught on
+# every PR by `FixtureFreshnessGate` (AST-fingerprint, depth<=1) in
+# tests/v2/test_v1_contracts.py. Only the deploy gate's depth>=2 JSON-diff
+# coverage is waived for these three — an explicit, logged trade-off
+# (record_fixtures prints which bindings it skipped). A full sweep is still
+# available on demand: `record_fixtures` with no flag (or `--only <name>`)
+# re-records everything, heavy bindings included.
+#
+# HEAVY_BINDINGS must be a subset of LIVE_ARGS — enforced by
+# tests/v2/test_deploy_b7.py::test_heavy_bindings_are_known_live_args.
+# ---------------------------------------------------------------------------
+HEAVY_BINDINGS: frozenset[str] = frozenset({
+    "scripts.rag_tools.word_contexts_global",
+    "scripts.rag_tools.word_freq_timeline",
+    "scripts.rag_tools.find_words_by_etymology",
+})
+
+
 def fixture_filename(v1_qualname: str) -> str:
     """Canonical fixture filename for a binding.
 
@@ -178,4 +208,4 @@ def fixture_filename(v1_qualname: str) -> str:
     return f"{v1_qualname}.json"
 
 
-__all__ = ["LIVE_ARGS", "FIXTURE_EXEMPT", "fixture_filename"]
+__all__ = ["LIVE_ARGS", "FIXTURE_EXEMPT", "HEAVY_BINDINGS", "fixture_filename"]

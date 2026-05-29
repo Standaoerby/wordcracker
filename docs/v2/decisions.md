@@ -235,6 +235,112 @@ with «counts file not found» → infra/corpus-layout, not code.
   held cold. A perf sprint should add a `book_similar` tool (or alias)
   whose name matches the routing target, and warm/precompute the
   neighbour index.
+## 2026-05-30 — S-B7: deploy hardening (D-SB7)
+
+Closes block **S-B7**. Branch `s-b7-deploy-hardening`. Gate = CI
+(script-shape tests validate `deploy.sh` logic without a real deploy;
+the live deploy run is a separate prod step). Three pieces + one
+stretch.
+
+### F2-DEPLOY-RERECORD — deploy.sh fixture re-record gate (D-SB7-1)
+
+This is the deploy-time **layer 4** of the stale-fixture defence whose
+first three layers landed in S-F2
+(`tests/v2/test_v1_contracts.py::FixtureFreshnessGate` docstring names
+this follow-up explicitly). It closes the manual `record_fixtures` step
+that bit twice on E27.
+
+`scripts/deploy.sh` gains a gate **between the probe-gate and prune**
+(forward mode only, `MODE==deploy`). It:
+
+1. spins up an **ephemeral dev-overlay container**
+   (`docker compose -f docker-compose.yml -f docker-compose.dev.yml
+   run --rm -T -w /workspace gutenberg-lab …`). The dev overlay
+   bind-mounts `./scripts`, so fixtures the recorder writes inside the
+   container land on the host repo where a host `git diff` can see
+   them; the base file's `/data/*` mounts give the container real
+   corpus. `WC_IMAGE_TAG=$SHA` pins it to the just-shipped image.
+   `run --rm` does **not** touch the running chat/admin/gutenberg-lab.
+2. runs `record_fixtures --skip-heavy`,
+3. `git diff --exit-code` over the fixtures dir, **excluding
+   `_manifest.json`**, and
+4. restores the dir (`git checkout --`) on every exit path so the host
+   tree stays clean for the next deploy's dirty-check.
+
+**Why exclude `_manifest.json` from the diff.** It is tracked but
+carries `elapsed_s` / `size_bytes` that change on every recording — the
+brief-literal `git diff --exit-code scripts/v2/contracts/fixtures/`
+would therefore go red on **every** deploy (false positive) and leave
+the tree dirty. The fixture-JSON *content* carries the real drift
+signal — and content drift is exactly what the depth≤1 AST fingerprint
+gate cannot see for depth≥2 / lazy-import v1 edits, which is why this
+gate diffs content rather than re-checking fingerprints.
+
+**Timeout-awareness.** `--skip-heavy` drops the `HEAVY_BINDINGS`
+full-corpus scans (`word_contexts_global` ~400 s, `word_freq_timeline`
+~49 s, `find_words_by_etymology` ~10–39 s; measured from a prod
+`_manifest.json`) so the sweep is well under a minute; a `timeout`
+backstop (`WC_RERECORD_BUDGET_SECS`, default 600 s) is a hard wall so a
+wedged tool fails the gate instead of hanging the deploy. The skip is
+**logged, not silent** (recorder prints each skipped binding; manifest
+records `skipped_heavy`). Heavy bindings keep their PR-time
+fingerprint coverage; only the deploy gate's depth≥2 JSON-diff coverage
+is waived for them — an explicit trade-off.
+
+Exit codes (≥10, same loud band as verify/probe-gate/rollback):
+**13** = recorder run failed (container error / timeout / v1 raised),
+**14** = fixture drift detected.
+
+Negative tests (`tests/v2/test_deploy_b7.py`): the manifest-excluded
+diff catches a real fixture-content change (→ non-zero → gate exit 14)
+yet ignores a manifest-only timing churn (→ zero) — and the NOT-X mirror
+asserts the brief-literal whole-dir diff *would* trip on the manifest
+churn, proving the exclude is load-bearing, not cosmetic.
+
+### status_server orphan-kill (D-SB7-2)
+
+`systemd/wordcracker-status.service` gains an `ExecStartPre` that reaps
+an orphaned status_server before binding :8889. The retired chat/admin
+units used `docker compose exec … pkill`, but status_server runs as
+**host** Python, so the reap is a **host** `pkill -9 -f
+…/status_server.py` — never `docker exec` (forbidden post-S-B2,
+`test_no_docker_exec_in_any_systemd_unit`). The orphan is the
+documented failure mode: a manual `nohup … status_server.py` left bound
+to :8889 (`install_systemd_units.sh` already warns about it). `=-`
+prefix swallows pkill's exit 1 on no-match. `[Install]
+WantedBy=multi-user.target` was already present (the brief's "unit
+missing" diagnosis was stale — the unit and its `[Install]` shipped in
+S-B2, `4d3051e`; all 42 prior deploy tests were already green).
+
+### .gitignore prod-root clutter (D-SB7-3)
+
+`/test_report_*.md` and `/*.bak`, **anchored to root** with a leading
+`/` so they cannot mask a legitimately-tracked file deeper in the tree.
+Stops the ~24 root-level untracked files from showing in `git status` /
+the deploy dirty-check noise. The files themselves are deleted on prod
+separately.
+
+### STRETCH — FINGERPRINT-PYVER (implemented; clean + narrow)
+
+Diagnosis: the per-fixture `v1_fingerprint` is
+`sha256(ast.dump(ast.parse(source)))`, and `ast.dump` output is
+**Python-minor-specific** (AST node fields evolve across minors). A
+fixture recorded on prod's Python 3.11 then checked on a 3.13 dev box
+reports **all** bindings as "source changed" — a false positive that
+buries real drift. (This is why CI pins setup-python to 3.11, commit
+`fbd717f`.)
+
+Chosen fix is the brief's option 2 (stamp Py-minor + fail clearly),
+**not** touching `ast_fingerprint` or the F1 cache key (the risk the
+brief flagged): `record_fixtures` now stamps `python_minor` in the
+manifest, and `FixtureFreshnessGate` short-circuits with one clear
+**"Python minor mismatch"** message when the recording and running
+minors disagree. Guarded on the stamp's presence, so pre-S-B7 manifests
+(no field) keep the original behaviour and CI stays green — the
+mismatch path activates only after the next prod re-record stamps the
+field. `ast.dump` stability across minors (the option-1 alternative)
+was rejected as out of scope: it would touch the cache-key formula and
+needs its own validation.
 
 ---
 

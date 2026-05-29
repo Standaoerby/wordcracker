@@ -456,6 +456,30 @@ class FixtureFreshnessGate(unittest.TestCase):
         except (OSError, json.JSONDecodeError) as e:
             self.fail(f"_manifest.json unreadable: {e}")
 
+        # S-B7 FINGERPRINT-PYVER (D-SB7): the v1_fingerprint is
+        # SHA-256 of `ast.dump(ast.parse(source))`, and ast.dump output is
+        # Python-minor-specific (node fields differ across minors). When the
+        # recording interpreter and the running interpreter disagree, EVERY
+        # binding reports "source changed" — a false positive that buries any
+        # real drift in noise. If the recorder stamped its Python minor
+        # (recordings after S-B7 do), short-circuit with one clear message
+        # instead of N misleading source-drift lines. Guarded on presence so
+        # pre-S-B7 manifests (no field) keep the original behaviour and CI
+        # stays green until the next prod re-record stamps it.
+        recorded_py = manifest.get("python_minor")
+        running_py = f"{sys.version_info.major}.{sys.version_info.minor}"
+        if recorded_py is not None and recorded_py != running_py:
+            self.fail(
+                f"Python minor mismatch: fixtures were recorded on Python "
+                f"{recorded_py} but this interpreter is Python {running_py}. "
+                f"The fixture fingerprint hashes `ast.dump(...)`, whose output "
+                f"is Python-minor-specific, so a cross-version run flags every "
+                f"fixture as 'source changed' (false positive). Run the "
+                f"contract suite on Python {recorded_py} (CI pins setup-python "
+                f"to it) or re-record on this Python. This is NOT a source "
+                f"drift. (S-B7 FINGERPRINT-PYVER / D-SB7)"
+            )
+
         recorded_fingerprints = {
             r["v1_qualname"]: r.get("v1_fingerprint")
             for r in manifest.get("results", [])
