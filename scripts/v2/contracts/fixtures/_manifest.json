@@ -2,7 +2,7 @@
   "live_args_total": 32,
   "results": [
     {
-      "elapsed_s": 4.8,
+      "elapsed_s": 4.845,
       "path": "v2/contracts/fixtures/scripts.learning_tools.affinity_by_book.json",
       "size_bytes": 5920,
       "status": "ok",
@@ -22,13 +22,13 @@
         "word": "pleasure"
       },
       "details": "HTTPConnectionPool(host='ollama', port=11434): Read timed out. (read timeout=90)",
-      "elapsed_s": 90.052,
+      "elapsed_s": 90.095,
       "error": "enrich_word failed",
       "status": "v1_returned_error",
       "v1_qualname": "scripts.learning_tools.enrich_word"
     },
     {
-      "elapsed_s": 0.038,
+      "elapsed_s": 0.007,
       "path": "v2/contracts/fixtures/scripts.learning_tools.export_word_list.json",
       "size_bytes": 134,
       "status": "ok",
@@ -36,7 +36,7 @@
       "v1_qualname": "scripts.learning_tools.export_word_list"
     },
     {
-      "elapsed_s": 0.344,
+      "elapsed_s": 0.372,
       "path": "v2/contracts/fixtures/scripts.learning_tools.learning_words.json",
       "size_bytes": 15825,
       "status": "ok",
@@ -44,7 +44,7 @@
       "v1_qualname": "scripts.learning_tools.learning_words"
     },
     {
-      "elapsed_s": 0.254,
+      "elapsed_s": 0.252,
       "path": "v2/contracts/fixtures/scripts.rag_tools.affinity_by_author.json",
       "size_bytes": 846,
       "status": "ok",
@@ -52,13 +52,11 @@
       "v1_qualname": "scripts.rag_tools.affinity_by_author"
     },
     {
-      "args": {
-        "text": "It is a truth universally acknowledged, that a single man in possession of a good fortune, must be in want of a wife."
-      },
-      "details": null,
-      "elapsed_s": 0.019,
-      "error": "text too short (23 tokens); need at least 200",
-      "status": "v1_returned_error",
+      "elapsed_s": 0.021,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.author_attribution.json",
+      "size_bytes": 629,
+      "status": "ok",
+      "v1_fingerprint": "03afb95707ff",
       "v1_qualname": "scripts.rag_tools.author_attribution"
     },
     {
@@ -70,7 +68,7 @@
       "v1_qualname": "scripts.rag_tools.author_influences"
     },
     {
-      "elapsed_s": 0.198,
+      "elapsed_s": 0.193,
       "path": "v2/contracts/fixtures/scripts.rag_tools.author_metadata.json",
       "size_bytes": 648,
       "status": "ok",
@@ -78,9 +76,9 @@
       "v1_qualname": "scripts.rag_tools.author_metadata"
     },
     {
-      "elapsed_s": 3.599,
+      "elapsed_s": 3.61,
       "path": "v2/contracts/fixtures/scripts.rag_tools.author_profile.json",
-      "size_bytes": 9150,
+      "size_bytes": 9151,
       "status": "ok",
       "v1_fingerprint": "1fe0070bc4fb",
       "v1_qualname": "scripts.rag_tools.author_profile"
@@ -102,7 +100,7 @@
       "v1_qualname": "scripts.rag_tools.book_readability"
     },
     {
-      "elapsed_s": 1.124,
+      "elapsed_s": 1.133,
       "path": "v2/contracts/fixtures/scripts.rag_tools.compare_authors.json",
       "size_bytes": 5701,
       "status": "ok",
@@ -118,7 +116,7 @@
       "v1_qualname": "scripts.rag_tools.corpus_stats_by_author"
     },
     {
-      "elapsed_s": 0.243,
+      "elapsed_s": 0.242,
       "path": "v2/contracts/fixtures/scripts.rag_tools.emotion_collocates.json",
       "size_bytes": 2370,
       "status": "ok",
@@ -134,15 +132,15 @@
       "v1_qualname": "scripts.rag_tools.find_book"
     },
     {
-      "elapsed_s": 39.649,
+      "elapsed_s": 9.826,
       "path": "v2/contracts/fixtures/scripts.rag_tools.find_words_by_etymology.json",
-      "size_bytes": 2223,
+      "size_bytes": 2222,
       "status": "ok",
       "v1_fingerprint": "4fdad89e04ac",
       "v1_qualname": "scripts.rag_tools.find_words_by_etymology"
     },
     {
-      "elapsed_s": 0.057,
+      "elapsed_s": 0.058,
       "path": "v2/contracts/fixtures/scripts.rag_tools.lexical_diversity.json",
       "size_bytes": 1449,
       "status": "ok",
@@ -150,7 +148,7 @@
       "v1_qualname": "scripts.rag_tools.lexical_diversity"
     },
     {
-      "elapsed_s": 22.238,
+      "elapsed_s": 22.619,
       "path": "v2/contracts/fixtures/scripts.rag_tools.semantic_search.json",
       "size_bytes": 5845,
       "status": "ok",
@@ -158,7 +156,7 @@
       "v1_qualname": "scripts.rag_tools.semantic_search"
     },
     {
-      "elapsed_s": 0.756,
+      "elapsed_s": 0.848,
       "path": "v2/contracts/fixtures/scripts.rag_tools.top_authors_by.json",
       "size_bytes": 791,
       "status": "ok",
@@ -166,7 +164,7 @@
       "v1_qualname": "scripts.rag_tools.top_authors_by"
     },
     {
-      "elapsed_s": 0.198,
+      "elapsed_s": 0.173,
       "path": "v2/contracts/fixtures/scripts.rag_tools.top_authors_by_country.json",
       "size_bytes": 2635,
       "status": "ok",
@@ -182,7 +180,7 @@
       "v1_qualname": "scripts.rag_tools.top_books_by_downloads"
     },
     {
-      "elapsed_s": 2.992,
+      "elapsed_s": 3.099,
       "path": "v2/contracts/fixtures/scripts.rag_tools.top_books_by_recency.json",
       "size_bytes": 1448,
       "status": "ok",
@@ -190,7 +188,7 @@
       "v1_qualname": "scripts.rag_tools.top_books_by_recency"
     },
     {
-      "elapsed_s": 1.743,
+      "elapsed_s": 1.744,
       "path": "v2/contracts/fixtures/scripts.rag_tools.top_ngrams_by_author.json",
       "size_bytes": 1292,
       "status": "ok",
@@ -198,7 +196,7 @@
       "v1_qualname": "scripts.rag_tools.top_ngrams_by_author"
     },
     {
-      "elapsed_s": 0.157,
+      "elapsed_s": 0.16,
       "path": "v2/contracts/fixtures/scripts.rag_tools.word_collocates.json",
       "size_bytes": 1237,
       "status": "ok",
@@ -214,7 +212,7 @@
       "v1_qualname": "scripts.rag_tools.word_contexts"
     },
     {
-      "elapsed_s": 403.656,
+      "elapsed_s": 367.403,
       "path": "v2/contracts/fixtures/scripts.rag_tools.word_contexts_global.json",
       "size_bytes": 4714,
       "status": "ok",
@@ -230,7 +228,7 @@
       "v1_qualname": "scripts.rag_tools.word_etymology"
     },
     {
-      "elapsed_s": 49.625,
+      "elapsed_s": 48.581,
       "path": "v2/contracts/fixtures/scripts.rag_tools.word_freq_timeline.json",
       "size_bytes": 3258,
       "status": "ok",
@@ -238,7 +236,7 @@
       "v1_qualname": "scripts.rag_tools.word_freq_timeline"
     },
     {
-      "elapsed_s": 0.714,
+      "elapsed_s": 0.541,
       "path": "v2/contracts/fixtures/scripts.rag_tools.word_pos_distribution.json",
       "size_bytes": 1218,
       "status": "ok",
@@ -246,7 +244,7 @@
       "v1_qualname": "scripts.rag_tools.word_pos_distribution"
     },
     {
-      "elapsed_s": 20.641,
+      "elapsed_s": 20.366,
       "path": "v2/contracts/fixtures/scripts.rag_tools.words_appearing_after.json",
       "size_bytes": 1138,
       "status": "ok",
@@ -254,7 +252,7 @@
       "v1_qualname": "scripts.rag_tools.words_appearing_after"
     },
     {
-      "elapsed_s": 20.14,
+      "elapsed_s": 20.35,
       "path": "v2/contracts/fixtures/scripts.rag_tools.words_disappearing_after.json",
       "size_bytes": 1147,
       "status": "ok",
