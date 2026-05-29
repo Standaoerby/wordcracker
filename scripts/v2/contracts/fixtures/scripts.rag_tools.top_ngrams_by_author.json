@@ -1,0 +1,89 @@
+{
+  "author_regex": "^Austen,",
+  "books_used": 18,
+  "n": 2,
+  "pos_filter": null,
+  "top": [
+    {
+      "count": 1178,
+      "ngram": "all the"
+    },
+    {
+      "count": 980,
+      "ngram": "my dear"
+    },
+    {
+      "count": 868,
+      "ngram": "her own"
+    },
+    {
+      "count": 857,
+      "ngram": "the same"
+    },
+    {
+      "count": 817,
+      "ngram": "to see"
+    },
+    {
+      "count": 811,
+      "ngram": "there was"
+    },
+    {
+      "count": 728,
+      "ngram": "to make"
+    },
+    {
+      "count": 725,
+      "ngram": "there is"
+    },
+    {
+      "count": 688,
+      "ngram": "at all"
+    },
+    {
+      "count": 684,
+      "ngram": "am sure"
+    },
+    {
+      "count": 678,
+      "ngram": "to me"
+    },
+    {
+      "count": 677,
+      "ngram": "so much"
+    },
+    {
+      "count": 675,
+      "ngram": "more than"
+    },
+    {
+      "count": 663,
+      "ngram": "the first"
+    },
+    {
+      "count": 656,
+      "ngram": "to say"
+    },
+    {
+      "count": 647,
+      "ngram": "you know"
+    },
+    {
+      "count": 642,
+      "ngram": "the world"
+    },
+    {
+      "count": 605,
+      "ngram": "him to"
+    },
+    {
+      "count": 594,
+      "ngram": "should be"
+    },
+    {
+      "count": 592,
+      "ngram": "one of"
+    }
+  ],
+  "total_ngrams": 929649
+}

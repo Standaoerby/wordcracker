@@ -1,0 +1,47 @@
+{
+  "lang": "en",
+  "metric": "books",
+  "top": [
+    {
+      "author": "Lytton, Edward Bulwer Lytton, Baron",
+      "books": 218
+    },
+    {
+      "author": "Twain, Mark",
+      "books": 211
+    },
+    {
+      "author": "Shakespeare, William",
+      "books": 193
+    },
+    {
+      "author": "Ebers, Georg",
+      "books": 165
+    },
+    {
+      "author": "Dickens, Charles",
+      "books": 146
+    },
+    {
+      "author": "Oliphant, Mrs. (Margaret)",
+      "books": 141
+    },
+    {
+      "author": "Parker, Gilbert",
+      "books": 133
+    },
+    {
+      "author": "Kingston, William Henry Giles",
+      "books": 132
+    },
+    {
+      "author": "Fenn, George Manville",
+      "books": 128
+    },
+    {
+      "author": "Balzac, Honoré de",
+      "books": 126
+    }
+  ],
+  "top_n": 10
+}

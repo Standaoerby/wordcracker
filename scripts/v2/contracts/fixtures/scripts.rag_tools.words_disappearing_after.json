@@ -1,0 +1,56 @@
+{
+  "_elapsed_s": 20.51,
+  "basis": "auto",
+  "min_pre_per_million": 50.0,
+  "post_bucket": {
+    "books": 3880,
+    "total_tokens": 94771205
+  },
+  "pre_bucket": {
+    "books": 5000,
+    "total_tokens": 481641101
+  },
+  "top": [
+    {
+      "drop_ratio": 9.95,
+      "post_count": 1520,
+      "post_per_million": 16.04,
+      "pre_count": 76840,
+      "pre_per_million": 159.54,
+      "word": "sidenote"
+    },
+    {
+      "drop_ratio": 7.63,
+      "post_count": 716,
+      "post_per_million": 7.56,
+      "pre_count": 27774,
+      "pre_per_million": 57.67,
+      "word": "que"
+    },
+    {
+      "drop_ratio": 7.12,
+      "post_count": 2779,
+      "post_per_million": 29.32,
+      "pre_count": 100497,
+      "pre_per_million": 208.66,
+      "word": "thou"
+    },
+    {
+      "drop_ratio": 6.5,
+      "post_count": 1029,
+      "post_per_million": 10.86,
+      "pre_count": 34007,
+      "pre_per_million": 70.61,
+      "word": "whilst"
+    },
+    {
+      "drop_ratio": 6.39,
+      "post_count": 994,
+      "post_per_million": 10.49,
+      "pre_count": 32261,
+      "pre_per_million": 66.98,
+      "word": "reign"
+    }
+  ],
+  "year_cutoff": 1920
+}

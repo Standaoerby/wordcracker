@@ -1,0 +1,56 @@
+{
+  "pivot_author": "Austen, Jane",
+  "pivot_books_in_training": 27,
+  "top": [
+    {
+      "author": "Hubback, Mrs. (Catherine-Anne Austen)",
+      "books_in_training": 5,
+      "delta": 0.4572
+    },
+    {
+      "author": "Trollope, Frances Milton",
+      "books_in_training": 7,
+      "delta": 0.5455
+    },
+    {
+      "author": "Edgeworth, Maria",
+      "books_in_training": 23,
+      "delta": 0.5824
+    },
+    {
+      "author": "Lamb, Ruth",
+      "books_in_training": 13,
+      "delta": 0.6021
+    },
+    {
+      "author": "Burney, Fanny",
+      "books_in_training": 19,
+      "delta": 0.607
+    },
+    {
+      "author": "Fielding, Henry",
+      "books_in_training": 16,
+      "delta": 0.6146
+    },
+    {
+      "author": "Cooper, Susan Fenimore",
+      "books_in_training": 4,
+      "delta": 0.6166
+    },
+    {
+      "author": "Newby, C. J., Mrs.",
+      "books_in_training": 3,
+      "delta": 0.632
+    },
+    {
+      "author": "Marryat, Florence",
+      "books_in_training": 27,
+      "delta": 0.6331
+    },
+    {
+      "author": "Sandham, Elizabeth",
+      "books_in_training": 4,
+      "delta": 0.6334
+    }
+  ]
+}

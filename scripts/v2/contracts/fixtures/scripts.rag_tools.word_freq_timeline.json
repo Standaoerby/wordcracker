@@ -1,0 +1,155 @@
+{
+  "axis_basis": "pub_year when known (OL enrichment), otherwise authoryearofbirth + 30",
+  "basis": "auto",
+  "bucket_years": 25,
+  "timeline": [
+    {
+      "books": 42,
+      "occurrences": 92,
+      "per_million": 29.03,
+      "period": "1500-1524",
+      "total_tokens": 3169355
+    },
+    {
+      "books": 44,
+      "occurrences": 64,
+      "per_million": 13.98,
+      "period": "1525-1549",
+      "total_tokens": 4576490
+    },
+    {
+      "books": 42,
+      "occurrences": 33,
+      "per_million": 13.6,
+      "period": "1550-1574",
+      "total_tokens": 2426909
+    },
+    {
+      "books": 318,
+      "occurrences": 811,
+      "per_million": 57.64,
+      "period": "1575-1599",
+      "total_tokens": 14069770
+    },
+    {
+      "books": 86,
+      "occurrences": 188,
+      "per_million": 29.55,
+      "period": "1600-1624",
+      "total_tokens": 6362506
+    },
+    {
+      "books": 80,
+      "occurrences": 119,
+      "per_million": 17.97,
+      "period": "1625-1649",
+      "total_tokens": 6622432
+    },
+    {
+      "books": 298,
+      "occurrences": 414,
+      "per_million": 18.1,
+      "period": "1650-1674",
+      "total_tokens": 22876700
+    },
+    {
+      "books": 111,
+      "occurrences": 143,
+      "per_million": 25.17,
+      "period": "1675-1699",
+      "total_tokens": 5682472
+    },
+    {
+      "books": 228,
+      "occurrences": 315,
+      "per_million": 20.39,
+      "period": "1700-1724",
+      "total_tokens": 15446154
+    },
+    {
+      "books": 262,
+      "occurrences": 322,
+      "per_million": 14.8,
+      "period": "1725-1749",
+      "total_tokens": 21758092
+    },
+    {
+      "books": 406,
+      "occurrences": 712,
+      "per_million": 18.65,
+      "period": "1750-1774",
+      "total_tokens": 38178201
+    },
+    {
+      "books": 637,
+      "occurrences": 736,
+      "per_million": 14.68,
+      "period": "1775-1799",
+      "total_tokens": 50146229
+    },
+    {
+      "books": 1567,
+      "occurrences": 2122,
+      "per_million": 14.48,
+      "period": "1800-1824",
+      "total_tokens": 146570026
+    },
+    {
+      "books": 4738,
+      "occurrences": 7734,
+      "per_million": 19.77,
+      "period": "1825-1849",
+      "total_tokens": 391113421
+    },
+    {
+      "books": 8980,
+      "occurrences": 11495,
+      "per_million": 17.37,
+      "period": "1850-1874",
+      "total_tokens": 661851933
+    },
+    {
+      "books": 14239,
+      "occurrences": 13150,
+      "per_million": 14.86,
+      "period": "1875-1899",
+      "total_tokens": 885150811
+    },
+    {
+      "books": 8917,
+      "occurrences": 7801,
+      "per_million": 15.48,
+      "period": "1900-1924",
+      "total_tokens": 504032577
+    },
+    {
+      "books": 2067,
+      "occurrences": 1741,
+      "per_million": 36.33,
+      "period": "1925-1949",
+      "total_tokens": 47919127
+    },
+    {
+      "books": 1040,
+      "occurrences": 570,
+      "per_million": 40.56,
+      "period": "1950-1974",
+      "total_tokens": 14053582
+    },
+    {
+      "books": 81,
+      "occurrences": 58,
+      "per_million": 30.88,
+      "period": "1975-1999",
+      "total_tokens": 1877953
+    },
+    {
+      "books": 24,
+      "occurrences": 44,
+      "per_million": 27.98,
+      "period": "2000-2024",
+      "total_tokens": 1572573
+    }
+  ],
+  "word": "monster"
+}

@@ -1,0 +1,283 @@
+{
+  "live_args_total": 32,
+  "results": [
+    {
+      "elapsed_s": 4.82,
+      "path": "v2/contracts/fixtures/scripts.learning_tools.affinity_by_book.json",
+      "size_bytes": 5920,
+      "status": "ok",
+      "v1_fingerprint": "a42127221a4d",
+      "v1_qualname": "scripts.learning_tools.affinity_by_book"
+    },
+    {
+      "elapsed_s": 0.004,
+      "path": "v2/contracts/fixtures/scripts.learning_tools.book_archaic_words.json",
+      "size_bytes": 1136,
+      "status": "ok",
+      "v1_fingerprint": "607da0c977f8",
+      "v1_qualname": "scripts.learning_tools.book_archaic_words"
+    },
+    {
+      "args": {
+        "word": "pleasure"
+      },
+      "details": "HTTPConnectionPool(host='ollama', port=11434): Read timed out. (read timeout=90)",
+      "elapsed_s": 90.011,
+      "error": "enrich_word failed",
+      "status": "v1_returned_error",
+      "v1_qualname": "scripts.learning_tools.enrich_word"
+    },
+    {
+      "args": {
+        "entries": [
+          {
+            "word": "love"
+          }
+        ],
+        "format": "anki_csv"
+      },
+      "elapsed_s": 0.0,
+      "error": "TypeError: export_word_list() got an unexpected keyword argument 'entries'",
+      "status": "v1_raised",
+      "v1_qualname": "scripts.learning_tools.export_word_list"
+    },
+    {
+      "args": {
+        "level": "intermediate",
+        "scope": "book:PG1342"
+      },
+      "details": null,
+      "elapsed_s": 0.0,
+      "error": "bad scope; use {'book': PGid} or {'author': regex} or 'all_corpus'",
+      "status": "v1_returned_error",
+      "v1_qualname": "scripts.learning_tools.learning_words"
+    },
+    {
+      "elapsed_s": 0.265,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.affinity_by_author.json",
+      "size_bytes": 846,
+      "status": "ok",
+      "v1_fingerprint": "4e163f9f47b8",
+      "v1_qualname": "scripts.rag_tools.affinity_by_author"
+    },
+    {
+      "args": {
+        "text_sample": "It is a truth universally acknowledged."
+      },
+      "elapsed_s": 0.0,
+      "error": "TypeError: author_attribution() got an unexpected keyword argument 'text_sample'",
+      "status": "v1_raised",
+      "v1_qualname": "scripts.rag_tools.author_attribution"
+    },
+    {
+      "elapsed_s": 0.02,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.author_influences.json",
+      "size_bytes": 1127,
+      "status": "ok",
+      "v1_fingerprint": "a673b322c5e4",
+      "v1_qualname": "scripts.rag_tools.author_influences"
+    },
+    {
+      "elapsed_s": 0.192,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.author_metadata.json",
+      "size_bytes": 648,
+      "status": "ok",
+      "v1_fingerprint": "a646956c29c8",
+      "v1_qualname": "scripts.rag_tools.author_metadata"
+    },
+    {
+      "elapsed_s": 3.652,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.author_profile.json",
+      "size_bytes": 9151,
+      "status": "ok",
+      "v1_fingerprint": "1fe0070bc4fb",
+      "v1_qualname": "scripts.rag_tools.author_profile"
+    },
+    {
+      "elapsed_s": 0.005,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.book_emotion_profile.json",
+      "size_bytes": 4527,
+      "status": "ok",
+      "v1_fingerprint": "79c543b939d5",
+      "v1_qualname": "scripts.rag_tools.book_emotion_profile"
+    },
+    {
+      "elapsed_s": 0.031,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.book_readability.json",
+      "size_bytes": 357,
+      "status": "ok",
+      "v1_fingerprint": "3b4aeb9720e9",
+      "v1_qualname": "scripts.rag_tools.book_readability"
+    },
+    {
+      "elapsed_s": 1.126,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.compare_authors.json",
+      "size_bytes": 5701,
+      "status": "ok",
+      "v1_fingerprint": "68eab4f05a75",
+      "v1_qualname": "scripts.rag_tools.compare_authors"
+    },
+    {
+      "elapsed_s": 0.046,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.corpus_stats_by_author.json",
+      "size_bytes": 856,
+      "status": "ok",
+      "v1_fingerprint": "5a6de125d552",
+      "v1_qualname": "scripts.rag_tools.corpus_stats_by_author"
+    },
+    {
+      "args": {
+        "emotion": "fear"
+      },
+      "elapsed_s": 0.0,
+      "error": "TypeError: emotion_collocates() missing 1 required positional argument: 'scope'",
+      "status": "v1_raised",
+      "v1_qualname": "scripts.rag_tools.emotion_collocates"
+    },
+    {
+      "elapsed_s": 0.017,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.find_book.json",
+      "size_bytes": 1229,
+      "status": "ok",
+      "v1_fingerprint": "69af5c0eb033",
+      "v1_qualname": "scripts.rag_tools.find_book"
+    },
+    {
+      "args": {
+        "family": "Old_English"
+      },
+      "elapsed_s": 0.0,
+      "error": "TypeError: find_words_by_etymology() missing 1 required positional argument: 'scope'",
+      "status": "v1_raised",
+      "v1_qualname": "scripts.rag_tools.find_words_by_etymology"
+    },
+    {
+      "args": {
+        "author_regex": "^Stoker, Bram$"
+      },
+      "elapsed_s": 0.0,
+      "error": "TypeError: lexical_diversity() got an unexpected keyword argument 'author_regex'",
+      "status": "v1_raised",
+      "v1_qualname": "scripts.rag_tools.lexical_diversity"
+    },
+    {
+      "elapsed_s": 20.594,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.semantic_search.json",
+      "size_bytes": 5845,
+      "status": "ok",
+      "v1_fingerprint": "efa6ac915fdd",
+      "v1_qualname": "scripts.rag_tools.semantic_search"
+    },
+    {
+      "elapsed_s": 0.788,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.top_authors_by.json",
+      "size_bytes": 791,
+      "status": "ok",
+      "v1_fingerprint": "c3a37c0f4704",
+      "v1_qualname": "scripts.rag_tools.top_authors_by"
+    },
+    {
+      "elapsed_s": 0.188,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.top_authors_by_country.json",
+      "size_bytes": 2635,
+      "status": "ok",
+      "v1_fingerprint": "9660b7bcdc36",
+      "v1_qualname": "scripts.rag_tools.top_authors_by_country"
+    },
+    {
+      "args": {
+        "top_n": 5
+      },
+      "elapsed_s": 0.0,
+      "error": "TypeError: top_books_by_downloads() got an unexpected keyword argument 'top_n'",
+      "status": "v1_raised",
+      "v1_qualname": "scripts.rag_tools.top_books_by_downloads"
+    },
+    {
+      "args": {
+        "top_n": 5
+      },
+      "elapsed_s": 0.0,
+      "error": "TypeError: top_books_by_recency() got an unexpected keyword argument 'top_n'",
+      "status": "v1_raised",
+      "v1_qualname": "scripts.rag_tools.top_books_by_recency"
+    },
+    {
+      "elapsed_s": 1.752,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.top_ngrams_by_author.json",
+      "size_bytes": 1292,
+      "status": "ok",
+      "v1_fingerprint": "47c270900545",
+      "v1_qualname": "scripts.rag_tools.top_ngrams_by_author"
+    },
+    {
+      "args": {
+        "window": 4,
+        "word": "love"
+      },
+      "elapsed_s": 0.0,
+      "error": "TypeError: word_collocates() missing 1 required positional argument: 'scope'",
+      "status": "v1_raised",
+      "v1_qualname": "scripts.rag_tools.word_collocates"
+    },
+    {
+      "elapsed_s": 0.017,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.word_contexts.json",
+      "size_bytes": 1158,
+      "status": "ok",
+      "v1_fingerprint": "b0de42dadaab",
+      "v1_qualname": "scripts.rag_tools.word_contexts"
+    },
+    {
+      "elapsed_s": 388.863,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.word_contexts_global.json",
+      "size_bytes": 4714,
+      "status": "ok",
+      "v1_fingerprint": "294cadde5550",
+      "v1_qualname": "scripts.rag_tools.word_contexts_global"
+    },
+    {
+      "elapsed_s": 0.002,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.word_etymology.json",
+      "size_bytes": 346,
+      "status": "ok",
+      "v1_fingerprint": "389817571af7",
+      "v1_qualname": "scripts.rag_tools.word_etymology"
+    },
+    {
+      "elapsed_s": 49.915,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.word_freq_timeline.json",
+      "size_bytes": 3258,
+      "status": "ok",
+      "v1_fingerprint": "9ea950f8a58c",
+      "v1_qualname": "scripts.rag_tools.word_freq_timeline"
+    },
+    {
+      "args": {
+        "word": "love"
+      },
+      "elapsed_s": 0.0,
+      "error": "TypeError: word_pos_distribution() missing 1 required positional argument: 'scope'",
+      "status": "v1_raised",
+      "v1_qualname": "scripts.rag_tools.word_pos_distribution"
+    },
+    {
+      "elapsed_s": 20.772,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.words_appearing_after.json",
+      "size_bytes": 1138,
+      "status": "ok",
+      "v1_fingerprint": "1bc5899e9573",
+      "v1_qualname": "scripts.rag_tools.words_appearing_after"
+    },
+    {
+      "elapsed_s": 20.525,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.words_disappearing_after.json",
+      "size_bytes": 1147,
+      "status": "ok",
+      "v1_fingerprint": "9a1ee0a0891f",
+      "v1_qualname": "scripts.rag_tools.words_disappearing_after"
+    }
+  ],
+  "targets_attempted": 32,
+  "v1_contracts_loaded": 32
+}

@@ -1,0 +1,15 @@
+{
+  "author": "Austen, Jane",
+  "avg_sentence_length_words": 23.53,
+  "avg_syllables_per_word": 1.467,
+  "cefr_heuristic": "B2",
+  "flesch_kincaid_grade": 10.9,
+  "flesch_reading_ease": 58.8,
+  "id": "PG1342",
+  "pg_id": "PG1342",
+  "sampled_chars": 200000,
+  "sentences": 1463,
+  "title": "Pride and Prejudice",
+  "user_uploaded": false,
+  "words": 34427
+}

@@ -1,0 +1,372 @@
+{
+  "author": "Stoker, Bram",
+  "emotion_bearing_tokens": 15240,
+  "emotion_coverage_pct": 9.58,
+  "id": "PG345",
+  "per_million": {
+    "anger": 14093.98,
+    "anticipation": 25264.81,
+    "disgust": 10491.91,
+    "fear": 22662.27,
+    "joy": 19889.99,
+    "negative": 34078.26,
+    "positive": 45984.6,
+    "sadness": 18274.4,
+    "surprise": 12019.49,
+    "trust": 27716.49
+  },
+  "sample_anchor_words": {
+    "anger": [
+      [
+        "fear",
+        136
+      ],
+      [
+        "terrible",
+        100
+      ],
+      [
+        "death",
+        85
+      ],
+      [
+        "words",
+        50
+      ],
+      [
+        "feeling",
+        34
+      ],
+      [
+        "shock",
+        34
+      ],
+      [
+        "broken",
+        34
+      ],
+      [
+        "bad",
+        32
+      ]
+    ],
+    "anticipation": [
+      [
+        "time",
+        377
+      ],
+      [
+        "good",
+        222
+      ],
+      [
+        "god",
+        176
+      ],
+      [
+        "long",
+        147
+      ],
+      [
+        "thought",
+        146
+      ],
+      [
+        "coming",
+        115
+      ],
+      [
+        "white",
+        102
+      ],
+      [
+        "death",
+        85
+      ]
+    ],
+    "disgust": [
+      [
+        "terrible",
+        100
+      ],
+      [
+        "death",
+        85
+      ],
+      [
+        "lord",
+        78
+      ],
+      [
+        "john",
+        76
+      ],
+      [
+        "feeling",
+        34
+      ],
+      [
+        "bad",
+        32
+      ],
+      [
+        "awful",
+        31
+      ],
+      [
+        "mad",
+        29
+      ]
+    ],
+    "fear": [
+      [
+        "god",
+        176
+      ],
+      [
+        "fear",
+        136
+      ],
+      [
+        "terrible",
+        100
+      ],
+      [
+        "death",
+        85
+      ],
+      [
+        "case",
+        69
+      ],
+      [
+        "watch",
+        62
+      ],
+      [
+        "die",
+        45
+      ],
+      [
+        "change",
+        43
+      ]
+    ],
+    "joy": [
+      [
+        "good",
+        222
+      ],
+      [
+        "friend",
+        185
+      ],
+      [
+        "god",
+        176
+      ],
+      [
+        "found",
+        153
+      ],
+      [
+        "white",
+        102
+      ],
+      [
+        "diary",
+        82
+      ],
+      [
+        "love",
+        81
+      ],
+      [
+        "hope",
+        66
+      ]
+    ],
+    "negative": [
+      [
+        "fear",
+        136
+      ],
+      [
+        "terrible",
+        100
+      ],
+      [
+        "death",
+        85
+      ],
+      [
+        "spoke",
+        78
+      ],
+      [
+        "lord",
+        78
+      ],
+      [
+        "john",
+        76
+      ],
+      [
+        "case",
+        69
+      ],
+      [
+        "late",
+        59
+      ]
+    ],
+    "positive": [
+      [
+        "dear",
+        224
+      ],
+      [
+        "good",
+        222
+      ],
+      [
+        "count",
+        192
+      ],
+      [
+        "friend",
+        185
+      ],
+      [
+        "god",
+        176
+      ],
+      [
+        "professor",
+        172
+      ],
+      [
+        "found",
+        153
+      ],
+      [
+        "white",
+        102
+      ]
+    ],
+    "sadness": [
+      [
+        "terrible",
+        100
+      ],
+      [
+        "death",
+        85
+      ],
+      [
+        "dark",
+        75
+      ],
+      [
+        "case",
+        69
+      ],
+      [
+        "late",
+        59
+      ],
+      [
+        "fell",
+        59
+      ],
+      [
+        "leave",
+        56
+      ],
+      [
+        "mother",
+        49
+      ]
+    ],
+    "surprise": [
+      [
+        "good",
+        222
+      ],
+      [
+        "death",
+        85
+      ],
+      [
+        "hope",
+        66
+      ],
+      [
+        "sweet",
+        64
+      ],
+      [
+        "present",
+        57
+      ],
+      [
+        "leave",
+        56
+      ],
+      [
+        "young",
+        54
+      ],
+      [
+        "sun",
+        52
+      ]
+    ],
+    "trust": [
+      [
+        "good",
+        222
+      ],
+      [
+        "count",
+        192
+      ],
+      [
+        "friend",
+        185
+      ],
+      [
+        "god",
+        176
+      ],
+      [
+        "professor",
+        172
+      ],
+      [
+        "found",
+        153
+      ],
+      [
+        "white",
+        102
+      ],
+      [
+        "diary",
+        82
+      ]
+    ]
+  },
+  "share_among_primary_emotions": {
+    "anger": 0.094,
+    "anticipation": 0.168,
+    "disgust": 0.07,
+    "fear": 0.151,
+    "joy": 0.132,
+    "sadness": 0.121,
+    "surprise": 0.08,
+    "trust": 0.184
+  },
+  "title": "Dracula",
+  "total_tokens": 159075
+}

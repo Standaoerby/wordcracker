@@ -1,0 +1,361 @@
+{
+  "_elapsed_s": 3.65,
+  "author_regex": "^Shelley, Mary",
+  "diversity": {
+    "books_used": 25,
+    "bottom_5_least_varied": [
+      {
+        "pg_id": "PG56665",
+        "tokens": 125824,
+        "ttr": 0.082902,
+        "types": 10431
+      },
+      {
+        "pg_id": "PG65361",
+        "tokens": 160953,
+        "ttr": 0.077662,
+        "types": 12500
+      },
+      {
+        "pg_id": "PG18247",
+        "tokens": 174606,
+        "ttr": 0.069998,
+        "types": 12222
+      },
+      {
+        "pg_id": "PG66749",
+        "tokens": 183860,
+        "ttr": 0.068944,
+        "types": 12676
+      },
+      {
+        "pg_id": "PG64329",
+        "tokens": 153410,
+        "ttr": 0.064174,
+        "types": 9845
+      }
+    ],
+    "note": "TTR collapses to a single number across the whole author; per-book averages or higher-order measures (MATTR, MTLD) are more comparable across books of different length",
+    "scope": "author:^Shelley, Mary",
+    "tokens": 2106619,
+    "top_5_most_varied": [
+      {
+        "pg_id": "PG66545",
+        "tokens": 12513,
+        "ttr": 0.22105,
+        "types": 2766
+      },
+      {
+        "pg_id": "PG6447",
+        "tokens": 16578,
+        "ttr": 0.218724,
+        "types": 3626
+      },
+      {
+        "pg_id": "PG52790",
+        "tokens": 19833,
+        "ttr": 0.184894,
+        "types": 3667
+      },
+      {
+        "pg_id": "PG4695",
+        "tokens": 24316,
+        "ttr": 0.177661,
+        "types": 4320
+      },
+      {
+        "pg_id": "PG74301",
+        "tokens": 65939,
+        "ttr": 0.134078,
+        "types": 8841
+      }
+    ],
+    "ttr_aggregate": 0.019594,
+    "ttr_avg_per_book": 0.117508,
+    "types": 41278
+  },
+  "dominant_emotions": {
+    "books_sampled": [
+      {
+        "pg_id": "PG84",
+        "title": "Frankenstein; Or, The Modern Prometheus"
+      },
+      {
+        "pg_id": "PG65228",
+        "title": "Eminent literary and scientific men of Italy, Spain, and Portugal. Vol. 3 (of 3)"
+      },
+      {
+        "pg_id": "PG65317",
+        "title": "Lives of the most eminent literary and scientific men of France, Vol. 1 (of 2)"
+      }
+    ],
+    "top": [
+      {
+        "avg_per_million": 34888.0,
+        "emotion": "trust"
+      },
+      {
+        "avg_per_million": 27722.7,
+        "emotion": "anticipation"
+      },
+      {
+        "avg_per_million": 27528.6,
+        "emotion": "joy"
+      }
+    ]
+  },
+  "influences": {
+    "pivot_author": "Shelley, Mary Wollstonecraft",
+    "pivot_books_in_training": 27,
+    "top": [
+      {
+        "author": "Ellet, E. F. (Elizabeth Fries)",
+        "books_in_training": 5,
+        "delta": 0.4249
+      },
+      {
+        "author": "Porter, Jane",
+        "books_in_training": 6,
+        "delta": 0.4254
+      },
+      {
+        "author": "Guiney, Louise Imogen",
+        "books_in_training": 15,
+        "delta": 0.4404
+      },
+      {
+        "author": "Maturin, Charles Robert",
+        "books_in_training": 4,
+        "delta": 0.4405
+      },
+      {
+        "author": "Gosse, Edmund",
+        "books_in_training": 9,
+        "delta": 0.447
+      }
+    ]
+  },
+  "metadata": {
+    "author_regex": "^Shelley, Mary",
+    "authors_matched": [
+      "Shelley, Mary Wollstonecraft"
+    ],
+    "books_matched": 27,
+    "languages": [
+      "['en']"
+    ],
+    "sample_titles": [
+      "Frankenstein; Or, The Modern Prometheus",
+      "Notes to the Complete Poetical Works of Percy Bysshe Shelley",
+      "Proserpine and Midas",
+      "Frankenstein",
+      "Mathilda",
+      "The Last Man",
+      "Frankenstein; Or, The Modern Prometheus",
+      "Frankenstein; Or, The Modern Prometheus",
+      "Frankenstein; Or, The Modern Prometheus",
+      "History of a Six Weeks' Tour Through a Part of France, Switzerland, Germany, and Holland:: With Letters Descriptive of a Sail Round the Lake of Geneva, and of the Glaciers of Chamouni."
+    ],
+    "total_downloads": 29624,
+    "year_of_birth_min": 1797,
+    "year_of_death_max": 1851
+  },
+  "signature": {
+    "author_regex": "^Shelley, Mary",
+    "cached": true,
+    "effective_min_corpus_count": 200,
+    "pos_filter": null,
+    "proper_noun_filter": "corpus-diff heuristic dropped 0, spaCy PROPN dropped 24",
+    "slug": "shelley",
+    "top": [
+      {
+        "affinity": 885.32,
+        "author_count": 164,
+        "corpus_count": 368,
+        "word": "locock"
+      },
+      {
+        "affinity": 820.65,
+        "author_count": 164,
+        "corpus_count": 397,
+        "word": "cj"
+      },
+      {
+        "affinity": 581.26,
+        "author_count": 158,
+        "corpus_count": 540,
+        "word": "editio"
+      },
+      {
+        "affinity": 555.2,
+        "author_count": 64,
+        "corpus_count": 229,
+        "word": "demogorgon"
+      },
+      {
+        "affinity": 358.19,
+        "author_count": 141,
+        "corpus_count": 782,
+        "word": "daemon"
+      },
+      {
+        "affinity": 350.18,
+        "author_count": 104,
+        "corpus_count": 590,
+        "word": "woodberry"
+      },
+      {
+        "affinity": 292.87,
+        "author_count": 272,
+        "corpus_count": 1845,
+        "word": "forman"
+      },
+      {
+        "affinity": 267.31,
+        "author_count": 44,
+        "corpus_count": 327,
+        "word": "aery"
+      },
+      {
+        "affinity": 251.31,
+        "author_count": 63,
+        "corpus_count": 498,
+        "word": "esdaile"
+      },
+      {
+        "affinity": 247.09,
+        "author_count": 50,
+        "corpus_count": 402,
+        "word": "athanase"
+      },
+      {
+        "affinity": 244.82,
+        "author_count": 70,
+        "corpus_count": 568,
+        "word": "ladislas"
+      },
+      {
+        "affinity": 225.43,
+        "author_count": 32,
+        "corpus_count": 282,
+        "word": "ricciardo"
+      },
+      {
+        "affinity": 224.12,
+        "author_count": 147,
+        "corpus_count": 1303,
+        "word": "dowden"
+      },
+      {
+        "affinity": 189.52,
+        "author_count": 141,
+        "corpus_count": 1478,
+        "word": "silenus"
+      },
+      {
+        "affinity": 186.47,
+        "author_count": 156,
+        "corpus_count": 1662,
+        "word": "princeps"
+      }
+    ],
+    "total_unique_words": 13994
+  },
+  "stats": {
+    "author_regex": "^Shelley, Mary",
+    "avg_book_length_words": 84264,
+    "books_matched": 27,
+    "books_with_counts": 25,
+    "languages": [
+      "['en']"
+    ],
+    "longest_book": {
+      "pg_id": "PG66749",
+      "title": "The Fortunes of Perkin Warbeck: a romance",
+      "tokens": 183860
+    },
+    "shortest_book": {
+      "pg_id": "PG66545",
+      "title": "The Heir of Mondolfo",
+      "tokens": 12513
+    },
+    "titles": [
+      "The Fortunes of Perkin Warbeck: a romance",
+      "The Last Man",
+      "Lives of the most eminent literary and scientific men of France, Vol. 2 (of 2)",
+      "Falkner: A Novel",
+      "Lives of the most eminent literary and scientific men of France, Vol. 1 (of 2)",
+      "Eminent literary and scientific men of Italy, Spain, and Portugal. Vol. 3 (of 3)",
+      "Eminent literary and scientific men of Italy, Spain, and Portugal. Vol. 2 (of 3)",
+      "Tales and Stories: Now First Collected",
+      "Eminent literary and scientific men of Italy, Spain, and Portugal. Vol. 1 (of 3)",
+      "Frankenstein; Or, The Modern Prometheus",
+      "Frankenstein; Or, The Modern Prometheus",
+      "Frankenstein; Or, The Modern Prometheus",
+      "Rambles in Germany and Italy in 1840, 1842, and 1843, vol. 2 of 2",
+      "Rambles in Germany and Italy in 1840, 1842, and 1843, vol. 1 of 2",
+      "Valperga Volume 1 (of 3): or, The life and adventures of Castruccio, prince of Lucca",
+      "Valperga Volume 2 (of 3): or, The life and adventures of Castruccio, prince of Lucca",
+      "Lodore, Vol. 3 (of 3)",
+      "Valperga Volume 3 (of 3): or, The life and adventures of Castruccio, prince of Lucca",
+      "Lodore, Vol. 1 (of 3)",
+      "Lodore, Vol. 2 (of 3)",
+      "Mathilda",
+      "Notes to the Complete Poetical Works of Percy Bysshe Shelley",
+      "History of a Six Weeks' Tour Through a Part of France, Switzerland, Germany, and Holland:: With Letters Descriptive of a Sail Round the Lake of Geneva, and of the Glaciers of Chamouni.",
+      "Proserpine and Midas",
+      "The Heir of Mondolfo"
+    ],
+    "total_tokens": 2106619,
+    "unique_words": 41278
+  },
+  "top_bigrams": {
+    "author_regex": "^Shelley, Mary",
+    "books_used": 25,
+    "n": 2,
+    "pos_filter": null,
+    "top": [
+      {
+        "count": 1389,
+        "ngram": "him to"
+      },
+      {
+        "count": 1360,
+        "ngram": "the same"
+      },
+      {
+        "count": 1289,
+        "ngram": "one of"
+      },
+      {
+        "count": 1234,
+        "ngram": "the most"
+      },
+      {
+        "count": 1194,
+        "ngram": "all the"
+      },
+      {
+        "count": 1139,
+        "ngram": "the first"
+      },
+      {
+        "count": 1120,
+        "ngram": "to him"
+      },
+      {
+        "count": 1119,
+        "ngram": "his own"
+      },
+      {
+        "count": 1083,
+        "ngram": "to me"
+      },
+      {
+        "count": 944,
+        "ngram": "there was"
+      }
+    ],
+    "total_ngrams": 1675803
+  }
+}

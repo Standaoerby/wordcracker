@@ -1,0 +1,36 @@
+{
+  "author_regex": "^Stoker, Bram$",
+  "avg_book_length_words": 106190,
+  "books_matched": 15,
+  "books_with_counts": 13,
+  "languages": [
+    "['en']"
+  ],
+  "longest_book": {
+    "pg_id": "PG68779",
+    "title": "Personal reminiscences of Henry Irving",
+    "tokens": 184063
+  },
+  "shortest_book": {
+    "pg_id": "PG59671",
+    "title": "Index of the Project Gutenberg Works of Bram Stoker",
+    "tokens": 946
+  },
+  "titles": [
+    "Personal reminiscences of Henry Irving",
+    "Dracula",
+    "Dracula",
+    "The Mystery of the Sea",
+    "The Lady of the Shroud",
+    "Lady Athlyne",
+    "The Man",
+    "The Snake's Pass",
+    "The Jewel of Seven Stars",
+    "Famous Impostors",
+    "Dracula's Guest",
+    "The Lair of the White Worm",
+    "Index of the Project Gutenberg Works of Bram Stoker"
+  ],
+  "total_tokens": 1380470,
+  "unique_words": 27673
+}

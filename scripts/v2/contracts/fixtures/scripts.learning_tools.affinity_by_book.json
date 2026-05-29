@@ -1,0 +1,311 @@
+{
+  "author": "Wilde, Oscar",
+  "book_tokens": 78326,
+  "book_vocab": 6545,
+  "effective_min_corpus_count": 200,
+  "pg_id": "PG174",
+  "pos_filter": null,
+  "title": "The Picture of Dorian Gray",
+  "top": [
+    {
+      "affinity": 840.6,
+      "book_count": 5,
+      "corpus_count": 216,
+      "word": "flowerlike"
+    },
+    {
+      "affinity": 163.58,
+      "book_count": 3,
+      "corpus_count": 666,
+      "word": "overdressed"
+    },
+    {
+      "affinity": 146.87,
+      "book_count": 4,
+      "corpus_count": 989,
+      "word": "carbuncles"
+    },
+    {
+      "affinity": 144.82,
+      "book_count": 4,
+      "corpus_count": 1003,
+      "word": "mantelshelf"
+    },
+    {
+      "affinity": 131.33,
+      "book_count": 4,
+      "corpus_count": 1106,
+      "word": "terrifies"
+    },
+    {
+      "affinity": 114.44,
+      "book_count": 3,
+      "corpus_count": 952,
+      "word": "tasselled"
+    },
+    {
+      "affinity": 83.29,
+      "book_count": 3,
+      "corpus_count": 1308,
+      "word": "fascinates"
+    },
+    {
+      "affinity": 82.22,
+      "book_count": 3,
+      "corpus_count": 1325,
+      "word": "wainscoting"
+    },
+    {
+      "affinity": 72.68,
+      "book_count": 3,
+      "corpus_count": 1499,
+      "word": "dowdy"
+    },
+    {
+      "affinity": 54.22,
+      "book_count": 9,
+      "corpus_count": 6028,
+      "word": "hansom"
+    },
+    {
+      "affinity": 43.47,
+      "book_count": 3,
+      "corpus_count": 2506,
+      "word": "psychologists"
+    },
+    {
+      "affinity": 43.46,
+      "book_count": 8,
+      "corpus_count": 6685,
+      "word": "listlessly"
+    },
+    {
+      "affinity": 43.2,
+      "book_count": 3,
+      "corpus_count": 2522,
+      "word": "enthralled"
+    },
+    {
+      "affinity": 41.71,
+      "book_count": 3,
+      "corpus_count": 2612,
+      "word": "lacquer"
+    },
+    {
+      "affinity": 38.99,
+      "book_count": 3,
+      "corpus_count": 2794,
+      "word": "egad"
+    },
+    {
+      "affinity": 38.9,
+      "book_count": 4,
+      "corpus_count": 3734,
+      "word": "tawdry"
+    },
+    {
+      "affinity": 38.43,
+      "book_count": 4,
+      "corpus_count": 3780,
+      "word": "buzzed"
+    },
+    {
+      "affinity": 38.06,
+      "book_count": 8,
+      "corpus_count": 7634,
+      "word": "jewelled"
+    },
+    {
+      "affinity": 37.26,
+      "book_count": 3,
+      "corpus_count": 2924,
+      "word": "pomegranates"
+    },
+    {
+      "affinity": 37.0,
+      "book_count": 3,
+      "corpus_count": 2944,
+      "word": "chiselled"
+    },
+    {
+      "affinity": 35.75,
+      "book_count": 5,
+      "corpus_count": 5079,
+      "word": "orchids"
+    },
+    {
+      "affinity": 33.86,
+      "book_count": 3,
+      "corpus_count": 3217,
+      "word": "rumoured"
+    },
+    {
+      "affinity": 33.73,
+      "book_count": 18,
+      "corpus_count": 19378,
+      "word": "horribly"
+    },
+    {
+      "affinity": 33.38,
+      "book_count": 9,
+      "corpus_count": 9792,
+      "word": "marred"
+    },
+    {
+      "affinity": 33.11,
+      "book_count": 3,
+      "corpus_count": 3290,
+      "word": "seared"
+    },
+    {
+      "affinity": 31.48,
+      "book_count": 5,
+      "corpus_count": 5767,
+      "word": "loathed"
+    },
+    {
+      "affinity": 31.0,
+      "book_count": 3,
+      "corpus_count": 3514,
+      "word": "temperaments"
+    },
+    {
+      "affinity": 29.5,
+      "book_count": 6,
+      "corpus_count": 7386,
+      "word": "winced"
+    },
+    {
+      "affinity": 29.28,
+      "book_count": 4,
+      "corpus_count": 4961,
+      "word": "sipping"
+    },
+    {
+      "affinity": 29.2,
+      "book_count": 4,
+      "corpus_count": 4975,
+      "word": "tarnished"
+    },
+    {
+      "affinity": 29.09,
+      "book_count": 6,
+      "corpus_count": 7490,
+      "word": "languidly"
+    },
+    {
+      "affinity": 27.68,
+      "book_count": 4,
+      "corpus_count": 5248,
+      "word": "tapestries"
+    },
+    {
+      "affinity": 27.5,
+      "book_count": 3,
+      "corpus_count": 3962,
+      "word": "unreality"
+    },
+    {
+      "affinity": 27.39,
+      "book_count": 5,
+      "corpus_count": 6630,
+      "word": "spilled"
+    },
+    {
+      "affinity": 26.99,
+      "book_count": 7,
+      "corpus_count": 9419,
+      "word": "ugliness"
+    },
+    {
+      "affinity": 26.86,
+      "book_count": 13,
+      "corpus_count": 17574,
+      "word": "valet"
+    },
+    {
+      "affinity": 26.57,
+      "book_count": 4,
+      "corpus_count": 5467,
+      "word": "fatality"
+    },
+    {
+      "affinity": 26.3,
+      "book_count": 3,
+      "corpus_count": 4142,
+      "word": "bores"
+    },
+    {
+      "affinity": 25.86,
+      "book_count": 32,
+      "corpus_count": 44933,
+      "word": "hideous"
+    },
+    {
+      "affinity": 25.29,
+      "book_count": 4,
+      "corpus_count": 5743,
+      "word": "dominate"
+    },
+    {
+      "affinity": 24.46,
+      "book_count": 18,
+      "corpus_count": 26719,
+      "word": "studio"
+    },
+    {
+      "affinity": 24.41,
+      "book_count": 25,
+      "corpus_count": 37196,
+      "word": "monstrous"
+    },
+    {
+      "affinity": 24.33,
+      "book_count": 3,
+      "corpus_count": 4478,
+      "word": "hooded"
+    },
+    {
+      "affinity": 23.32,
+      "book_count": 3,
+      "corpus_count": 4672,
+      "word": "scandals"
+    },
+    {
+      "affinity": 22.81,
+      "book_count": 4,
+      "corpus_count": 6369,
+      "word": "enamoured"
+    },
+    {
+      "affinity": 22.69,
+      "book_count": 3,
+      "corpus_count": 4801,
+      "word": "maladies"
+    },
+    {
+      "affinity": 22.55,
+      "book_count": 40,
+      "corpus_count": 64421,
+      "word": "painter"
+    },
+    {
+      "affinity": 22.55,
+      "book_count": 6,
+      "corpus_count": 9661,
+      "word": "inquest"
+    },
+    {
+      "affinity": 22.26,
+      "book_count": 3,
+      "corpus_count": 4894,
+      "word": "ticking"
+    },
+    {
+      "affinity": 22.24,
+      "book_count": 5,
+      "corpus_count": 8165,
+      "word": "loathing"
+    }
+  ]
+}
