@@ -1027,6 +1027,23 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"уровень\s+сложн\w*|cefr|flesch|reading\s+(level|grade)|"
          r"насколько\s+сложн\w*|сложн\w+\s+(для\s+чтения|для\s+понимани)"),
      "book_readability", 0.92),
+    # E30 (S-R4, 2026-05-29) — bare «сложность <BOOK>» WITHOUT «уровень» /
+    # «для чтения». Stan Q7: «сложность Франкенштейна» fell to clarify
+    # because the rule above required «уровень сложн*» or «сложн* для
+    # чтения». Route the noun «сложность/сложности <ProperNoun>» to
+    # single-book readability. The capital-letter guard (?-i:[A-ZА-ЯЁ]) is
+    # essential: _re() applies IGNORECASE globally, so a plain [A-ZА-Я]
+    # would also match lowercase and wrongly catch the negative case
+    # «сложность викторианской прозы» (abstract/period, lowercase «в» →
+    # must stay clarify, NOT book_readability). The capital guard fires
+    # only on a proper-noun book title (Франкенштейн / Dracula / Pride).
+    # The trailing letter class (not just the capital) is required so a
+    # CEFR level — «сложности B2 при чтении Лавкрафта» (learning intent) —
+    # does NOT match: «B2» is capital-then-DIGIT, a book title is
+    # capital-then-LETTER. Without it the new rule stole the B2/C1 learning
+    # queries (regression caught by test_plan::test_learning_b2_lovecraft).
+    (_re(r"\bсложност[ьи]\s+[«\"'“‘]?(?-i:[A-ZА-ЯЁ])[A-Za-zА-Яа-яЁё]"),
+     "book_readability", 0.85),
 
     # ===== book_emotion =====
     # Stan round 2 Q19: «эмоциональный профиль Dracula» — точная фраза из

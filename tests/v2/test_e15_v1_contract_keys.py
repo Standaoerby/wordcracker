@@ -288,7 +288,10 @@ class TestCompareAuthorsContract(unittest.TestCase):
                 "regex": "^Lovecraft,",
                 "slug": "lovecraft-h-p",
                 "top_unique": [
-                    {"word": "cthulhu", "affinity": 22.0},
+                    # E27 (S-R4): character/creature names are now scrubbed
+                    # from compare_authors. Use genuine stylistic markers so
+                    # this normalization test keeps 2 words per side.
+                    {"word": "cyclopean", "affinity": 22.0},
                     {"word": "eldritch", "affinity": 15.3},
                 ],
             },
@@ -343,8 +346,10 @@ class TestCompareAuthorsContract(unittest.TestCase):
         from scripts.v2.tools.authors.affinity import compare_authors
 
         v1_legacy_flat = {
-            "top_unique_a": [{"word": "raven", "affinity": 18.4}],
-            "top_unique_b": [{"word": "cthulhu", "affinity": 22.0}],
+            # E27 (S-R4): use stylistic words, not character/creature names,
+            # which the wrapper now scrubs from each side.
+            "top_unique_a": [{"word": "nevermore", "affinity": 18.4}],
+            "top_unique_b": [{"word": "eldritch", "affinity": 22.0}],
             "shared_high_affinity": [],
             "cosine_similarity": 0.5,
             "min_corpus_count": 100,

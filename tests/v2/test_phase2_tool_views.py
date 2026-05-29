@@ -40,8 +40,11 @@ class CompareAuthorsViewEmission(unittest.TestCase):
             "cosine_similarity": 0.12,
             "books_a": 22,
             "books_b": 13,
-            "top_unique_a": [{"word": "holmes", "affinity": 0.8},
-                              {"word": "watson", "affinity": 0.7}],
+            # E27 (S-R4): compare_authors now scrubs character surnames
+            # (holmes/watson) per side — use genuine stylistic words so
+            # both sides stay populated and the view is OK, not PARTIAL.
+            "top_unique_a": [{"word": "ejaculated", "affinity": 0.8},
+                              {"word": "singular", "affinity": 0.7}],
             "top_unique_b": [{"word": "mate", "affinity": 0.6},
                               {"word": "schooner", "affinity": 0.5}],
             "shared_high_affinity": [{"word": "sea", "affinity": 0.4}],
@@ -60,7 +63,7 @@ class CompareAuthorsViewEmission(unittest.TestCase):
         names = {e["name"] for e in entities}
         self.assertEqual(names, {"Doyle", "Stevenson"})
         sigs = {w for e in entities for w in e["signature_words"]}
-        self.assertIn("holmes", sigs)
+        self.assertIn("ejaculated", sigs)
         self.assertIn("schooner", sigs)
         # shared_signatures present
         self.assertIn("sea", result.view.payload["shared_signatures"])
@@ -99,7 +102,10 @@ class CompareAuthorsViewEmission(unittest.TestCase):
         """Doyle has data, Stevenson empty — PARTIAL validity, view
         carries only Doyle's signature words."""
         fake_raw = {
-            "top_unique_a": [{"word": "holmes"}],
+            # E27 (S-R4): «holmes» is now scrubbed; use a stylistic word so
+            # Doyle's side stays populated and the result is PARTIAL (one
+            # real side + one empty), not EMPTY_UNEXPECTED (both empty).
+            "top_unique_a": [{"word": "ejaculated"}],
             "top_unique_b": [],
             "books_a": 22, "books_b": 0,
             "burrows_delta": 0.5,

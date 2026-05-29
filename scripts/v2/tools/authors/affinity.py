@@ -477,6 +477,47 @@ def compare_authors(author1_regex: str, author2_regex: str, top: int = 20,
             message=err, query=query,
         )
 
+    # E27 (S-R4, 2026-05-29) — compare_authors leaked author surnames +
+    # character names into each side's signature list. affinity_by_author
+    # already scrubs its `top` rows via self-name drop → literary-PROPN
+    # blacklist → surname blocklist (see ~lines 201-208); compare_authors
+    # never wired the same chain. The recorded prod shape (golden fixture
+    # scripts.rag_tools.compare_authors.json) proves it: top_unique_a/b
+    # carry «austen»/«wilde» (the authors' own names) plus elinor/ferrars/
+    # dashwood/willoughby/collins (Austen characters) and goring/worthing/
+    # chasuble/algernon/cecily (Wilde characters). Stan Q3: «сравни
+    # Wodehouse и Wilde» surfaced wodehouse/wilde + jeeves/goring as
+    # «фирменные слова» — attribution noise, not style.
+    #
+    # NOTE (deviation from the literal S-R4 note, which named only
+    # filter_surnames + _drop_author_self_name): the Wilde-class character
+    # names (goring/worthing/chasuble/algernon/...) live in
+    # _LITERARY_PROPN_BLACKLIST, NOT in the surname blocklist or PG author
+    # metadata, so the two named filters alone cannot satisfy the «нет
+    # персонажей» acceptance. We apply the same self-name → literary →
+    # surname prefix affinity_by_author uses for this exact character class.
+    # Runs BEFORE empty-side detection so a side scrubbed to empty correctly
+    # trips the empty_sides path; cleaned list is written back to both the
+    # flat alias and the nested author{1,2} dict the render payload exposes.
+    if isinstance(raw, dict):
+        a1d = raw.get("author1") if isinstance(raw.get("author1"), dict) else None
+        a2d = raw.get("author2") if isinstance(raw.get("author2"), dict) else None
+        for side_key, side_regex, nested in (
+            ("top_unique_a", author1_regex, a1d),
+            ("top_unique_b", author2_regex, a2d),
+        ):
+            side_rows = raw.get(side_key) or []
+            if not side_rows:
+                continue
+            cleaned = _drop_author_self_name(side_regex, side_rows)
+            cleaned = [r for r in cleaned
+                       if (r.get("word") or "").lower()
+                       not in _LITERARY_PROPN_BLACKLIST]
+            cleaned, _ = filter_surnames(cleaned)
+            raw[side_key] = cleaned
+            if nested is not None:
+                nested["top_unique"] = cleaned
+
     # If either author's top list is empty, flag — that's the v1.1.7 partial.
     warnings: list[ToolWarning] = []
     empty_sides: list[tuple[str, str]] = []  # filled below
