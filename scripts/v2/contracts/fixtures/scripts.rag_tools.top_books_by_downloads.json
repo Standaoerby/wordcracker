@@ -1,0 +1,37 @@
+{
+  "author_regex": null,
+  "lang": "en",
+  "top": [
+    {
+      "author": "Fitzgerald, F. Scott (Francis Scott)",
+      "downloads": 57325,
+      "id": "PG64317",
+      "title": "The Great Gatsby"
+    },
+    {
+      "author": "Montgomery, L. M. (Lucy Maud)",
+      "downloads": 52497,
+      "id": "PG67979",
+      "title": "The Blue Castle: a novel"
+    },
+    {
+      "author": "United States. Warren Commission",
+      "downloads": 50078,
+      "id": "PG58031",
+      "title": "Report of the President's Commission on the Assassination of President John F. Kennedy"
+    },
+    {
+      "author": "Norgate, Kate",
+      "downloads": 33498,
+      "id": "PG68348",
+      "title": "England under the Angevin Kings, Volumes I and II"
+    },
+    {
+      "author": "Austen, Jane",
+      "downloads": 31755,
+      "id": "PG1342",
+      "title": "Pride and Prejudice"
+    }
+  ],
+  "top_n": 5
+}

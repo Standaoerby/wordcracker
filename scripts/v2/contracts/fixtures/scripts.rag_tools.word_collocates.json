@@ -1,0 +1,89 @@
+{
+  "books_with_hits": 16,
+  "scope": "author:^Austen, (28 books)",
+  "top_collocates": [
+    {
+      "count": 35,
+      "word": "being"
+    },
+    {
+      "count": 26,
+      "word": "best"
+    },
+    {
+      "count": 21,
+      "word": "should"
+    },
+    {
+      "count": 20,
+      "word": "am"
+    },
+    {
+      "count": 17,
+      "word": "fall"
+    },
+    {
+      "count": 17,
+      "word": "enough"
+    },
+    {
+      "count": 15,
+      "word": "miss"
+    },
+    {
+      "count": 15,
+      "word": "better"
+    },
+    {
+      "count": 15,
+      "word": "sister"
+    },
+    {
+      "count": 15,
+      "word": "woman"
+    },
+    {
+      "count": 15,
+      "word": "man"
+    },
+    {
+      "count": 13,
+      "word": "give"
+    },
+    {
+      "count": 12,
+      "word": "yours"
+    },
+    {
+      "count": 11,
+      "word": "falling"
+    },
+    {
+      "count": 11,
+      "word": "friend"
+    },
+    {
+      "count": 11,
+      "word": "girl"
+    },
+    {
+      "count": 11,
+      "word": "making"
+    },
+    {
+      "count": 11,
+      "word": "marianne"
+    },
+    {
+      "count": 11,
+      "word": "edward"
+    },
+    {
+      "count": 11,
+      "word": "fanny"
+    }
+  ],
+  "total_occurrences": 897,
+  "window": 4,
+  "word": "love"
+}

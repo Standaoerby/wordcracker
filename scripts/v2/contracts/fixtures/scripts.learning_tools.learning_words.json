@@ -1,0 +1,515 @@
+{
+  "band": {
+    "max_corpus": 10000,
+    "min_corpus": 100,
+    "skip_top_n": 1000
+  },
+  "lemmatize": true,
+  "level": "intermediate",
+  "pos_filter": [],
+  "results": [
+    {
+      "affinity": 270.0,
+      "corpus_count": 885,
+      "example_context": "the present concern to the little town of [LAMBTON] the scene of former residence and where she",
+      "lemma": "lambton",
+      "pos": "PROPN",
+      "scope_count": 10,
+      "score": 7.17,
+      "word": "lambton"
+    },
+    {
+      "affinity": 50.51,
+      "corpus_count": 5677,
+      "example_context": "was to have a lieutenant commission in the [SHIRE] she had been watching him the last hour",
+      "lemma": "shire",
+      "pos": "NOUN",
+      "scope_count": 12,
+      "score": 6.427,
+      "word": "shire"
+    },
+    {
+      "affinity": 62.77,
+      "corpus_count": 3426,
+      "example_context": "herself in love and to consent to an [ELOPEMENT] she was then but fifteen which must be",
+      "lemma": "elopement",
+      "pos": "ADJ",
+      "scope_count": 9,
+      "score": 6.379,
+      "word": "elopement"
+    },
+    {
+      "affinity": 78.86,
+      "corpus_count": 1818,
+      "example_context": "supper therefore she considered it a most unlucky [PERVERSENESS] which placed them within one of each other",
+      "lemma": "perverseness",
+      "pos": "ADJ",
+      "scope_count": 6,
+      "score": 6.201,
+      "word": "perverseness"
+    },
+    {
+      "affinity": 42.54,
+      "corpus_count": 5055,
+      "example_context": "will do any such thing she has two [NIECES] of her own she is a selfish hypocritical",
+      "lemma": "niece",
+      "pos": "NOUN",
+      "scope_count": 9,
+      "score": 6.07,
+      "word": "nieces"
+    },
+    {
+      "affinity": 82.75,
+      "corpus_count": 1155,
+      "example_context": "in his and what can he mean by [APOLOGISING] for being next in the entail we can",
+      "lemma": "apologise",
+      "pos": "VERB",
+      "scope_count": 4,
+      "score": 5.889,
+      "word": "apologising"
+    },
+    {
+      "affinity": 40.55,
+      "corpus_count": 4125,
+      "example_context": "came directly towards them and began the usual [CIVILITIES] bingley was the principal spokesman and miss bennet",
+      "lemma": "civility",
+      "pos": "NOUN",
+      "scope_count": 7,
+      "score": 5.852,
+      "word": "civilities"
+    },
+    {
+      "affinity": 30.65,
+      "corpus_count": 7016,
+      "example_context": "had forfeited all claim to it by extravagance [IMPRUDENCE] in short anything or nothing certain it is",
+      "lemma": "imprudence",
+      "pos": "NOUN",
+      "scope_count": 9,
+      "score": 5.771,
+      "word": "imprudence"
+    },
+    {
+      "affinity": 113.79,
+      "corpus_count": 630,
+      "example_context": "it an excellent one full of eligibility and [SUITABLENESS] and excessively generous and disinterested on his own",
+      "lemma": "suitableness",
+      "pos": "NOUN",
+      "scope_count": 3,
+      "score": 5.766,
+      "word": "suitableness"
+    },
+    {
+      "affinity": 26.52,
+      "corpus_count": 9913,
+      "example_context": "man i am afraid he has been very [IMPRUDENT] and has deserved to lose darcy mr bingley",
+      "lemma": "imprudent",
+      "pos": "NOUN",
+      "scope_count": 11,
+      "score": 5.753,
+      "word": "imprudent"
+    },
+    {
+      "affinity": 26.45,
+      "corpus_count": 9937,
+      "example_context": "of temper than her sister and with a [JUDGEMENT] too unassailed by any attention to herself she",
+      "lemma": "judgement",
+      "pos": "NOUN",
+      "scope_count": 11,
+      "score": 5.75,
+      "word": "judgement"
+    },
+    {
+      "affinity": 46.78,
+      "corpus_count": 2554,
+      "example_context": "in the least regard his losses at whist [ENUMERATING] all the dishes at supper and repeatedly fearing",
+      "lemma": "enumerate",
+      "pos": "VERB",
+      "scope_count": 5,
+      "score": 5.722,
+      "word": "enumerating"
+    },
+    {
+      "affinity": 39.39,
+      "corpus_count": 3640,
+      "example_context": "observing that he seemed very fortunate in his [PATRONESS] lady catherine de bourgh attention to his wishes",
+      "lemma": "patroness",
+      "pos": "NOUN",
+      "scope_count": 6,
+      "score": 5.72,
+      "word": "patroness"
+    },
+    {
+      "affinity": 33.52,
+      "corpus_count": 4990,
+      "example_context": "though i should be exceedingly grieved at their [DISAPPROBATION] i could not i did not think you",
+      "lemma": "disapprobation",
+      "pos": "NOUN",
+      "scope_count": 7,
+      "score": 5.688,
+      "word": "disapprobation"
+    },
+    {
+      "affinity": 30.08,
+      "corpus_count": 6354,
+      "example_context": "to explain to her the nature of an [ENTAIL] they had often attempted to do it before",
+      "lemma": "entail",
+      "pos": "PROPN",
+      "scope_count": 8,
+      "score": 5.676,
+      "word": "entail"
+    },
+    {
+      "affinity": 40.17,
+      "corpus_count": 2974,
+      "example_context": "more than he liked and miss bingley was [UNCIVIL] to and more teasing than usual to himself",
+      "lemma": "uncivil",
+      "pos": "NOUN",
+      "scope_count": 5,
+      "score": 5.608,
+      "word": "uncivil"
+    },
+    {
+      "affinity": 24.4,
+      "corpus_count": 9795,
+      "example_context": "that he came down on monday in a [CHAISE] and four to see the place and was",
+      "lemma": "chaise",
+      "pos": "NOUN",
+      "scope_count": 10,
+      "score": 5.606,
+      "word": "chaise"
+    },
+    {
+      "affinity": 33.33,
+      "corpus_count": 4302,
+      "example_context": "eyes to this discovery succeeded some others equally [MORTIFYING] though he had detected with a critical eye",
+      "lemma": "mortify",
+      "pos": "VERB",
+      "scope_count": 6,
+      "score": 5.58,
+      "word": "mortifying"
+    },
+    {
+      "affinity": 29.58,
+      "corpus_count": 5654,
+      "example_context": "spoke he left the room fatigued with the [RAPTURES] of his wife what an excellent father you",
+      "lemma": "rapture",
+      "pos": "NOUN",
+      "scope_count": 7,
+      "score": 5.574,
+      "word": "raptures"
+    },
+    {
+      "affinity": 28.37,
+      "corpus_count": 5896,
+      "example_context": "were to be studying his character for a [TWELVEMONTH] happiness in marriage is entirely a matter of",
+      "lemma": "twelvemonth",
+      "pos": "NOUN",
+      "scope_count": 7,
+      "score": 5.535,
+      "word": "twelvemonth"
+    },
+    {
+      "affinity": 61.11,
+      "corpus_count": 1173,
+      "example_context": "she instantly drew back and said with some [DISCOMPOSURE] to sir william indeed sir i have not",
+      "lemma": "discomposure",
+      "pos": "NOUN",
+      "scope_count": 3,
+      "score": 5.504,
+      "word": "discomposure"
+    },
+    {
+      "affinity": 58.57,
+      "corpus_count": 1224,
+      "example_context": "to many of those who best knew the [EASINESS] of his temper whether he might not spend",
+      "lemma": "easiness",
+      "pos": "ADJ",
+      "scope_count": 3,
+      "score": 5.481,
+      "word": "easiness"
+    },
+    {
+      "affinity": 41.07,
+      "corpus_count": 2327,
+      "example_context": "their route he did trace them easily to [CLAPHAM] but no further for on entering that place",
+      "lemma": "clapham",
+      "pos": "PROPN",
+      "scope_count": 4,
+      "score": 5.468,
+      "word": "clapham"
+    },
+    {
+      "affinity": 55.18,
+      "corpus_count": 1299,
+      "example_context": "could there be finer symptoms is not general [INCIVILITY] the very essence of love oh yes of",
+      "lemma": "incivility",
+      "pos": "NOUN",
+      "scope_count": 3,
+      "score": 5.448,
+      "word": "incivility"
+    },
+    {
+      "affinity": 30.95,
+      "corpus_count": 3860,
+      "example_context": "miss eliza we can not wonder at his [COMPLAISANCE] for who would object to such a partner",
+      "lemma": "complaisance",
+      "pos": "NOUN",
+      "scope_count": 5,
+      "score": 5.396,
+      "word": "complaisance"
+    },
+    {
+      "affinity": 23.08,
+      "corpus_count": 7247,
+      "example_context": "increased with what she heard and who was [RESOLVING] to retail it all among her neighbours as",
+      "lemma": "resolve",
+      "pos": "VERB",
+      "scope_count": 7,
+      "score": 5.333,
+      "word": "resolving"
+    },
+    {
+      "affinity": 20.07,
+      "corpus_count": 9527,
+      "example_context": "girl and their brother felt authorized by such [COMMENDATION] to think of her as he chose chapter",
+      "lemma": "commendation",
+      "pos": "NOUN",
+      "scope_count": 8,
+      "score": 5.266,
+      "word": "commendation"
+    },
+    {
+      "affinity": 19.84,
+      "corpus_count": 9635,
+      "example_context": "very bad indeed a mixture of pride and [IMPERTINENCE] she had no conversation no style no beauty",
+      "lemma": "impertinence",
+      "pos": "NOUN",
+      "scope_count": 8,
+      "score": 5.254,
+      "word": "impertinence"
+    },
+    {
+      "affinity": 39.15,
+      "corpus_count": 1831,
+      "example_context": "him in london well he is a very [UNDESERVING] young man and i do not suppose there",
+      "lemma": "undeserve",
+      "pos": "VERB",
+      "scope_count": 3,
+      "score": 5.232,
+      "word": "undeserving"
+    },
+    {
+      "affinity": 30.03,
+      "corpus_count": 3183,
+      "example_context": "lest they had been overheard you used us [ABOMINABLY] ill answered hurst running away without telling us",
+      "lemma": "abominably",
+      "pos": "ADV",
+      "scope_count": 4,
+      "score": 5.225,
+      "word": "abominably"
+    },
+    {
+      "affinity": 20.35,
+      "corpus_count": 8220,
+      "example_context": "with him myself how can you be so [TEASING] i honour your circumspection a fortnight acquaintance is",
+      "lemma": "tease",
+      "pos": "VERB",
+      "scope_count": 7,
+      "score": 5.204,
+      "word": "teasing"
+    },
+    {
+      "affinity": 26.8,
+      "corpus_count": 3567,
+      "example_context": "very dances and to have collins instead her [LIVELINESS] had never been worse timed there was no",
+      "lemma": "liveliness",
+      "pos": "NOUN",
+      "scope_count": 4,
+      "score": 5.129,
+      "word": "liveliness"
+    },
+    {
+      "affinity": 26.12,
+      "corpus_count": 3659,
+      "example_context": "such behaviour in a person of rank such [AFFABILITY] and condescension as he had himself experienced from",
+      "lemma": "affability",
+      "pos": "NOUN",
+      "scope_count": 4,
+      "score": 5.107,
+      "word": "affability"
+    },
+    {
+      "affinity": 18.44,
+      "corpus_count": 9071,
+      "example_context": "in a person of rank such affability and [CONDESCENSION] as he had himself experienced from lady catherine",
+      "lemma": "condescension",
+      "pos": "NOUN",
+      "scope_count": 7,
+      "score": 5.1,
+      "word": "condescension"
+    },
+    {
+      "affinity": 31.51,
+      "corpus_count": 2275,
+      "example_context": "a few moments it was first broken by [ANNESLEY] a genteel woman whose endeavour to introduce some",
+      "lemma": "annesley",
+      "pos": "PROPN",
+      "scope_count": 3,
+      "score": 5.076,
+      "word": "annesley"
+    },
+    {
+      "affinity": 20.67,
+      "corpus_count": 5779,
+      "example_context": "to think of something and in this emergence [RECOLLECTING] she had seen him last in hertfordshire and",
+      "lemma": "recollect",
+      "pos": "VERB",
+      "scope_count": 5,
+      "score": 5.026,
+      "word": "recollecting"
+    },
+    {
+      "affinity": 29.39,
+      "corpus_count": 2439,
+      "example_context": "louisa i could hardly keep my countenance very [NONSENSICAL] to come at all why must be scampering",
+      "lemma": "nonsensical",
+      "pos": "ADJ",
+      "scope_count": 3,
+      "score": 5.022,
+      "word": "nonsensical"
+    },
+    {
+      "affinity": 20.51,
+      "corpus_count": 5826,
+      "example_context": "in her memory she was struck with the [IMPROPRIETY] of such communications to a stranger and wondered",
+      "lemma": "impropriety",
+      "pos": "NOUN",
+      "scope_count": 5,
+      "score": 5.018,
+      "word": "impropriety"
+    },
+    {
+      "affinity": 28.38,
+      "corpus_count": 2526,
+      "example_context": "people in the room he was lively and [UNRESERVED] danced every dance was angry that the ball",
+      "lemma": "unreserve",
+      "pos": "VERB",
+      "scope_count": 3,
+      "score": 4.995,
+      "word": "unreserved"
+    },
+    {
+      "affinity": 19.81,
+      "corpus_count": 6032,
+      "example_context": "the following saturday and having no feelings of [DIFFIDENCE] to make it distressing to himself even at",
+      "lemma": "diffidence",
+      "pos": "NOUN",
+      "scope_count": 5,
+      "score": 4.983,
+      "word": "diffidence"
+    },
+    {
+      "affinity": 22.56,
+      "corpus_count": 4237,
+      "example_context": "drive by my humble abode in her little [PHAETON] and has she been presented i do not",
+      "lemma": "phaeton",
+      "pos": "PROPN",
+      "scope_count": 4,
+      "score": 4.977,
+      "word": "phaeton"
+    },
+    {
+      "affinity": 26.64,
+      "corpus_count": 2691,
+      "example_context": "to miss lucas to whose inquiry after the [PLEASANTNESS] of her last partner she had scarcely replied",
+      "lemma": "pleasantness",
+      "pos": "NOUN",
+      "scope_count": 3,
+      "score": 4.944,
+      "word": "pleasantness"
+    },
+    {
+      "affinity": 25.39,
+      "corpus_count": 2823,
+      "example_context": "any inconvenience as lady catherine is far from [OBJECTING] to my occasional absence on a sunday provided",
+      "lemma": "object",
+      "pos": "VERB",
+      "scope_count": 3,
+      "score": 4.905,
+      "word": "objecting"
+    },
+    {
+      "affinity": 24.76,
+      "corpus_count": 2895,
+      "example_context": "may be error and there may be misery [THOUGHTLESSNESS] want of attention to other people feelings and",
+      "lemma": "thoughtlessness",
+      "pos": "NOUN",
+      "scope_count": 3,
+      "score": 4.884,
+      "word": "thoughtlessness"
+    },
+    {
+      "affinity": 24.71,
+      "corpus_count": 2901,
+      "example_context": "continual reflections on him but i will not [REPINE] it can not last long he will be",
+      "lemma": "repine",
+      "pos": "NOUN",
+      "scope_count": 3,
+      "score": 4.883,
+      "word": "repine"
+    },
+    {
+      "affinity": 23.54,
+      "corpus_count": 3045,
+      "example_context": "and dismissed the chaise that brought them from [EPSOM] all that is known after this is that",
+      "lemma": "epsom",
+      "pos": "PROPN",
+      "scope_count": 3,
+      "score": 4.842,
+      "word": "epsom"
+    },
+    {
+      "affinity": 19.41,
+      "corpus_count": 4925,
+      "example_context": "her about it directly she is a very [HEADSTRONG] foolish girl and does not know her own",
+      "lemma": "headstrong",
+      "pos": "PROPN",
+      "scope_count": 4,
+      "score": 4.836,
+      "word": "headstrong"
+    },
+    {
+      "affinity": 22.91,
+      "corpus_count": 3129,
+      "example_context": "it would not be very likely to promote [SISTERLY] affection or delicacy of upon my word said",
+      "lemma": "sisterly",
+      "pos": "ADV",
+      "scope_count": 3,
+      "score": 4.819,
+      "word": "sisterly"
+    },
+    {
+      "affinity": 18.83,
+      "corpus_count": 5075,
+      "example_context": "her regard for him he must be a [SIMPLETON] indeed not to discover it remember eliza that",
+      "lemma": "simpleton",
+      "pos": "PROPN",
+      "scope_count": 4,
+      "score": 4.807,
+      "word": "simpleton"
+    },
+    {
+      "affinity": 14.95,
+      "corpus_count": 9590,
+      "example_context": "at all worth pleasing so high and so [CONCEITED] that there was no enduring him he walked",
+      "lemma": "conceite",
+      "pos": "VERB",
+      "scope_count": 6,
+      "score": 4.789,
+      "word": "conceited"
+    }
+  ],
+  "scope": "book:PG1342",
+  "scope_tokens": 119035,
+  "scope_vocab": 6147
+}

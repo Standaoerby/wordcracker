@@ -1,0 +1,123 @@
+{
+  "candidates_examined": 200,
+  "cold_wiktionary_lookups": 191,
+  "family": "germanic",
+  "matched": [
+    {
+      "affinity": 26.56,
+      "corpus_count": 3076,
+      "family_chain": [
+        "middle_english",
+        "old_english",
+        "proto_germanic",
+        "proto_indo_european"
+      ],
+      "occurrences": 32,
+      "raw_codes": [
+        "enm",
+        "ang",
+        "gem-pro",
+        "ine-pro",
+        "Compton",
+        "Salcombe"
+      ],
+      "word": "combe"
+    },
+    {
+      "affinity": 24.25,
+      "corpus_count": 5896,
+      "family_chain": [
+        "middle_english",
+        "old_english"
+      ],
+      "occurrences": 56,
+      "raw_codes": [
+        "enm",
+        "ang"
+      ],
+      "word": "twelvemonth"
+    },
+    {
+      "affinity": 20.22,
+      "corpus_count": 3409,
+      "family_chain": [
+        "middle_english",
+        "old_english"
+      ],
+      "occurrences": 27,
+      "raw_codes": [
+        "enm",
+        "ang"
+      ],
+      "word": "openness"
+    },
+    {
+      "affinity": 20.11,
+      "corpus_count": 889,
+      "family_chain": [
+        "middle_english"
+      ],
+      "occurrences": 7,
+      "raw_codes": [
+        "enm"
+      ],
+      "word": "blamable"
+    },
+    {
+      "affinity": 18.42,
+      "corpus_count": 693,
+      "family_chain": [
+        "middle_english",
+        "old_norse"
+      ],
+      "occurrences": 5,
+      "raw_codes": [
+        "enm",
+        "non",
+        "boor",
+        "bound"
+      ],
+      "word": "bigg"
+    },
+    {
+      "affinity": 16.84,
+      "corpus_count": 3640,
+      "family_chain": [
+        "middle_english"
+      ],
+      "occurrences": 24,
+      "raw_codes": [
+        "enm",
+        "la-lat"
+      ],
+      "word": "patroness"
+    },
+    {
+      "affinity": 16.69,
+      "corpus_count": 765,
+      "family_chain": [
+        "middle_english"
+      ],
+      "occurrences": 5,
+      "raw_codes": [
+        "enm"
+      ],
+      "word": "slyness"
+    },
+    {
+      "affinity": 14.44,
+      "corpus_count": 26340,
+      "family_chain": [
+        "middle_english"
+      ],
+      "occurrences": 149,
+      "raw_codes": [
+        "enm"
+      ],
+      "word": "ladyship"
+    }
+  ],
+  "scope": {
+    "author": "^Austen,"
+  }
+}
