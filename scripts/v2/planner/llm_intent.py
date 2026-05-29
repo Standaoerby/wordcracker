@@ -496,9 +496,39 @@ _VALID_COUNTRIES = {"GB", "US", "RU", "FR", "DE", "IE", "CA", "AU", "IT",
                      "ES", "NL", "SE", "NO", "DK", "JP", "CN", "BR"}
 
 
+# Common country names / aliases → ISO-3166-1 alpha-2. Replaces the
+# `.upper()[:2]` truncation that mangled "england"->"EN", "britain"->"BR"
+# (Brazil!), "uk"->"UK" (not an ISO code — GB is), so UK-scoped queries were
+# silently dropped. All targets are members of _VALID_COUNTRIES.
+_COUNTRY_ALIASES = {
+    "uk": "GB", "u.k.": "GB", "g.b.": "GB", "gb": "GB", "britain": "GB",
+    "great britain": "GB", "united kingdom": "GB",
+    "england": "GB", "scotland": "GB", "wales": "GB",
+    "usa": "US", "u.s.": "US", "u.s.a.": "US", "us": "US",
+    "america": "US", "united states": "US",
+    "russia": "RU", "russian federation": "RU",
+    "france": "FR", "germany": "DE", "deutschland": "DE",
+    "spain": "ES", "italy": "IT", "ireland": "IE",
+    "canada": "CA", "australia": "AU", "netherlands": "NL", "holland": "NL",
+    "sweden": "SE", "norway": "NO", "denmark": "DK",
+    "japan": "JP", "china": "CN", "brazil": "BR",
+}
+
+
 def _clean_country(v) -> str | None:
+    """Normalize free-text country to an ISO-3166-1 alpha-2 code.
+
+    Alias table first (names + UK/Britain/England → GB, Russia → RU, …),
+    then accept an already-valid 2-letter code. Unknown input → None;
+    never truncated/guessed (which turned "britain" into "BR" = Brazil).
+    """
     s = _clean_str(v)
     if s is None:
         return None
-    s = s.upper()[:2]
-    return s if s in _VALID_COUNTRIES else None
+    alias = _COUNTRY_ALIASES.get(s.strip().lower())
+    if alias and alias in _VALID_COUNTRIES:
+        return alias
+    code = s.strip().upper()
+    if len(code) == 2 and code in _VALID_COUNTRIES:
+        return code
+    return None

@@ -192,13 +192,29 @@ def _open_library_enrich(meta: dict, timeout: float = 8.0) -> dict:
     return meta
 
 
+def _normalize_epub_lang(raw: str) -> str:
+    """EPUB <dc:language> → ISO-639-1 (2-letter), or '' if unknown/absent.
+
+    'en' / 'en-US' / 'en_us' → 'en'; ISO-639-2/B 'eng' → 'en'. Unknown
+    3-letter codes (no 639-2/B mapping) and garbage → '' — rejected, not
+    guessed, so a bad/absent tag is flagged unknown downstream instead of
+    silently mislabeling the book English. Reuses
+    rag_tools._ISO_639_2_TO_1 as the single ISO map (TZ S-T2 Group B/C).
+    """
+    try:
+        from scripts.lang_norm import normalize_lang
+    except ImportError:  # pragma: no cover — bare-name fallback
+        from lang_norm import normalize_lang
+    return normalize_lang(raw)
+
+
 def _extract_epub_metadata(epub_path: Path) -> dict:
     """Read DC metadata (title/creator/language/date/subjects) from an EPUB.
 
     Returns a dict with keys aligned to SPGC schema columns. Missing fields
     are returned as empty strings / None (callers must tolerate)."""
     out = {
-        "title": "", "author": "", "language": "['en']",
+        "title": "", "author": "", "language": "",
         "authoryearofbirth": "", "authoryearofdeath": "",
         "subjects": "", "downloads": 0, "type": "Text",
     }
@@ -212,10 +228,13 @@ def _extract_epub_metadata(epub_path: Path) -> dict:
             out["author"] = _normalize_author(str(creators[0][0]))
         langs = book.get_metadata("DC", "language") or []
         if langs:
-            # SPGC stores Python-list-literal-like strings: "['en']"
-            primary = str(langs[0][0]).strip().lower().split("-")[0]  # 'en-US' → 'en'
-            if primary:
-                out["language"] = f"['{primary}']"
+            # SPGC stores Python-list-literal-like strings: "['en']". Map to
+            # ISO-639-1 and reject unknowns (eng->en, en-US->en, xx->'') so we
+            # never persist a 3-letter ['eng'] (the corruption Group B had to
+            # defend against). No DC tag → language stays "" (set above),
+            # NOT defaulted to ['en'] — downstream normalize flags it unknown.
+            code = _normalize_epub_lang(str(langs[0][0]))
+            out["language"] = f"['{code}']" if code else ""
         subjects = book.get_metadata("DC", "subject") or []
         if subjects:
             out["subjects"] = "; ".join(str(s[0]).strip() for s in subjects if s and s[0])

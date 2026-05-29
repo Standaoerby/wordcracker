@@ -232,7 +232,7 @@ def _select_books(author_regex: str, lang: str = "en",
     'British vocabulary' / 'AmE literature only'. Books whose author isn't
     in the geo enrichment yet are dropped when country is set."""
     df = _metadata_df()
-    mask_lang = df["language"].fillna("").str.contains(f"'{lang}'", regex=False)
+    mask_lang = _lang_mask(df, lang)
     mask_auth = df["author"].fillna("").str.contains(author_regex, case=False, regex=True)
     out = df[mask_lang & mask_auth]
     if country and country.strip():
@@ -1206,7 +1206,7 @@ def word_freq_timeline(word: str, bucket_years: int = 25,
         return {"error": "word required"}
     try:
         df = _metadata_df()
-        mask_lang = df["language"].fillna("").str.contains(f"'{lang}'", regex=False)
+        mask_lang = _lang_mask(df, lang)
         df = df[mask_lang].copy()
         birth = pd.to_numeric(df["authoryearofbirth"], errors="coerce")
         birth_proxy = birth + 30  # writing prime
@@ -1300,7 +1300,7 @@ def words_disappearing_after(year: int = 1920, top: int = 25,
     t0 = time.perf_counter()
     try:
         df = _metadata_df()
-        df = df[df["language"].fillna("").str.contains("'en'", regex=False)].copy()
+        df = df[_lang_mask(df, "en")].copy()
         birth = pd.to_numeric(df["authoryearofbirth"], errors="coerce")
         birth_proxy = birth + 30
         pub = pd.to_numeric(df.get("pub_year"), errors="coerce") \
@@ -1415,7 +1415,7 @@ def words_appearing_after(year: int = 1920, top: int = 25,
     t0 = time.perf_counter()
     try:
         df = _metadata_df()
-        df = df[df["language"].fillna("").str.contains("'en'", regex=False)].copy()
+        df = df[_lang_mask(df, "en")].copy()
         birth = pd.to_numeric(df["authoryearofbirth"], errors="coerce")
         birth_proxy = birth + 30
         pub = pd.to_numeric(df.get("pub_year"), errors="coerce") \
@@ -1526,6 +1526,37 @@ def _normalize_lang(raw: str) -> str:
         return ""
     # Multiple codes separated by comma — take primary.
     return s.split(",")[0].strip()
+
+
+# Language-code normalization lives in scripts/lang_norm.py (stdlib-only,
+# single source of truth — TZ S-T2 Group B/C, Phase-2 R6). Re-export under
+# the private names this module already uses. try/except covers both import
+# styles (this file is loaded as `scripts.rag_tools` and, in legacy paths,
+# bare `rag_tools` with scripts/ on sys.path).
+try:
+    from scripts.lang_norm import ISO_639_2_TO_1 as _ISO_639_2_TO_1
+    from scripts.lang_norm import lang_codes as _lang_codes
+except ImportError:  # pragma: no cover — bare-name fallback
+    from lang_norm import ISO_639_2_TO_1 as _ISO_639_2_TO_1
+    from lang_norm import lang_codes as _lang_codes
+
+
+def _lang_mask(df, lang):
+    """Boolean Series selecting rows whose normalized language set contains
+    `lang` (itself normalized).
+
+    Replaces the brittle `df["language"].str.contains("'<lang>'")` which only
+    matched the Python-list-repr shape `['en']` and silently dropped plain
+    `en`, 639-2 `['eng']`, odd quoting, and multi-language rows. Substring
+    containment is now against the *normalized code set*, not the raw string
+    (TZ S-T2 Group B). Empty/None `lang` → keep all (filter disabled).
+    """
+    import pandas as pd
+    want = _lang_codes(lang)
+    if not want:
+        return pd.Series(True, index=df.index)
+    col = df["language"] if "language" in df.columns else pd.Series("", index=df.index)
+    return col.fillna("").map(lambda v: bool(_lang_codes(v) & want))
 
 
 # Metalinguistic books — dictionaries, grammar manuals, encyclopedias — match
@@ -2226,9 +2257,7 @@ def find_book(title: str, author: str = "", top: int = 5,
         # tolerate both forms via contains-substring).
         mask = pd.Series(True, index=df.index)
         if lang:
-            mask &= df["language"].fillna("").str.contains(
-                f"'{lang}'", regex=False
-            ) | df["language"].fillna("").str.lower().eq(lang.lower())
+            mask &= _lang_mask(df, lang)
 
         # Same Cyrillic-detect trick as semantic_search — PG titles are stored
         # in English (or transliterated for Russian classics like "Voina i mir"),
@@ -2755,7 +2784,7 @@ def top_authors_by_country(country: str, metric: str = "books", top: int = 20,
     authors_set = set(geo_country["author"])
 
     df = _metadata_df()
-    df = df[df["language"].fillna("").str.contains(f"'{lang}'", regex=False)]
+    df = df[_lang_mask(df, lang)]
     df = df[df["author"].isin(authors_set)]
     if not len(df):
         return {"error": "geo has authors but no matching books in metadata frame"}
@@ -2800,7 +2829,7 @@ def top_authors_by(metric: str = "books", top: int = 10, lang: str = "en",
         return {"error": f"unknown metric: {metric!r} (use 'books'|'downloads'|'tokens')"}
     try:
         df = _metadata_df()
-        df = df[df["language"].fillna("").str.contains(f"'{lang}'", regex=False)]
+        df = df[_lang_mask(df, lang)]
         df = df[df["author"].notna() & (df["author"].str.strip() != "")]
         if not include_generic:
             # split on first comma → "Various" or "Lytton" etc., lowercased
@@ -2858,7 +2887,7 @@ def top_books_by_downloads(top: int = 20, lang: str = "en",
     t0 = time.perf_counter()
     try:
         df = _metadata_df()
-        df = df[df["language"].fillna("").str.contains(f"'{lang}'", regex=False)]
+        df = df[_lang_mask(df, lang)]
         if author_regex:
             df = df[df["author"].fillna("").str.contains(author_regex, case=False, regex=True)]
         df = df.copy()
@@ -2894,7 +2923,7 @@ def top_books_by_recency(top: int = 20, lang: str = "en",
     t0 = time.perf_counter()
     try:
         df = _metadata_df()
-        df = df[df["language"].fillna("").str.contains(f"'{lang}'", regex=False)]
+        df = df[_lang_mask(df, lang)]
         if author_regex:
             df = df[df["author"].fillna("").str.contains(author_regex, case=False, regex=True)]
         df = df.copy()

@@ -50,8 +50,13 @@ def semantic_search(query: str, k: int = 8,
     rows = (raw.get("results") if isinstance(raw, dict) else None) or []
     return ToolResult.success(
         tool="semantic_search", data=raw,
-        coverage=Coverage(books_matched=len({r.get("metadata", {}).get("pg_id")
-                                             for r in rows if r}),
+        # E34: v1 semantic_search rows carry pg_id FLAT (not nested under
+        # `metadata`). The old `r.get("metadata", {}).get("pg_id")` resolved
+        # to None for every row → {None} → books_matched stuck at 1. Read
+        # pg_id flat and drop empties so the count reflects distinct books.
+        coverage=Coverage(books_matched=len({r.get("pg_id")
+                                             for r in rows
+                                             if r and r.get("pg_id")}),
                           books_total=-1),
         warnings=[ToolWarning("no_results", "ChromaDB returned 0 chunks")]
                  if not rows else [],
