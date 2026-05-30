@@ -173,6 +173,45 @@ _TABLE_SEP_RE = re.compile(
 )
 
 
+# S-R5 smoke-nit (2026-05-30) — explanatory scale ranges. The renderer
+# writes rubric/scale annotations like «90-100 — очень трудно, 60-70 —
+# средне» or «уровень 20-30%» that describe a SCALE, not a tool-data
+# value. Both endpoints of such an «N-M» range got extracted and flagged
+# as fabrications (none appear in tool data) — pure noise (Stan live
+# smoke). Strip sub-year «N-M» ranges before extraction so the scale
+# annotation doesn't trip the audit. Year-range pairs (>= _YEAR_LO, e.g.
+# «1564-2008» / «1837-1901») are deliberately NOT stripped — the
+# bio-death-year fabrication path (_is_year_like + _BIO_DEATH_RE, W-7)
+# still needs the year to reach extraction.
+#
+# Trade-off (documented, not silent): a hedged range-form count
+# fabrication («40-50 книг») is no longer prose-audited. Single-number
+# count claims and the count-honesty pass (top_requested vs top_returned)
+# remain in force, so the dominant «47 книг»-class hallucination is still
+# caught.
+_SCALE_RANGE_RE = re.compile(
+    r"(?<![A-Za-zЀ-ӿ0-9_.])"
+    r"(\d{1,4})\s*[-–—]\s*(\d{1,4})"
+    r"(?![A-Za-zЀ-ӿ0-9_.])",
+    re.UNICODE,
+)
+
+
+def _strip_scale_ranges(text: str) -> str:
+    """Remove sub-year «N-M» scale/rubric ranges from `text`. Year-range
+    pairs (either endpoint >= _YEAR_LO) are preserved so the bio-year
+    fabrication path still sees them."""
+    def _repl(m: "re.Match") -> str:
+        try:
+            a, b = int(m.group(1)), int(m.group(2))
+        except ValueError:
+            return m.group(0)
+        if a >= _YEAR_LO or b >= _YEAR_LO:
+            return m.group(0)  # bio/year range — leave for _is_year_like
+        return " "
+    return _SCALE_RANGE_RE.sub(_repl, text)
+
+
 def _strip_table_content(text: str) -> str:
     """Remove markdown table rows and separator lines from `text`.
 
@@ -403,6 +442,9 @@ def audit_numbers(
     # at high rate in Round 11. Prose / list / heading numbers still
     # get audited from `prose_only`.
     prose_only = _strip_table_content(answer)
+    # S-R5 — drop explanatory scale ranges («90-100», «60-70») so rubric
+    # annotations aren't flagged as fabrications. Year ranges survive.
+    prose_only = _strip_scale_ranges(prose_only)
     extracted = _extract_numbers(prose_only)
     report = AuditReport(numbers_checked=len(extracted),
                          mismatches=list(count_report.mismatches))
