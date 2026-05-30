@@ -1243,6 +1243,19 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"приведи\s+примеры|примеры\s+использов\w*|examples? of usage|"
          r"в\s+каком\s+контексте|usage examples?|оттенки\s+значени"),
      "word_contexts", 0.9),
+    # S-R5 / E9 (2026-05-30) — bare «примеры <english-word> у <author>» /
+    # «examples <word>». The entity extractor's _BARE_WORD_AFTER_EXAMPLES
+    # (entities.py) already lifts the Latin token out of this form, but no
+    # INTENT rule matched it: the rule above needs a Russian filler
+    # («использования») or a leading «приведи», so bare
+    # «примеры heart у Дойла» fell through to clarify(0.0) — probe E9.
+    # The Latin-word guard ([a-z] under IGNORECASE excludes Cyrillic)
+    # mirrors the extractor so Russian genitive fillers («примеры авторов /
+    # примеры слов») don't bind. _plan_word_contexts backstops any
+    # over-match: no extractable word → clarify, so this can only help.
+    (_re(r"\b(?:пример(?:ы|ов|ами)?|examples?)\s+"
+         r"(?:of\s+|слова\s+|word\s+)?[\"'«“]?[a-z][a-z-]{2,}\b"),
+     "word_contexts", 0.88),
     # Round 3 R5 «найди упоминания битой посуды» — chat placeholder!
     # Routes to hybrid_search via word_contexts (which falls through to
     # hybrid_search in plan when no author scope).
