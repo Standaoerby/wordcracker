@@ -5,8 +5,13 @@ aggregating.
 
 Tested plans:
   * _plan_author_metadata  — «биография Wells» → clarify
-  * _plan_author_lookup    — «какие книги у Wells» → clarify
   * _plan_author_vocab     — «фирменные слова Wells» → clarify
+  * _plan_author_lookup    — «какие книги у Wells» → RESOLVE to the
+    dominant homonym (S-R5b, 2026-05-30). author_lookup is the «show me
+    the books» intent; a clearly dominant Wells (H.G.) resolves+lists
+    instead of clarifying. The clarify is preserved for the other
+    intents above (E13 / W-1 §W-1 untouched). See
+    test_sr5b_author_lookup_dominant.py for positive + negative guards.
 
 Stable surnames (Wodehouse / specific aliases like Hardy → Thomas)
 must NOT trigger clarify.
@@ -85,7 +90,14 @@ class AmbiguousClarifyHelper(unittest.TestCase):
 
 
 class AuthorLookupClarifies(unittest.TestCase):
-    def test_wells_lookup_returns_clarify_plan(self):
+    def test_wells_lookup_resolves_dominant(self):
+        # S-R5b (2026-05-30): author_lookup is the «show me the books»
+        # intent. When one Wells dominates the surname's downloads
+        # (H.G. 50000 vs Basil/Carolyn 0 → ≥3× / ≥60% share), resolve to
+        # the leader and list books instead of bouncing to a 5-way
+        # clarify. The bare-surname clarify is preserved for OTHER
+        # intents (see AuthorMetadataClarifies / AuthorVocabClarifies
+        # below — those still clarify, E13 / W-1 untouched).
         with _setup_metadata([
             {"author": "Wells, H. G.",   "downloads": 50000, "id": 1},
             {"author": "Wells, Basil",   "downloads": 0,     "id": 2},
@@ -93,10 +105,15 @@ class AuthorLookupClarifies(unittest.TestCase):
         ]):
             ent = extract("какие книги у Wells")
             plan = _plan_author_lookup(ent)
-        self.assertEqual(plan.intent, "clarify")
-        self.assertTrue(plan.needs_clarify)
-        self.assertIn("Wells, H. G.", plan.clarify_question)
-        self.assertEqual(plan.steps, [])
+        self.assertEqual(plan.intent, "author_lookup")
+        self.assertFalse(plan.needs_clarify)
+        self.assertEqual(len(plan.steps), 1)
+        # Resolved to the dominant H.G. — the step regex (re.escaped, as
+        # _select_books applies it via contains()) selects only him.
+        import re
+        regex = plan.steps[0].args["author_regex"]
+        self.assertRegex("Wells, H. G.", regex)
+        self.assertIsNone(re.search(regex, "Wells, Basil", re.IGNORECASE))
 
     def test_wodehouse_lookup_returns_normal_plan(self):
         """Wodehouse — only one canonical → normal author_metadata plan."""
