@@ -2982,6 +2982,19 @@ def author_metadata(author_regex: str) -> dict:
         yob = pd.to_numeric(sel["authoryearofbirth"], errors="coerce").dropna()
         yod = pd.to_numeric(sel["authoryearofdeath"], errors="coerce").dropna()
         dl = pd.to_numeric(sel["downloads"], errors="coerce").fillna(0)
+        # S-R5 (2026-05-30) — sample_titles must be the most
+        # *representative* works, not an arbitrary slice. _select_books
+        # returns rows in metadata-CSV (≈PG-id) order, so head(10) gave a
+        # popularity-blind sample: «какие книги у Уэллса» (probe E1) could
+        # miss canonical titles (Time Machine / War of the Worlds) when an
+        # author has many catalogued works. Rank by downloads so the
+        # famous works surface deterministically. Order-independent fields
+        # (counts, year span, languages) are unaffected.
+        sample_titles = (
+            sel.assign(_dl=dl)
+               .sort_values("_dl", ascending=False)["title"]
+               .dropna().head(10).tolist()
+        )
         out = {
             "author_regex":  author_regex,
             "books_matched": int(len(sel)),
@@ -2990,7 +3003,7 @@ def author_metadata(author_regex: str) -> dict:
             "year_of_death_max": int(yod.max()) if len(yod) else None,
             "total_downloads":   int(dl.sum()),
             "languages":         sorted({lang for lang in sel["language"].dropna().unique()})[:5],
-            "sample_titles":     sel["title"].dropna().head(10).tolist(),
+            "sample_titles":     sample_titles,
         }
         _log(f"author_metadata done in {time.perf_counter()-t0:.2f}s")
         return out

@@ -1,5 +1,5 @@
 {
-  "_elapsed_s": 4.07,
+  "_elapsed_s": 4.02,
   "author_regex": "^Shelley, Mary",
   "diversity": {
     "books_used": 25,
@@ -146,15 +146,15 @@
     ],
     "sample_titles": [
       "Frankenstein; Or, The Modern Prometheus",
-      "Notes to the Complete Poetical Works of Percy Bysshe Shelley",
-      "Proserpine and Midas",
-      "Frankenstein",
-      "Mathilda",
-      "The Last Man",
-      "Frankenstein; Or, The Modern Prometheus",
-      "Frankenstein; Or, The Modern Prometheus",
-      "Frankenstein; Or, The Modern Prometheus",
-      "History of a Six Weeks' Tour Through a Part of France, Switzerland, Germany, and Holland:: With Letters Descriptive of a Sail Round the Lake of Geneva, and of the Glaciers of Chamouni."
+      "Eminent literary and scientific men of Italy, Spain, and Portugal. Vol. 3 (of 3)",
+      "Lives of the most eminent literary and scientific men of France, Vol. 1 (of 2)",
+      "Eminent literary and scientific men of Italy, Spain, and Portugal. Vol. 1 (of 3)",
+      "Eminent literary and scientific men of Italy, Spain, and Portugal. Vol. 2 (of 3)",
+      "Lives of the most eminent literary and scientific men of France, Vol. 2 (of 2)",
+      "The Fortunes of Perkin Warbeck: a romance",
+      "Rambles in Germany and Italy in 1840, 1842, and 1843, vol. 2 of 2",
+      "Valperga Volume 1 (of 3): or, The life and adventures of Castruccio, prince of Lucca",
+      "Falkner: A Novel"
     ],
     "total_downloads": 29624,
     "year_of_birth_min": 1797,

@@ -6,6 +6,95 @@
 
 ---
 
+## 2026-05-30 — S-R5: live domain probe-FAIL triage (E1/E6/E8/E9/E11)
+
+Probe-gate on deploy `408874e` returned 7/12; FAIL = E1/E6/E8/E9/E11.
+Diagnose-first triage (v2 planner is corpus-free, so routing/intent
+were reproduced locally; data paths checked against recorded prod
+golden fixtures). Outcome split into FIXED / DEFERRED / DIAGNOSED.
+
+### FIXED this round (one commit each, negative + contract tests)
+
+- **E9 — `примеры heart у Дойла` → clarify.** Root: the intent
+  classifier had no rule for the bare «примеры <english-word>» form
+  (the word_contexts rules need a leading «приведи» or the «использов…»
+  filler), so `classify()` fell through to its `clarify(0.0)` default —
+  even though the entity extractor `_BARE_WORD_AFTER_EXAMPLES`
+  (entities.py, Sprint 17) already lifts the Latin token out of exactly
+  this form. Half-fix: extractor grew, intent rule didn't. Added a
+  word_contexts rule with a Latin-word guard mirroring the extractor.
+  Fix: `intent.py`; test: `test_sr5_e9_examples_intent.py`.
+
+- **E1 — `какие книги у Уэллса` lacks canonical titles.** Root
+  (mechanism confirmed by reading; end-to-end needs live corpus+render):
+  `author_lookup → author_metadata`, whose `sample_titles` was
+  `sel["title"].head(10)` and `_select_books` returns rows in
+  metadata-CSV (≈PG-id) order — popularity-blind, so a prolific author's
+  famous works could be absent from the sample. Ranked `sel` by
+  downloads before head(10). Fix: `rag_tools.py`; synthetic test:
+  `test_sr5_e1_author_metadata_sample_titles.py`.
+
+- **Smoke-nit — numeric audit flags scale ranges.** Live smoke: an
+  answer explaining a difficulty scale «90-100 — очень трудно, 60-70 —
+  средне» got a 📊 footer flagging 90/100/60/70 as «не в data». Strip
+  sub-year «N-M» ranges before extraction; year-range pairs (>=1500)
+  preserved so the W-7 bio-death-year path keeps firing. Fix:
+  `numeric_audit.py`; test: `test_sr5_numeric_audit_scale_ranges.py`.
+
+### DEFERRED — E8 (assumed root DISPROVEN, no blind fix under R2)
+
+**E8 — `20 слов B2 из Pride and Prejudice` → «0 слов».** The assumed
+band-pass-empty root is **disproven**:
+
+- Plan is correct: `learning_words(scope={book:PG1342}, level=intermediate,
+  top=20, lemmatize=True)` (reproduced locally).
+- The recorded prod golden fixture
+  `scripts.learning_tools.learning_words.json` shows v1 returns **50
+  words** for exactly this scope/level.
+- Running those 50 rows through the v2 wrapper's full filter chain
+  (location blacklist → surname → corpus-artifact → toponym) leaves
+  **48** (drops only `lambton`/`shire`). `looks_broken` only fires when
+  v1 is genuinely empty.
+
+So there is **no emptiness anywhere in planner→v1→wrapper** on the
+corpus-free path. The literal «0 слов» is the *correct* graceful-
+degradation message (B-R14-7) and is reachable only when v1 returns
+empty **at runtime on prod** — most likely a stale poisoned cache entry
+from the pre-2026-05-21 B-R14-7 period that AST-invalidation (F1) didn't
+bust, or a missing `PG1342` counts file at the deploy. Neither is
+reproducible or fixable blind under R2 (no negative test possible
+without the live payload).
+
+**Recommended next step (not done this round):** capture the live
+`/api/chat` payload for the E8 query on the deployed runtime. If the
+tool result is empty with a cache hit → bump `learning_words`
+`wrapper_version` to force a cache-bust on the next deploy. If v1 errors
+with «counts file not found» → infra/corpus-layout, not code.
+
+### DIAGNOSED — E6 / E11 latency (deferred to a perf sprint per brief)
+
+- **E6 — `слова викторианцев 1837-1901` ~180s.** `period_vocab →
+  top_ngrams` (v1 `top_ngrams_by_author`, rag_tools.py:~553-577). Year
+  range with no author selects every book in 1837-1901; each call reads
+  every matched book's token file from disk and enumerates all n-grams
+  into a Counter — a full-corpus scan with no period cache, recomputed
+  every request. The v2 wrapper (`tools/authors/top_ngrams.py`) further
+  expands `raw_top = top * 8` when `semantic_class` is set.
+
+- **E11 — `что почитать после "Преступления и наказания"` ~128s + wrong
+  tool.** Two coupled defects: (1) the classifier correctly picks
+  `book_similar` (0.93, reproduced locally), but `_plan_book_similar`
+  (`builders/book.py`) **executes the tool `find_book_by_topic`** with a
+  topic-enriched string — so the probe's `tool_called: book_similar`
+  fails because the surfaced tool name is `find_book_by_topic`. (2) That
+  tool runs `hybrid_search` (per_retriever=30, bge_reranker); the W-13
+  comment itself admits 200-317s on cold cache and the <60s budget isn't
+  held cold. A perf sprint should add a `book_similar` tool (or alias)
+  whose name matches the routing target, and warm/precompute the
+  neighbour index.
+
+---
+
 ## 2026-05-25 — S-F2: v1↔v2 contract framework (ADR-F2 / D68 accepted)
 
 Closes block **S-F2** of
