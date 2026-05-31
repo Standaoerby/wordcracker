@@ -121,3 +121,17 @@ def test_translate_has_translation_engine_system():
     payload, _ = _capture_translate_payload({"WC_LLM_MODEL": "wordcracker:v2"})
     assert "system" in payload, "translate must override the baked persona"
     assert "translation" in payload["system"].lower()
+
+
+def test_translate_does_not_evict_shared_warm_model():
+    """S-P1 follow-up: keep_alive must NOT be 0. Now that translate rides the
+    SHARED wordcracker:v2, keep_alive=0 would unload it the instant this hop
+    returns, forcing the next renderer call to reload it cold. We pin -1 to
+    match the rest of the v2 stack (renderer/critic/planner/intent)."""
+    payload, _ = _capture_translate_payload({"WC_LLM_MODEL": "wordcracker:v2"})
+    assert payload["keep_alive"] != 0, (
+        "keep_alive=0 evicts the shared warm model on every Cyrillic query"
+    )
+    assert payload["keep_alive"] == -1, (
+        "translate should hold the model (-1) like renderer/critic/planner"
+    )
