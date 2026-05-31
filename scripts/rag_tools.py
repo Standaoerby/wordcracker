@@ -524,7 +524,8 @@ def top_ngrams_by_author(author_regex: str, n: int = 2, top: int = 20,
                          pos_filter: list[str] | None = None,
                          year_from: int | None = None,
                          year_to: int | None = None,
-                         country: str | None = None) -> dict:
+                         country: str | None = None,
+                         max_books: int = 6000) -> dict:
     """N-gram frequencies (n=1,2,3) from per-author SPGC tokens.
 
     pos_filter (only n=1): list like ["NOUN","VERB","ADJ","ADV","PROPN"]; keeps
@@ -535,6 +536,14 @@ def top_ngrams_by_author(author_regex: str, n: int = 2, top: int = 20,
 
     year_from / year_to: filter by author birth_year+30 (writing prime proxy).
     Use author_regex='.*' to mean "any author" when filtering only by period.
+
+    max_books: hard-cap on books scanned. E6 (2026-05-31) — «слова викторианцев
+    1837-1901» (author_regex='.*' + period) selected the whole en corpus
+    (~27860 books, the densest literary era) and the uncapped full-token scan
+    ran 180s+ — a probe timeout (P6). Mirrors the cap word_collocates already
+    carries: sample by downloads desc so the most-popular (= most-evidence)
+    books are kept and the era vocabulary stays representative. A narrow author
+    scope (e.g. '^Austen,' → 18 books) is far below the cap and untouched.
     """
     t0 = time.perf_counter()
     if n not in (1, 2, 3):
@@ -546,6 +555,17 @@ def top_ngrams_by_author(author_regex: str, n: int = 2, top: int = 20,
             return {"error": "no books matched", "author_regex": author_regex,
                     "year_from": year_from, "year_to": year_to,
                     "country": country}
+
+        # E6 hard-cap: keep wall time bounded on full-corpus period queries.
+        # Sample by downloads desc — the kept books carry the most evidence,
+        # so the top n-grams of the era are stable under the cap.
+        books_matched = len(sel)
+        books_capped = books_matched > max_books
+        if books_capped:
+            sel = sel.copy()
+            sel["downloads"] = pd.to_numeric(sel.get("downloads"),
+                                             errors="coerce").fillna(0)
+            sel = sel.sort_values("downloads", ascending=False).head(max_books)
 
         counter: Counter = Counter()
         used = 0
@@ -593,6 +613,9 @@ def top_ngrams_by_author(author_regex: str, n: int = 2, top: int = 20,
             "n":             n,
             "pos_filter":    pos_filter,
             "books_used":    used,
+            "books_matched": books_matched,
+            "books_capped":  books_capped,
+            "max_books":     max_books,
             "total_ngrams":  total_ngrams,
             "top":           [{"ngram": ng, "count": c} for ng, c in top_pairs],
         }
