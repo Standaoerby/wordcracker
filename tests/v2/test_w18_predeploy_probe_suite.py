@@ -473,6 +473,64 @@ class ToolCalledNamesAreRegistered(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# S-R5-E8 — P8 «0 слов» guard must have a left word-boundary.
+#
+# P8 asks for «20 слов уровня B2 …». Its regex_no_match guard rejects
+# empty-result answers («0 слов», «не найдено», …). The original
+# alternative `0 слов` had no left boundary, so it matched the substring
+# inside «20 слов» / «100 слов» — i.e. a healthy answer echoing the count
+# tripped the guard (probe false-positive; learning pipeline was fine).
+# Fix: `(?<!\d)0 слов`. This test runs the SHIPPED P8 rule through
+# _match_one and asserts the false-positive cases pass while a standalone
+# «0 слов» (a real empty result) still fails. Fails on the pre-fix pattern.
+# ---------------------------------------------------------------------------
+
+class P8EmptyGuardHasLeftBoundary(unittest.TestCase):
+    def _p8_no_match_rule(self):
+        repo_cfg = Path(__file__).resolve().parents[2] / "scripts" / "predeploy_probes.json"
+        cfg = load_config(repo_cfg)
+        p8 = next(p for p in cfg["probes"] if p["id"] == "P8")
+        rule = next(r for r in p8["pass_when"]
+                    if r.get("kind") == "regex_no_match" and r.get("field") == "answer")
+        return rule
+
+    def test_count_echo_does_not_trip_guard(self):
+        """«20 слов»/«100 слов» — healthy answers echoing the requested
+        count must PASS the no-match guard (ok=True)."""
+        rule = self._p8_no_match_rule()
+        for answer in ("Вот 20 слов уровня B2 из Pride and Prejudice: ...",
+                       "Нашёл 100 слов, экспортирую."):
+            with self.subTest(answer=answer):
+                r = _match_one(rule, {"answer": answer}, 1.0)
+                self.assertTrue(
+                    r.ok,
+                    f"P8 guard false-positive on count echo: {answer!r} "
+                    f"({r.reason})",
+                )
+
+    def test_standalone_zero_still_caught(self):
+        """A genuine «0 слов» empty result must still FAIL (ok=False) —
+        the fix narrows the boundary, it does not disarm the guard."""
+        rule = self._p8_no_match_rule()
+        for answer in ("Найдено: 0 слов уровня B2.", "0 слов"):
+            with self.subTest(answer=answer):
+                r = _match_one(rule, {"answer": answer}, 1.0)
+                self.assertFalse(
+                    r.ok,
+                    f"P8 guard must still catch a real empty: {answer!r}",
+                )
+
+    def test_other_empty_markers_still_caught(self):
+        """The other alternatives are unaffected by the lookbehind."""
+        rule = self._p8_no_match_rule()
+        for answer in ("К сожалению, не найдено подходящих слов.",
+                       "Результат: пусто.", "no words matched"):
+            with self.subTest(answer=answer):
+                r = _match_one(rule, {"answer": answer}, 1.0)
+                self.assertFalse(r.ok, f"empty marker not caught: {answer!r}")
+
+
+# ---------------------------------------------------------------------------
 # Determinism matchers (P12 class)
 # ---------------------------------------------------------------------------
 

@@ -6,6 +6,29 @@
 
 ---
 
+## 2026-05-31 — S-R5-E8: P8 «0 слов» guard — probe false-positive (missing left boundary)
+
+Re-opens and resolves E8. The 2026-05-30 S-R5 triage disproved the
+"band-pass empty" root and deferred E8 as possibly-correct graceful
+degradation. The real defect is in the **probe**, not the pipeline: P8
+asks for «**20** слов уровня B2 из Pride and Prejudice», and its
+`regex_no_match` empty-result guard had the alternative `0 слов` with
+**no left boundary**. `re.search` (predeploy_probe_suite.py:135) finds
+«0 слов» as a substring of «**2**0 слов» / «10**0** слов», so a healthy
+answer echoing the requested count tripped the guard → false FAIL. The
+learning pipeline was fine all along.
+
+**Fix:** `0 слов` → `(?<!\d)0 слов` in P8's `regex_no_match` pattern.
+A standalone «0 слов» (real empty) and the other markers (`не найдено`,
+`нет слов`, `пусто`, `empty`, `no words`) still fire. New gate
+`P8EmptyGuardHasLeftBoundary` in `test_w18_predeploy_probe_suite.py`
+runs the SHIPPED P8 rule through `_match_one`: count-echo answers
+(«20 слов», «100 слов») pass, standalone «0 слов» still fails. Fails on
+the pre-fix pattern. v2-only (probe + test); no re-record. Ships in
+2.6.27 alongside the E11 routing fix.
+
+---
+
 ## 2026-05-31 — S-R5-E11: book_similar routing — probe named an intent, not a tool (Path A)
 
 Closes the **routing** half of E11 (the latency half was already
