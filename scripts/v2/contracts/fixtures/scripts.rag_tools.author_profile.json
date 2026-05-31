@@ -1,5 +1,5 @@
 {
-  "_elapsed_s": 4.02,
+  "_elapsed_s": 4.0,
   "author_regex": "^Shelley, Mary",
   "diversity": {
     "books_used": 25,
@@ -311,7 +311,10 @@
   },
   "top_bigrams": {
     "author_regex": "^Shelley, Mary",
+    "books_capped": false,
+    "books_matched": 27,
     "books_used": 25,
+    "max_books": 6000,
     "n": 2,
     "pos_filter": null,
     "top": [
