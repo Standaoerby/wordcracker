@@ -274,8 +274,17 @@ def _maybe_translate(query: str) -> str:
             "Толстой→Tolstoy, Чехов→Chekhov). Output ONLY the translation.\n\n"
             f"Question: {query}\n\nEnglish:"
         )
+        # Model resolves from env so the translate hop rides the same warm
+        # model as the rest of the stack (WC_LLM_MODEL=wordcracker:v2 in
+        # prod) rather than cold-loading a second qwen3:14b. There is no
+        # format=json guard here, so the baked wordcracker:v2 persona is the
+        # real risk — override `system` to a bare translation engine so it
+        # emits the English string only, nothing else. (S-P1)
         resp = requests.post(f"{OLLAMA_HOST}/api/generate", json={
-            "model": "qwen3:14b", "prompt": prompt, "stream": False, "keep_alive": 0,
+            "model": os.environ.get("WC_LLM_MODEL", "qwen3:14b"),
+            "system": "You are a translation engine. Output only the "
+                      "English translation, nothing else.",
+            "prompt": prompt, "stream": False, "keep_alive": 0,
             "options": {"temperature": 0}, "think": False,
         }, timeout=60)
         resp.raise_for_status()
