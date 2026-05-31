@@ -167,10 +167,17 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      # 60s covers rag_query import (spaCy + tokenizer) + chat_server
-      # module load. ChromaDB cold-load is on first /api/chat (lazy),
-      # not on /health — so 60s is well above the observed warmup.
-      start_period: 60s
+      # start_period sizes the synchronous startup _warmup() in
+      # chat_server.main(): it runs BEFORE the listening socket binds, so
+      # /health is connection-refused (→ healthcheck "starting") until warmup
+      # returns. Warmup now loads ChromaDB + bi-encoder + BGE reranker AND
+      # pre-runs the P7/P8 deploy-probe tool paths (learning_words spaCy band-
+      # pass + hybrid_search + enrich_word LLM round-trip + word_etymology) so
+      # the post-deploy probe runs warm. That fuller warmup can exceed the old
+      # 60s on a cold host (empty page cache + ollama model load), so the
+      # budget is raised to 120s — comfortably under verify_deployed_image.sh's
+      # poll_until_healthy budget (VERIFY_HEALTHCHECK_BUDGET_S=180s).
+      start_period: 120s
 
   admin:
     # D-SB2-1: PID 1 = python; admin is upload/index only — no LLM,
