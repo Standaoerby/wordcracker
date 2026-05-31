@@ -31,13 +31,13 @@ jobs:
     name: Mandatory version-bump
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # We need the parent commit for `git show HEAD~1:...`.
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -59,8 +59,8 @@ jobs:
     name: 12-probe config sanity
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - name: Install pytest
@@ -97,7 +97,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # S-F1 / ADR-F1 / D67: the cache_fingerprint_audit step
           # below needs HEAD~1 for the default `--since` argument.
@@ -127,7 +127,7 @@ jobs:
           sudo rm -rf /opt/hostedtoolcache
           df -h /
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         id: setup
         with:
           python-version: "3.11"
@@ -138,7 +138,7 @@ jobs:
           "${{ steps.setup.outputs.python-path }}" -c "import sys; assert sys.version_info[:2] == (3, 11), sys.version; print('interpreter OK:', sys.version)"
 
       - name: Cache pip wheels
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-${{ hashFiles('requirements.lock') }}
