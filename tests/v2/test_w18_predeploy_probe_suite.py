@@ -402,6 +402,77 @@ class ShippedConfigShape(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# S-R5-E11 — tool_called / tool_not_called rules must name a REGISTERED tool.
+#
+# The probe matcher checks `rule["name"] in [tc["name"] for tc in tool_calls]`
+# (predeploy_probe_suite._match_one, kind="tool_called"). `tool_calls` carries
+# the names of the tools the dispatcher actually executed — i.e. registry tool
+# names. So a probe that asserts a name no tool is registered under can NEVER
+# pass: it is dead-on-arrival, not a real gate.
+#
+# E11 shipped exactly that bug: P11 asserted `tool_called: book_similar`, but
+# `book_similar` is an *intent label*, not a tool — `_plan_book_similar`
+# dispatches the registered tool `find_book_by_topic` (topic-enriched). This
+# test fails on the pre-fix config (book_similar ∉ REGISTRY) and passes once
+# the probe names the tool that actually runs.
+# ---------------------------------------------------------------------------
+
+class ToolCalledNamesAreRegistered(unittest.TestCase):
+    _TOOL_RULE_KINDS = {"tool_called", "tool_not_called"}
+
+    def _registry_names(self):
+        import scripts.v2.tools  # noqa: F401  triggers @tool registration
+        from scripts.v2.tool_registry import REGISTRY
+        return set(REGISTRY.keys())
+
+    def _tool_rules(self, cfg):
+        """Yield (probe_id, rule) for every tool_called/tool_not_called rule
+        across per-probe pass_when, pass_when_across_runs, and universal."""
+        for rule in cfg.get("universal_pass_when", []):
+            if rule.get("kind") in self._TOOL_RULE_KINDS:
+                yield "universal", rule
+        for probe in cfg.get("probes", []):
+            pid = probe.get("id")
+            for key in ("pass_when", "pass_when_across_runs"):
+                for rule in probe.get(key, []):
+                    if rule.get("kind") in self._TOOL_RULE_KINDS:
+                        yield pid, rule
+
+    def test_every_tool_rule_names_a_registered_tool(self):
+        repo_cfg = Path(__file__).resolve().parents[2] / "scripts" / "predeploy_probes.json"
+        cfg = load_config(repo_cfg)
+        names = self._registry_names()
+        offenders = [
+            (pid, rule["name"]) for pid, rule in self._tool_rules(cfg)
+            if rule.get("name") not in names
+        ]
+        self.assertEqual(
+            offenders, [],
+            f"probe tool_called/tool_not_called rules name unregistered tools "
+            f"(intent labels are not tools): {offenders}. "
+            f"Assert the tool the dispatcher actually runs.",
+        )
+
+    def test_p11_routes_to_find_book_by_topic(self):
+        """Regression guard for S-R5-E11: P11 must assert the tool that
+        _plan_book_similar dispatches (find_book_by_topic), not the intent
+        name book_similar."""
+        repo_cfg = Path(__file__).resolve().parents[2] / "scripts" / "predeploy_probes.json"
+        cfg = load_config(repo_cfg)
+        p11 = next(p for p in cfg["probes"] if p["id"] == "P11")
+        tool_rules = [r for r in p11["pass_when"] if r.get("kind") == "tool_called"]
+        self.assertEqual(
+            [r["name"] for r in tool_rules], ["find_book_by_topic"],
+            "P11 must assert tool_called=find_book_by_topic (book_similar is an "
+            "intent, not a tool — it can never appear in tool_calls).",
+        )
+        self.assertNotIn(
+            "book_similar", [r.get("name") for r in tool_rules],
+            "book_similar is an intent label, not a registry tool name.",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Determinism matchers (P12 class)
 # ---------------------------------------------------------------------------
 
