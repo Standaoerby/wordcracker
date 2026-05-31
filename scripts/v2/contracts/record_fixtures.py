@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -333,4 +334,25 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    rc = main(sys.argv[1:])
+    # Hard-exit, do NOT fall through to a normal interpreter shutdown.
+    #
+    # The recorded v1 tools instantiate a process-singleton
+    # `chromadb.PersistentClient` (rag_tools._get_chroma_collection_with_embedder)
+    # whose default-on Posthog telemetry spawns a NON-daemon background
+    # `Consumer` thread, plus a cuda-bound SentenceTransformer that holds a
+    # native torch/CUDA context. Neither is released by `sys.exit`, so the
+    # interpreter blocks at shutdown trying to join the lingering thread —
+    # observed on the live 2.6.33 deploy as "DONE: 28 ok, 0 failed" followed
+    # by a hang until the gate's `timeout 600` killed it (rc=124). All work
+    # is finished and the manifest is already written by the time `main`
+    # returns, so we flush our own output and exit the process directly,
+    # skipping the wedged third-party threads entirely.
+    #
+    # `os._exit` is the robust fix here precisely because the root cause is
+    # third-party (telemetry / native) threads we don't own and can't
+    # reliably join. It touches NO v1 source, so the AST fingerprints stamped
+    # into the fixtures are unchanged — this needs no fixture re-record.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(rc)
