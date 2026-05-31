@@ -1290,6 +1290,60 @@ def _warmup():
     except Exception as e:
         print(f"[chat] BGE reranker warmup failed (non-fatal): "
               f"{type(e).__name__}: {e}", file=_sys.stderr, flush=True)
+    # S-R5 warmup-sequencing (2026-05-31) — warm the P7/P8 deploy-probe paths.
+    # Diagnosis (by code, not the brief's hypothesis): _warmup() ALREADY runs
+    # synchronously BEFORE the listening socket binds — main() calls it before
+    # ThreadingHTTPServer(...) — so :8890/health is connection-refused until
+    # warmup returns, and every deploy gate (compose healthcheck → verify
+    # poll_until_healthy → predeploy wait_for_health) already waits for it.
+    # The cold-probe latency is NOT warmup↔probe GPU contention; it's the
+    # FIRST call into tool paths this warmup never touched paying model/import
+    # load inside the probe request:
+    #   • P7 «что значит X» word bundle → hybrid_search (FTS5 + Chroma + BGE
+    #     rerank) ∥ enrich_word (ollama LLM round-trip + Wiktionary dict) ∥
+    #     word_etymology (family_chain)
+    #   • P8 «N слов уровня B2 из <book>» → learning_words (spaCy lemmatizer +
+    #     POS tagger + per-book counts band-pass)
+    # Representative inputs — a common word ('house', NOT the probe word
+    # 'ajar') and P&P at the DEFAULT top=30 (NOT the probe's top=20) — warm the
+    # shared spaCy / FTS5 / Wiktionary / ollama models WITHOUT pre-caching any
+    # probe's exact result, so the probes still exercise the live path, just on
+    # warm infrastructure. This is deliberately NOT page-cache warming: the
+    # 6000-book P6 period_vocab scan stays cold by design (too expensive to
+    # prewarm; the E6 ThreadPool cap is meant to fit it in budget regardless).
+    try:
+        from scripts.v2.tool_registry import dispatch
+        t = _time.perf_counter()
+        # P8 — loads the spaCy lemmatizer + POS tagger and the per-book counts
+        # band-pass. top=30 (default) ≠ the probe's top=20 so the cacheable
+        # result is not pre-filled.
+        dispatch("learning_words",
+                 {"scope": {"book": "PG1342"}, "level": "intermediate", "top": 30})
+        print(f"[chat] learning_words path warmed in {_time.perf_counter()-t:.1f}s "
+              f"(spaCy lemmatizer + counts band-pass)",
+              file=_sys.stderr, flush=True)
+    except Exception as e:
+        print(f"[chat] learning_words warmup failed (non-fatal): "
+              f"{type(e).__name__}: {e}", file=_sys.stderr, flush=True)
+    try:
+        from scripts.v2.tool_registry import dispatch
+        t = _time.perf_counter()
+        # P7 — word-info bundle component tools. hybrid_search warms FTS5 +
+        # Chroma merge + BGE rerank; enrich_word warms the ollama LLM round-trip
+        # + Wiktionary word_dictionary; word_etymology warms the family_chain
+        # path. A common word ('house'), not a probe word — no probe result is
+        # pre-cached.
+        dispatch("hybrid_search",
+                 {"query": "house", "k": 12, "per_retriever": 50,
+                  "rerank_with": "bge_reranker"})
+        dispatch("enrich_word", {"word": "house"})
+        dispatch("word_etymology", {"word": "house"})
+        print(f"[chat] word-bundle path warmed in {_time.perf_counter()-t:.1f}s "
+              f"(hybrid_search + enrich_word LLM + word_etymology)",
+              file=_sys.stderr, flush=True)
+    except Exception as e:
+        print(f"[chat] word-bundle warmup failed (non-fatal): "
+              f"{type(e).__name__}: {e}", file=_sys.stderr, flush=True)
 
 
 def main():
