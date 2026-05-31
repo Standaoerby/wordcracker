@@ -1,6 +1,9 @@
 {
   "author_regex": "^Austen,",
+  "books_capped": false,
+  "books_matched": 28,
   "books_used": 18,
+  "max_books": 6000,
   "n": 2,
   "pos_filter": null,
   "top": [
