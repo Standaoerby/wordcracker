@@ -402,6 +402,35 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"\b(что|чё)\s+(есть|у\s+тебя\s+есть)\s+(у|от|of)\s+"
          r"[A-ZА-ЯЁ]\w+\s*(в\s+корпус|в\s+базе)?"),
      "author_lookup", 0.85),
+    # E1b (S-R5, 2026-05-31) — bare-genitive author catalog, NO preposition:
+    # «книги Диккенса», «произведения Толстого», «works Dickens». Stan: these
+    # fell to clarify (no rule matched) → v4 LLM-planner → ~16s flake, while
+    # the prepositional form «какие книги у Диккенса» resolved deterministically
+    # in 2-4s. The Phase E rules above REQUIRE a preposition («у|при|of|by»)
+    # precisely because a naive bare «книг + Capital» false-positives under
+    # IGNORECASE on Q30-style «произведения подойдут…» (see comment above).
+    #
+    # What makes the no-prep form safe now is the (?-i:[A-ZА-ЯЁ][a-zа-яё])
+    # proper-noun guard — our classify-time author-presence proxy, the same
+    # idiom as the E30 book_readability and book_emotion guards. The real
+    # author resolution still happens downstream in extract() → author_regex;
+    # this rule only steers the query onto the deterministic author_lookup
+    # path instead of the LLM-flake clarify. The guard discriminates:
+    #   · capital-THEN-lowercase = a real surname (Диккенса / Толстого /
+    #     Dickens), NOT a roman-numeral century — «книги XIX века» is X then
+    #     UPPERCASE I, excluded → stays book_extremum (W11BookRanking) — and
+    #     NOT a CEFR level «книги B2» (capital-then-digit, excluded).
+    #   · IGNORECASE-disabled capital = the token must START uppercase, so
+    #     lowercase topic/verb phrasings stay out: «книги про войну», «книги о
+    #     космосе» (preposition lowercase → topic_book_search), «произведения
+    #     подойдут…» (Q30 verb lowercase → book_recommendation).
+    # Plural noun only (книги/произведения/works, NOT singular «книга») so a
+    # specific-title phrasing «книга Война и мир» stays book_lookup. Confidence
+    # 0.83 < the prepositional rules so they still win when both match (same
+    # label either way).
+    (_re(r"\b(книги|произведения|works)\s+"
+         r"[«\"'“‘]?(?-i:[A-ZА-ЯЁ][a-zа-яё])"),
+     "author_lookup", 0.83),
 
     # Single-book superlatives — «самая длинная книга», «самая короткая»,
     # «самая популярная книга» (singular!), «book with the highest …».
