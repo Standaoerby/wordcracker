@@ -186,6 +186,16 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help="print the LIVE_ARGS table and exit; no v1 calls.",
     )
+    parser.add_argument(
+        "--skip-heavy",
+        action="store_true",
+        help="skip the full-corpus-scan bindings in HEAVY_BINDINGS "
+             "(word_contexts_global, word_freq_timeline, "
+             "find_words_by_etymology). Used by the deploy-time re-record "
+             "gate (scripts/deploy.sh) so a multi-minute scan cannot hang "
+             "a deploy. An explicit `--only <heavy-name>` still force-records "
+             "a heavy binding even with this flag.",
+    )
     args = parser.parse_args(argv)
 
     # Repo-root path resolution so the script can be called as
@@ -199,7 +209,9 @@ def main(argv: list[str]) -> int:
     # empty registry and reports every binding as no_binding.
     try:
         import scripts.v2.tools  # noqa: F401
-        from scripts.v2.contracts.live_args import LIVE_ARGS, FIXTURE_EXEMPT
+        from scripts.v2.contracts.live_args import (
+            LIVE_ARGS, FIXTURE_EXEMPT, HEAVY_BINDINGS,
+        )
         from scripts.v2.contracts.registry import V1_CONTRACTS
     except Exception as e:
         print(f"[record_fixtures] FATAL: could not load v2 contracts "
@@ -215,12 +227,25 @@ def main(argv: list[str]) -> int:
     # in the default sweep — their output is non-deterministic so a frozen
     # fixture is meaningless / false-fails replay. An explicit `--only
     # <qualname>` still force-records them (for a one-off shape eyeball).
+    # --skip-heavy (S-B7 F2-DEPLOY-RERECORD): drop the full-corpus-scan
+    # bindings so the deploy-time gate cannot hang on a multi-minute scan.
+    # An explicit `--only <name>` always wins — force-recording a heavy
+    # binding by name ignores --skip-heavy (one-off shape eyeball / manual
+    # full re-record of a single tool).
     if args.only:
         targets = sorted(args.only)
         skipped_exempt = []
+        skipped_heavy = []
     else:
-        targets = [k for k in sorted(LIVE_ARGS) if k not in FIXTURE_EXEMPT]
+        skip_set = set(FIXTURE_EXEMPT)
+        if args.skip_heavy:
+            skip_set |= set(HEAVY_BINDINGS)
+        targets = [k for k in sorted(LIVE_ARGS) if k not in skip_set]
         skipped_exempt = sorted(k for k in LIVE_ARGS if k in FIXTURE_EXEMPT)
+        skipped_heavy = (
+            sorted(k for k in LIVE_ARGS if k in HEAVY_BINDINGS)
+            if args.skip_heavy else []
+        )
 
     try:
         _FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
@@ -234,6 +259,17 @@ def main(argv: list[str]) -> int:
         "live_args_total": len(LIVE_ARGS),
         "targets_attempted": len(targets),
         "exempt": sorted(FIXTURE_EXEMPT),
+        "skipped_heavy": skipped_heavy,
+        # S-B7 FINGERPRINT-PYVER (D-SB7): the per-fixture v1_fingerprint is
+        # SHA-256 of `ast.dump(ast.parse(source))`, whose output is
+        # Python-minor-specific (AST node fields evolve across minors). A
+        # fixture recorded on 3.11 then checked on 3.13 reports every
+        # binding as "source changed" — a false positive. Stamp the
+        # recording interpreter's minor so FixtureFreshnessGate can fail
+        # loud with "Python minor mismatch" instead of 31 misleading
+        # source-drift lines. (Does NOT change the fingerprint formula or
+        # the F1 cache key — purely an accounting field.)
+        "python_minor": f"{sys.version_info.major}.{sys.version_info.minor}",
         "results": [],
     }
 
@@ -246,6 +282,22 @@ def main(argv: list[str]) -> int:
         })
         print(f"[record_fixtures] SKIP {v1_qualname}: exempt "
               f"(FIXTURE_EXEMPT — non-deterministic)")
+
+    # Heavy bindings skipped under --skip-heavy (deploy gate). Logged
+    # loudly so the dropped coverage is never silent (S-B7): a deploy
+    # operator reading the gate output sees exactly which contracts the
+    # JSON-diff gate did NOT re-check. Their fixtures on disk are left
+    # untouched — so they cannot trigger a false drift signal — and the
+    # PR-time FixtureFreshnessGate still fingerprints them.
+    for v1_qualname in skipped_heavy:
+        manifest["results"].append({
+            "v1_qualname": v1_qualname,
+            "status": "skipped_heavy",
+            "reason": "full-corpus scan skipped (--skip-heavy, HEAVY_BINDINGS): "
+                      "fixture left untouched; PR-time fingerprint still applies",
+        })
+        print(f"[record_fixtures] SKIP {v1_qualname}: heavy "
+              f"(--skip-heavy — full-corpus scan; fixture left untouched)")
 
     ok = 0
     failed = 0

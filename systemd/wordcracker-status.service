@@ -9,6 +9,19 @@ Type=simple
 User=claude
 Group=claude
 WorkingDirectory=/home/claude/wordcracker
+# S-B7: reap any orphaned status_server before binding :8889. Unlike the
+# retired chat/admin units, status_server runs as host Python (not inside
+# a container), so the orphan-kill is a HOST pkill — NOT `docker compose
+# exec` (that pattern is forbidden post-S-B2; see
+# tests/v2/test_deploy_artifact.py::test_no_docker_exec_in_any_systemd_unit).
+# The orphan we reap is the documented failure mode: a manual
+# `nohup python ... status_server.py` left bound to :8889 from before the
+# unit existed (install_systemd_units.sh warns about exactly this). The
+# `-` prefix swallows pkill's exit 1 when no orphan matches; the `-f` match
+# is the full script path so we never hit an unrelated python process. This
+# runs before ExecStart, so it cannot kill the instance systemd is about to
+# launch.
+ExecStartPre=-/usr/bin/pkill -9 -f /home/claude/wordcracker/scripts/status_server.py
 ExecStart=/usr/bin/python3 -u /home/claude/wordcracker/scripts/status_server.py --port 8889
 Restart=on-failure
 RestartSec=10

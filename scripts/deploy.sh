@@ -35,6 +35,18 @@
 #      and exit non-zero. If PREVIOUS_SHA is unavailable (cold start /
 #      re-deploy of same SHA): exit non-zero WITHOUT rollback so the
 #      operator sees an unambiguous "no rollback target".
+#   8b. (forward only, S-B7 F2-DEPLOY-RERECORD) Fixture re-record gate:
+#      after verify+probe-gate pass, spin up an ephemeral dev-overlay
+#      container and re-run `record_fixtures --skip-heavy`, then
+#      `git diff` the recorded fixtures (manifest excluded — its
+#      elapsed_s/size_bytes are non-deterministic). Any drift means the
+#      committed contract fixtures are stale vs live v1 output: exit
+#      non-zero (>=10), same gate semantics as verify/probe-gate. This is
+#      layer 4 of the stale-fixture defence named in
+#      tests/v2/test_v1_contracts.py::FixtureFreshnessGate — it catches
+#      depth>=2 / lazy-import v1 edits that the PR-time AST fingerprint
+#      cannot reach. Heavy full-corpus scans are skipped so the gate
+#      cannot hang the deploy (see HEAVY_BINDINGS in live_args.py).
 #   9. Prune all but the last 5 SHA-tagged wordcracker-textlab images.
 
 set -euo pipefail
@@ -50,6 +62,13 @@ MODE="deploy"
 REF=""
 PYTHON="${PYTHON:-python3}"
 CHAT_BASE_URL="${CHAT_BASE_URL:-http://127.0.0.1:8890}"
+# S-B7 F2-DEPLOY-RERECORD: hard wall-clock backstop for the fixture
+# re-record gate. --skip-heavy already drops the multi-minute corpus
+# scans (HEAVY_BINDINGS), so the remaining sweep is well under a minute
+# on prod; 600s is a generous ceiling that still guarantees the gate
+# cannot hang a deploy indefinitely if a tool wedges. Override per-host
+# with WC_RERECORD_BUDGET_SECS.
+RERECORD_BUDGET_SECS="${WC_RERECORD_BUDGET_SECS:-600}"
 
 usage() {
     sed -n '2,/^set -euo/p' "$0" | head -30
@@ -343,6 +362,65 @@ if [[ "$MODE" == "deploy" && ( "$verify_rc" -ne 0 || "$probe_rc" -ne 0 ) ]]; the
         docker image ls "${IMAGE_NAME}" --format '    {{.Tag}}' >&2 || true
         exit 12
     fi
+fi
+
+# --- fixture re-record gate (S-B7 F2-DEPLOY-RERECORD, forward mode only) ---
+# Reached only when verify AND probe-gate are green (a red either one
+# rolled back + exited above). Closes the manual-re-record step that
+# bit twice on E27: re-run record_fixtures against the just-deployed
+# image and fail the deploy if the committed contract fixtures drifted.
+#
+# Mechanism: an ephemeral dev-overlay container (`run --rm`). The dev
+# overlay (docker-compose.dev.yml) bind-mounts ./scripts, so fixtures
+# the recorder writes inside the container land on the host repo and a
+# host-side `git diff` sees them. The container also inherits the prod
+# /data/* corpus + chroma bind-mounts from the base file, so v1 runs
+# against real corpus. WC_IMAGE_TAG=$SHA pins the overlay to the image
+# we just shipped. `run --rm` does NOT touch the running gutenberg-lab /
+# chat / admin services.
+#
+# --skip-heavy drops the HEAVY_BINDINGS full-corpus scans (recorder
+# prints which) so the gate runs in well under a minute; `timeout` is a
+# hard backstop so a wedged tool fails the gate instead of hanging the
+# deploy. The diff EXCLUDES _manifest.json: its elapsed_s / size_bytes
+# are non-deterministic and would false-fail every deploy. The fixture
+# JSON content carries the real drift signal (and is exactly what the
+# AST-fingerprint gate at depth>=2 cannot see).
+#
+# Exit codes (>=10, same "loud failure" band as verify/probe-gate):
+#   13 — recorder run itself failed (container error, timeout, v1 raised)
+#   14 — fixture drift: committed fixtures are stale vs live v1 output
+RERECORD_FIXTURES_DIR="scripts/v2/contracts/fixtures"
+if [[ "$MODE" == "deploy" ]]; then
+    echo "[deploy] fixture re-record gate: ephemeral dev-overlay container, record_fixtures --skip-heavy (budget ${RERECORD_BUDGET_SECS}s)"
+    rerecord_rc=0
+    WC_IMAGE_TAG="${SHA}" timeout "${RERECORD_BUDGET_SECS}" \
+        docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+        run --rm -T -w /workspace gutenberg-lab \
+        "${PYTHON}" -m scripts.v2.contracts.record_fixtures --skip-heavy \
+        || rerecord_rc=$?
+    if [[ "$rerecord_rc" -ne 0 ]]; then
+        echo "[deploy] FIXTURE RE-RECORD failed (rc=${rerecord_rc}) — recorder errored or timed out (>${RERECORD_BUDGET_SECS}s)" >&2
+        # Restore any partial fixture writes so the working tree stays
+        # clean for the NEXT deploy's dirty-check (a left-dirty tracked
+        # file would block it).
+        git checkout -- "${RERECORD_FIXTURES_DIR}" 2>/dev/null || true
+        exit 13
+    fi
+    # git diff over the fixture JSONs, EXCLUDING the volatile manifest.
+    if ! git diff --exit-code -- "${RERECORD_FIXTURES_DIR}" ":(exclude)${RERECORD_FIXTURES_DIR}/_manifest.json"; then
+        echo "[deploy] FIXTURE DRIFT — committed v1 contract fixtures are stale vs live v1 output:" >&2
+        git --no-pager diff --stat -- "${RERECORD_FIXTURES_DIR}" ":(exclude)${RERECORD_FIXTURES_DIR}/_manifest.json" >&2
+        echo "[deploy]   re-record on this host and commit:" >&2
+        echo "[deploy]     docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm gutenberg-lab python -m scripts.v2.contracts.record_fixtures" >&2
+        echo "[deploy]     git add ${RERECORD_FIXTURES_DIR} && git commit -m 'chore: re-record v1 fixtures'" >&2
+        git checkout -- "${RERECORD_FIXTURES_DIR}" 2>/dev/null || true
+        exit 14
+    fi
+    # Clean state: discard the re-recorded files (including the volatile
+    # manifest) so the deployed host's tree matches HEAD exactly.
+    git checkout -- "${RERECORD_FIXTURES_DIR}" 2>/dev/null || true
+    echo "[deploy] fixture re-record gate OK — no contract drift"
 fi
 
 # --- prune old images, keep last N ---
