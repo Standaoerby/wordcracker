@@ -39,10 +39,11 @@
 #      after verify+probe-gate pass, spin up an ephemeral dev-overlay
 #      container and re-run `record_fixtures --skip-heavy`, then
 #      `git diff` the recorded fixtures (manifest excluded — its
-#      elapsed_s/size_bytes are non-deterministic). Any drift means the
-#      committed contract fixtures are stale vs live v1 output: exit
-#      non-zero (>=10), same gate semantics as verify/probe-gate. This is
-#      layer 4 of the stale-fixture defence named in
+#      elapsed_s/size_bytes are non-deterministic). Any drift (or a
+#      recorder timeout/error) is ADVISORY: it prints a loud WARNING and
+#      the deploy continues — the service is already verify+probe green and
+#      live, so this is a fix-forward heads-up, not a rollback trigger. This
+#      is layer 4 of the stale-fixture defence named in
 #      tests/v2/test_v1_contracts.py::FixtureFreshnessGate — it catches
 #      depth>=2 / lazy-import v1 edits that the PR-time AST fingerprint
 #      cannot reach. Heavy full-corpus scans are skipped so the gate
@@ -387,12 +388,19 @@ fi
 # JSON content carries the real drift signal (and is exactly what the
 # AST-fingerprint gate at depth>=2 cannot see).
 #
-# Exit codes (>=10, same "loud failure" band as verify/probe-gate):
-#   13 — recorder run itself failed (container error, timeout, v1 raised)
-#   14 — fixture drift: committed fixtures are stale vs live v1 output
+# ADVISORY gate (does NOT exit/rollback): a re-record failure (timeout or
+# recorder error) or a fixture-drift finding prints a loud WARNING and the
+# deploy continues. Rationale: the service is already verify+probe green and
+# live by this point, so a drift signal is a "fix-forward, re-record soon"
+# heads-up, not a reason to abort a healthy deploy. Crucially, the recorder
+# can hit the deploy's `timeout` wall (rc=124) even on a fully-successful
+# recording (the v1 tools leave a non-daemon chromadb-telemetry thread that
+# hangs interpreter shutdown — the os._exit fix in record_fixtures.py closes
+# this, but the WARN keeps a future regression from ever blocking a deploy).
+# The drift signal keeps its full value as a logged warning.
 RERECORD_FIXTURES_DIR="scripts/v2/contracts/fixtures"
 if [[ "$MODE" == "deploy" ]]; then
-    echo "[deploy] fixture re-record gate: ephemeral dev-overlay container, record_fixtures --skip-heavy (budget ${RERECORD_BUDGET_SECS}s)"
+    echo "[deploy] fixture re-record gate (advisory): ephemeral dev-overlay container, record_fixtures --skip-heavy (budget ${RERECORD_BUDGET_SECS}s)"
     rerecord_rc=0
     WC_IMAGE_TAG="${SHA}" timeout "${RERECORD_BUDGET_SECS}" \
         docker compose -f docker-compose.yml -f docker-compose.dev.yml \
@@ -400,27 +408,25 @@ if [[ "$MODE" == "deploy" ]]; then
         "${PYTHON}" -m scripts.v2.contracts.record_fixtures --skip-heavy \
         || rerecord_rc=$?
     if [[ "$rerecord_rc" -ne 0 ]]; then
-        echo "[deploy] FIXTURE RE-RECORD failed (rc=${rerecord_rc}) — recorder errored or timed out (>${RERECORD_BUDGET_SECS}s)" >&2
+        echo "[deploy] WARN: fixture re-record gate — recorder errored or timed out (rc=${rerecord_rc}, >${RERECORD_BUDGET_SECS}s). ADVISORY: deploy continues (service is already verify+probe green and live)." >&2
         # Restore any partial fixture writes so the working tree stays
         # clean for the NEXT deploy's dirty-check (a left-dirty tracked
         # file would block it).
         git checkout -- "${RERECORD_FIXTURES_DIR}" 2>/dev/null || true
-        exit 13
-    fi
     # git diff over the fixture JSONs, EXCLUDING the volatile manifest.
-    if ! git diff --exit-code -- "${RERECORD_FIXTURES_DIR}" ":(exclude)${RERECORD_FIXTURES_DIR}/_manifest.json"; then
-        echo "[deploy] FIXTURE DRIFT — committed v1 contract fixtures are stale vs live v1 output:" >&2
+    elif ! git diff --exit-code -- "${RERECORD_FIXTURES_DIR}" ":(exclude)${RERECORD_FIXTURES_DIR}/_manifest.json"; then
+        echo "[deploy] WARN: FIXTURE DRIFT — committed v1 contract fixtures look stale vs live v1 output. ADVISORY: deploy continues; re-record soon:" >&2
         git --no-pager diff --stat -- "${RERECORD_FIXTURES_DIR}" ":(exclude)${RERECORD_FIXTURES_DIR}/_manifest.json" >&2
         echo "[deploy]   re-record on this host and commit:" >&2
         echo "[deploy]     docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm gutenberg-lab python -m scripts.v2.contracts.record_fixtures" >&2
         echo "[deploy]     git add ${RERECORD_FIXTURES_DIR} && git commit -m 'chore: re-record v1 fixtures'" >&2
         git checkout -- "${RERECORD_FIXTURES_DIR}" 2>/dev/null || true
-        exit 14
+    else
+        # Clean state: discard the re-recorded files (including the volatile
+        # manifest) so the deployed host's tree matches HEAD exactly.
+        git checkout -- "${RERECORD_FIXTURES_DIR}" 2>/dev/null || true
+        echo "[deploy] fixture re-record gate OK — no contract drift"
     fi
-    # Clean state: discard the re-recorded files (including the volatile
-    # manifest) so the deployed host's tree matches HEAD exactly.
-    git checkout -- "${RERECORD_FIXTURES_DIR}" 2>/dev/null || true
-    echo "[deploy] fixture re-record gate OK — no contract drift"
 fi
 
 # --- prune old images, keep last N ---
