@@ -33,15 +33,15 @@ class AuthorLookupIntent(unittest.TestCase):
         m = int_mod.classify("Покажи список книг у Wodehouse")
         self.assertEqual(m.label, "author_lookup")
 
-    def test_genitive_only_falls_to_clarify_or_llm(self):
-        """«Перечисли произведения Doyle» (no «у») — rule-based path falls
-        to clarify by design (see comment in intent.py); LLM fallback picks
-        it up in production via classify_and_extract."""
+    def test_genitive_only_now_routes_author_lookup(self):
+        """S-R5 E1b (2026-05-31) — REVERSED. «Перечисли произведения Doyle»
+        (genitive surname, no «у») now classifies to author_lookup via the
+        bare-genitive rule guarded by the (?-i:[A-ZА-ЯЁ][a-zа-яё]) proper-noun
+        check. Previously fell to clarify → v4 LLM-planner flake. The guard
+        keeps Q30 «произведения подойдут…» out of author_lookup
+        (see test_intent.py Q30 + E1bAuthorLookupPhrasing below)."""
         m = int_mod.classify("Перечисли произведения Doyle")
-        # author_metadata or clarify are both acceptable — explicit goal is
-        # to NOT fire author_lookup so we don't false-positive on Q30-style
-        # recommendation queries.
-        self.assertNotEqual(m.label, "author_lookup")
+        self.assertEqual(m.label, "author_lookup")
 
     def test_english_what_books_does(self):
         m = int_mod.classify("What books does Doyle have")
