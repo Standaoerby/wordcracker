@@ -621,8 +621,16 @@ def enrich_word(word: str, contexts: list[str] | None = None,
         word=word, lemma=lemma_hint or word, pos=pos_hint or "?",
         contexts=ctx_block, target_lang=target_lang,
     )
+    # Model resolves from env so this utility call rides the same warm
+    # model as planner/critic/rag_v2 (WC_LLM_MODEL=wordcracker:v2 in prod)
+    # instead of cold-loading a second qwen3:14b and contending for VRAM.
+    # wordcracker:v2 bakes an operator persona SYSTEM block; format=json
+    # already pins structure, but we override `system` to a narrow lexical
+    # annotator so the persona can't bleed into field values. (S-P1)
     payload = {
-        "model": "qwen3:14b", "prompt": prompt, "stream": False,
+        "model": os.environ.get("WC_LLM_MODEL", "qwen3:14b"),
+        "system": "You are a lexical annotation engine. Output only JSON.",
+        "prompt": prompt, "stream": False,
         "keep_alive": "5m", "format": "json",
         "options": {"temperature": 0.2}, "think": False,
     }

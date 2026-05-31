@@ -274,8 +274,24 @@ def _maybe_translate(query: str) -> str:
             "Толстой→Tolstoy, Чехов→Chekhov). Output ONLY the translation.\n\n"
             f"Question: {query}\n\nEnglish:"
         )
+        # Model resolves from env so the translate hop rides the same warm
+        # model as the rest of the stack (WC_LLM_MODEL=wordcracker:v2 in
+        # prod) rather than cold-loading a second qwen3:14b. There is no
+        # format=json guard here, so the baked wordcracker:v2 persona is the
+        # real risk — override `system` to a bare translation engine so it
+        # emits the English string only, nothing else. (S-P1)
+        #
+        # keep_alive=-1 (hold), NOT 0 (evict-on-finish): now that this rides
+        # the SHARED warm model, keep_alive=0 would unload wordcracker:v2 the
+        # instant this hop returns, forcing the very next renderer call in the
+        # same request to reload it cold. -1 matches the rest of the v2 stack
+        # (renderer rag_v2.py, critic, llm_planner, llm_intent all use -1) and
+        # just refreshes the idle timer. (S-P1 follow-up)
         resp = requests.post(f"{OLLAMA_HOST}/api/generate", json={
-            "model": "qwen3:14b", "prompt": prompt, "stream": False, "keep_alive": 0,
+            "model": os.environ.get("WC_LLM_MODEL", "qwen3:14b"),
+            "system": "You are a translation engine. Output only the "
+                      "English translation, nothing else.",
+            "prompt": prompt, "stream": False, "keep_alive": -1,
             "options": {"temperature": 0}, "think": False,
         }, timeout=60)
         resp.raise_for_status()
