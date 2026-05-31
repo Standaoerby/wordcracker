@@ -567,34 +567,65 @@ def top_ngrams_by_author(author_regex: str, n: int = 2, top: int = 20,
                                              errors="coerce").fillna(0)
             sel = sel.sort_values("downloads", ascending=False).head(max_books)
 
+        # S-R5 coldstart P6 (2026-05-31) — parallelise the per-book token
+        # read. Warm this scan is 11s (page cache hot); COLD (post
+        # --force-recreate, empty OS page cache) it ran 180s and timed the
+        # probe out. The 169s gap is pure disk-read latency on ~6000 files
+        # ×~500KB, done SERIALLY. word_collocates already threads exactly
+        # this loop (rag_tools.py ~1091) — file open + read() releases the
+        # GIL, so I/O overlaps across workers; cold drops to ~I/O_wall/8.
+        # Mirror it here. NOT a warmup (a warmup would re-run the scan and
+        # race the probe). Output is byte-identical: ThreadPoolExecutor.map
+        # yields in INPUT order, so per-book local counters merge in the
+        # same order as the serial iterrows() walk → identical Counter
+        # insertion order → identical most_common() tie-breaking. Cap stays.
+        def _scan_one(pg: str) -> tuple[Counter, int, bool]:
+            local: Counter = Counter()
+            local_total = 0
+            f = _tokens_path(pg)
+            if not f.exists():
+                return local, 0, False
+            # file present → counts as "used" even if shorter than n
+            with open(f, encoding="utf-8") as fh:
+                toks = [t.strip().lower() for t in fh if t.strip()]
+            if len(toks) >= n:
+                if n == 1:
+                    grams = (t for t in toks)
+                elif n == 2:
+                    grams = zip(toks, toks[1:])
+                else:
+                    grams = zip(toks, toks[1:], toks[2:])
+                for g in grams:
+                    pieces = (g,) if n == 1 else g
+                    if not all(_is_clean_token(p) for p in pieces):
+                        continue
+                    if all(p in STOPWORDS for p in pieces):
+                        continue
+                    local[" ".join(pieces)] += 1
+                    local_total += 1
+            return local, local_total, True
+
         counter: Counter = Counter()
         used = 0
         total_ngrams = 0
-        for pid, row in sel.iterrows():
-            pg = row["id"]
-            f = _tokens_path(pg)
-            if not f.exists():
-                continue
-            used += 1
-            with open(f, encoding="utf-8") as fh:
-                toks = [t.strip().lower() for t in fh if t.strip()]
-            if len(toks) < n:
-                continue
-            if n == 1:
-                grams = (t for t in toks)
-            elif n == 2:
-                grams = zip(toks, toks[1:])
-            else:
-                grams = zip(toks, toks[1:], toks[2:])
-            for g in grams:
-                pieces = (g,) if n == 1 else g
-                if not all(_is_clean_token(p) for p in pieces):
-                    continue
-                if all(p in STOPWORDS for p in pieces):
-                    continue
-                key = " ".join(pieces)
-                counter[key] += 1
-                total_ngrams += 1
+        book_ids = list(sel["id"])
+
+        def _merge(local: Counter, local_total: int, was_used: bool) -> None:
+            nonlocal used, total_ngrams
+            if was_used:
+                used += 1
+            counter.update(local)
+            total_ngrams += local_total
+
+        if len(book_ids) > 16:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                # .map preserves input order → deterministic merge.
+                for local, local_total, was_used in ex.map(_scan_one, book_ids):
+                    _merge(local, local_total, was_used)
+        else:
+            for pg in book_ids:
+                _merge(*_scan_one(pg))
 
         if pos_filter:
             pos_filter = [p.upper() for p in pos_filter]

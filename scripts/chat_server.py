@@ -1262,6 +1262,34 @@ def _warmup():
     except Exception as e:
         print(f"[chat] v2 dispatch warmup failed (non-fatal): "
               f"{type(e).__name__}: {e}", file=_sys.stderr, flush=True)
+    # S-R5 coldstart P11 (2026-05-31) — warm the BGE cross-encoder reranker.
+    # The chromadb+embedder warm above covers hybrid_search's BI-encoder,
+    # but find_book_by_topic's planner path (book_similar / «что почитать
+    # после X») reranks with BAAI/bge-reranker-base, which lazy-loads
+    # (~440 MB → RAM + torch init) on its FIRST compute(). The model is
+    # baked into the image (Dockerfile), so this is a disk-load, not a
+    # download — a few seconds, well inside the 60s /health wait budget
+    # (predeploy_probe_suite.wait_for_health). _warmup runs BEFORE
+    # serve_forever, so loading here means the deploy probe's first
+    # find_book_by_topic call sees the reranker warm instead of paying the
+    # cold load inside the request — P11 was 128s cold (latency_under_s=60
+    # → FAIL) vs 7.7s warm. One tiny representative pair forces _load() +
+    # predict (warms torch kernels too) without depending on corpus hits.
+    try:
+        from scripts.v2.scoring import REGISTRY, ScoringQuery
+        t = _time.perf_counter()
+        rk = REGISTRY.get("bge_reranker")
+        if rk is not None:
+            rk.compute(ScoringQuery(
+                kind="retrieval_rerank",
+                target="warmup probe",
+                candidates=[("warm", "a short representative passage for warmup")],
+            ))
+        print(f"[chat] BGE reranker warmed in {_time.perf_counter()-t:.1f}s",
+              file=_sys.stderr, flush=True)
+    except Exception as e:
+        print(f"[chat] BGE reranker warmup failed (non-fatal): "
+              f"{type(e).__name__}: {e}", file=_sys.stderr, flush=True)
 
 
 def main():

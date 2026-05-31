@@ -51,6 +51,24 @@ RUN pip install --no-cache-dir \
         https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl \
         https://github.com/explosion/spacy-models/releases/download/en_core_web_trf-3.8.0/en_core_web_trf-3.8.0-py3-none-any.whl
 
+# S-R5 coldstart P11 (2026-05-31): bake the BGE cross-encoder reranker
+# (BAAI/bge-reranker-base, ~440 MB) into the image. find_book_by_topic's
+# planner path (book_similar / «что почитать после X») reranks with this
+# model; it lazy-loads via CrossEncoder on first compute()
+# (scripts/v2/scoring/__init__.py). The HF cache otherwise lives in the
+# container's WRITABLE layer — docker-compose.yml app-volumes mounts only
+# corpus/state, no HF cache volume — so a deploy with `--force-recreate`
+# WIPES it and the 440 MB model RE-DOWNLOADS on the first rerank. That is
+# the P11 cold cost: «что почитать после …» ran 128s cold (probe rule
+# latency_under_s=60 → FAIL) vs 7.7s warm. Baking moves the download to
+# build time (deterministic, captured in the layer, survives
+# --force-recreate). If the download fails the BUILD fails — so a shipped
+# image always carries the model, and the runtime warmup (chat_server
+# _warmup) is then a fast disk-load, never a download. Build/runtime both
+# run as root → cache at /root/.cache/huggingface. Placed before the code
+# COPY so a SHA bump doesn't invalidate this heavy layer.
+RUN python -c "from sentence_transformers import CrossEncoder; CrossEncoder('BAAI/bge-reranker-base')"
+
 WORKDIR /workspace
 
 # D-SB1-2: bake the production code tree into the image. Dev (bind-mount
