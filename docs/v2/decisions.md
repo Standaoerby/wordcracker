@@ -6,6 +6,80 @@
 
 ---
 
+## 2026-05-30 — S-R5b: E1 author_lookup dominant-resolve + book-list render
+
+Follow-up to S-R5's E1 data fix. On live prod 2.6.25 «какие книги у
+Уэллса» still returned a 5-way clarify list (intent=author_lookup 0.92,
+tool_calls=[]) — books never shown. Two-layer root, both fixed, both
+scoped to the author_lookup intent (NOT global). Version → **2.6.26**.
+
+### L1 — RESOLVE (planner-scoped, `_plan_author_lookup`)
+
+The v6 resolver clarifies a bare «Уэллса» by design: Wells H.G. is
+88.9% of the surname's downloads / 9.4× over the runner-up Basil —
+just under the global dominance floor (90% / 10×, see
+`entity_resolver_v6/decision.py` DOMINANCE_SHARE/RATIO). That clarify is
+correct for the resolver and for the other intents (TZ §W-1 line 51 /
+E13). The bug was that author_lookup — the «show me the books» intent —
+inherited it.
+
+Fix: `_dominant_author_lookup_regex(e)` runs ONLY inside
+`_plan_author_lookup`. It reads the already-collected
+`author_clarify_candidates` (no re-run of the resolver) and resolves to
+the download leader when it clears a *lowered* threshold (≥60% share OR
+≥3× the runner-up). Wells (88.9% / 9.4×) clears it; a genuinely close
+field (≈equal downloads) does not → still clarifies. The resolved regex
+is `^` + `re.escape(name)` so a canonical with metachars («Wells, H. G.
+(Herbert George)») selects its own books via `_select_books`' contains()
+and can't leak into a sibling Wells.
+
+Scope guard: `_plan_author_metadata` / `_plan_author_vocab` are
+untouched — bare «Уэллса» under those intents still clarifies. The v6
+resolver and its tests (`resolve_v6("какие книги у Уэллса")` → CLARIFY)
+are unchanged; the fix is strictly downstream of the resolver.
+
+### L2 — RENDER (planner `render_notes`, NOT the tool wrapper)
+
+Even resolved, author_lookup routes to the `author_metadata` tool. The
+**live** renderer is the LLM path (`rag_v2._llm_render`), which already
+receives the tool's `data` incl. the download-ranked `sample_titles`
+(the S-R5 data fix) — but had no directive to *enumerate* them, so the
+answer could still read like a bare bio card.
+
+Fix: `_plan_author_lookup` now stamps a `plan.render_notes` instruction
+telling the renderer to list the books from `sample_titles` + state the
+`books_matched` count. render_notes are surfaced into the renderer's
+instruction list by `_llm_render` (rag_v2:735).
+
+**Why not the AUTHOR_METADATA view?** Two reasons: (1) the deterministic
+`template_executor.render_view` has NO production caller — it is not on
+the live answer path; (2) the view is built inside the `author_metadata`
+tool wrapper, which is AST-fingerprinted for the v1↔v2 contract fixtures
+(ADR-F1/F2). Editing the wrapper would flip its fingerprint and force a
+prod re-record of the `author_metadata` golden — for a render-only change
+that doesn't touch v1's return. The render_note path achieves L2 with
+zero wrapper edits → **no re-record, CI green immediately**.
+
+### Tests
+`tests/v2/test_sr5b_author_lookup_dominant.py` — L1 positives (Уэллса RU
+stem + hand-built candidates + order-robustness), L1 negatives
+(close-prominence field still clarifies; all-zero downloads still
+clarifies), scope guards (metadata/vocab intents still clarify — E13
+non-regression), L2 render_note plumbing.
+`tests/v2/test_ambiguous_surname_clarify.py::AuthorLookupClarifies` —
+the one contradicting pin updated: «какие книги у Wells» now RESOLVES to
+the dominant (was: clarify). The metadata/vocab clarify pins in the same
+file are deliberately left green (scope proof).
+
+### No v1 (rag_tools) edits → re-record NOT needed
+Nothing in `scripts/rag_tools.py` or any fingerprinted wrapper changed
+(verified: `author_metadata.py` / `view_builders.py` /
+`template_executor.py` byte-identical to main). FixtureFreshnessGate
+stays green on CI 3.11. (Local Py3.13 flags all 31 fixtures — known
+ast.dump-across-minors artifact, not a regression.)
+
+---
+
 ## 2026-05-30 — S-R5: live domain probe-FAIL triage (E1/E6/E8/E9/E11)
 
 Probe-gate on deploy `408874e` returned 7/12; FAIL = E1/E6/E8/E9/E11.

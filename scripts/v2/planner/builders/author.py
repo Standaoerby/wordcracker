@@ -363,6 +363,59 @@ def _plan_author_influences(e: Entities) -> QueryPlan:
     )
 
 
+# S-R5b (2026-05-30) — author_lookup-scoped dominant resolve.
+# «какие книги у Уэллса» asks to SEE the books; bouncing it to a 5-way
+# clarify when one Wells (H.G., 88.9% of the surname's downloads / 9.4×
+# over the runner-up Basil) obviously dominates is the wrong UX *for
+# this intent*. The global v6 resolver still clarifies a bare «Уэллса»
+# (E13 / TZ §W-1 line 51 — unchanged), and so do author_metadata /
+# author_vocab; this lowered, intent-scoped threshold fires ONLY inside
+# _plan_author_lookup. A genuinely close field (≈equal downloads) still
+# clarifies — see negative guard test.
+#
+# Thresholds mirror the v6 dominant-homonym shape (share OR ratio) but
+# lowered from the global 90% / 10× so Wells (88.9% / 9.4×, just under)
+# resolves. Wells sits above BOTH lowered floors.
+AUTHOR_LOOKUP_DOMINANCE_SHARE = 0.60
+AUTHOR_LOOKUP_DOMINANCE_RATIO = 3.0
+
+
+def _dominant_author_lookup_regex(e: Entities) -> str | None:
+    """Return `^<re.escaped canonical>` of the dominant author when an
+    ambiguous surname has a clear download leader, else None.
+
+    Scoped to author_lookup. Operates on the already-collected
+    `author_clarify_candidates` (each `{name, downloads, books}`,
+    `downloads` = v6 prominence) — does NOT re-run the resolver, so the
+    global clarify behaviour other intents rely on is untouched.
+
+    Robust to candidate ordering: picks the max-downloads candidate
+    rather than assuming index 0. The regex is `^` + re.escape(name) so
+    a canonical carrying regex metachars («Wells, H. G. (Herbert
+    George)») matches its own books via `_select_books`' contains() and
+    does NOT leak into a sibling Wells.
+    """
+    import re as _re
+    cands = e.author_clarify_candidates or []
+    if len(cands) < 2:
+        return None
+    dls = [max(int(c.get("downloads", 0) or 0), 0) for c in cands]
+    top_idx = max(range(len(cands)), key=lambda i: dls[i])
+    top_dl = dls[top_idx]
+    if top_dl <= 0:
+        return None  # no popularity signal — can't call a dominant; clarify
+    total = sum(dls)
+    runner_dl = max(dl for i, dl in enumerate(dls) if i != top_idx)
+    top_share = top_dl / total if total > 0 else 0.0
+    ratio = (top_dl / runner_dl) if runner_dl > 0 else 999.0
+    if (top_share >= AUTHOR_LOOKUP_DOMINANCE_SHARE
+            or ratio >= AUTHOR_LOOKUP_DOMINANCE_RATIO):
+        name = (cands[top_idx].get("name") or "").strip()
+        if name:
+            return "^" + _re.escape(name)
+    return None
+
+
 def _plan_author_lookup(e: Entities) -> QueryPlan:
     """«Какие книги у X» / «list books by X» — reuses author_metadata which
     already returns `sample_titles` (up to 10) + `books_matched` count.
@@ -370,14 +423,41 @@ def _plan_author_lookup(e: Entities) -> QueryPlan:
     it bounded to actual data."""
     if not e.author_regex:
         return _need_author(e)
-    ambiguous = _ambiguous_author_clarify(e)
-    if ambiguous is not None:
-        return ambiguous
+    # S-R5b — for THIS intent, a clearly dominant homonym resolves to the
+    # leader (and lists the books) instead of clarifying. Other intents
+    # keep the bare-surname clarify (E13 / W-1 untouched).
+    dominant = _dominant_author_lookup_regex(e)
+    if dominant is not None:
+        from dataclasses import replace
+        e = replace(e, author_regex=dominant, author_clarify_candidates=[])
+    else:
+        ambiguous = _ambiguous_author_clarify(e)
+        if ambiguous is not None:
+            return ambiguous
     return QueryPlan(
         intent="author_lookup", entities=e,
         steps=[PlanStep(tool="author_metadata",
                         args={"author_regex": e.author_regex})],
         expected_cost="cheap",
+        # S-R5b L2 (E1 render) — the live renderer is the LLM path
+        # (_llm_render), which receives author_metadata's `data`
+        # (incl. the download-ranked `sample_titles` from the S-R5 data
+        # fix) but NOT a directive to enumerate them — so a resolved
+        # «какие книги у Уэллса» could still come back as a bare bio
+        # card. This plan-level render_note instructs the renderer to
+        # list the books with their titles. It rides plan.render_notes
+        # → _llm_render render_instructions (rag_v2), so it needs no
+        # change to the fingerprinted author_metadata wrapper (no
+        # fixture re-record). The deterministic AUTHOR_METADATA view is
+        # not on the live answer path (template_executor.render_view has
+        # no production caller), so it is intentionally left untouched.
+        render_notes=[
+            "Это запрос «какие книги у автора» (author_lookup). Перечисли "
+            "конкретные книги автора СПИСКОМ, взяв названия из "
+            "tool_results[*].data.sample_titles (они уже отсортированы по "
+            "downloads — самые каноничные сверху). Укажи общее число книг "
+            "из books_matched. НЕ ограничивайся биокарточкой с годами жизни."
+        ],
         explain=f"author_lookup → author_metadata({e.author_regex}) "
                 "for sample_titles + books_matched",
     )
