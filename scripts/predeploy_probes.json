@@ -95,7 +95,7 @@
       "question": "20 слов уровня B2 из \"Pride and Prejudice\"",
       "pass_when": [
         {"kind": "intent_not_in", "values": ["clarify"]},
-        {"kind": "regex_no_match", "field": "answer", "pattern": "(?i)(0 слов|не найдено|нет слов|пусто|empty|no words)", "reason": "learning_words must NOT return 0 — the export chain depends on this"},
+        {"kind": "regex_no_match", "field": "answer", "pattern": "(?i)((?<!\\d)0 слов|не найдено|нет слов|пусто|empty|no words)", "reason": "learning_words must NOT return 0 — the export chain depends on this. S-R5-E8: left lookbehind (?<!\\d) so the «0 слов» alternative does NOT match inside «20 слов»/«100 слов» (the question itself asks for «20 слов» — bare `0 слов` was a probe false-positive, learning pipeline is healthy)."},
         {"kind": "regex_match", "field": "answer", "pattern": "(?i)(\\b[A-Za-z]{4,}\\b.*\\b[A-Za-z]{4,}\\b.*\\b[A-Za-z]{4,}\\b)", "reason": "answer must contain at least 3 English word tokens (the word list)"}
       ],
       "notes": "Source PASS: ~20 реальных слов уровня B2, годных к экспорту. FAIL: 0 слов → экспорт невозможен. This is the highest-leverage probe — P0 in the source recommendations."
@@ -130,9 +130,9 @@
       "pass_when": [
         {"kind": "intent_not_in", "values": ["clarify"]},
         {"kind": "latency_under_s", "value": 60.0, "reason": "source acceptance: < ~60s; 150–330s observed is FAIL"},
-        {"kind": "tool_called", "name": "book_similar", "reason": "routing target: book_similar (topic-enriched)"}
+        {"kind": "tool_called", "name": "find_book_by_topic", "reason": "S-R5-E11: book_similar — это интент, не тул. _plan_book_similar намеренно диспатчит зарегистрированный тул find_book_by_topic (topic-enriched semantic search; Sprint18 BGE rerank / W-13 latency budget / B8 enrichment). Матчер сверяет имена исполненных tool_calls[].name, поэтому исходное 'book_similar' не могло пройти никогда — оно путало имя интента с именем тула."}
       ],
-      "notes": "Source PASS: завершается за < ~60s; routing = book_similar (topic-enriched). FAIL: 150–330s латентность. Probe-specific 60s overrides the universal 180s guard."
+      "notes": "Source PASS: завершается за < ~60s; routing target = find_book_by_topic (это и есть «book_similar (topic-enriched)» из источника: book_similar — интент, исполняющий его тул — find_book_by_topic). FAIL: 150–330s латентность. Probe-specific 60s overrides the universal 180s guard."
     },
     {
       "id": "P12",

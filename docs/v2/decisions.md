@@ -6,6 +6,75 @@
 
 ---
 
+## 2026-05-31 — S-R5-E8: P8 «0 слов» guard — probe false-positive (missing left boundary)
+
+Re-opens and resolves E8. The 2026-05-30 S-R5 triage disproved the
+"band-pass empty" root and deferred E8 as possibly-correct graceful
+degradation. The real defect is in the **probe**, not the pipeline: P8
+asks for «**20** слов уровня B2 из Pride and Prejudice», and its
+`regex_no_match` empty-result guard had the alternative `0 слов` with
+**no left boundary**. `re.search` (predeploy_probe_suite.py:135) finds
+«0 слов» as a substring of «**2**0 слов» / «10**0** слов», so a healthy
+answer echoing the requested count tripped the guard → false FAIL. The
+learning pipeline was fine all along.
+
+**Fix:** `0 слов` → `(?<!\d)0 слов` in P8's `regex_no_match` pattern.
+A standalone «0 слов» (real empty) and the other markers (`не найдено`,
+`нет слов`, `пусто`, `empty`, `no words`) still fire. New gate
+`P8EmptyGuardHasLeftBoundary` in `test_w18_predeploy_probe_suite.py`
+runs the SHIPPED P8 rule through `_match_one`: count-echo answers
+(«20 слов», «100 слов») pass, standalone «0 слов» still fails. Fails on
+the pre-fix pattern. v2-only (probe + test); no re-record. Ships in
+2.6.27 alongside the E11 routing fix.
+
+---
+
+## 2026-05-31 — S-R5-E11: book_similar routing — probe named an intent, not a tool (Path A)
+
+Closes the **routing** half of E11 (the latency half was already
+acceptable — warm 7.5s, deferred per the perf-sprint note in the
+2026-05-30 S-R5 section). The S-R5 triage flagged E11 as "wrong tool":
+classifier picks `book_similar` (0.93) but the probe `tool_called:
+book_similar` fails. That note suggested "add a `book_similar` tool (or
+alias) whose name matches the routing target." **We rejected that path.**
+
+**Diagnosis (by fact in code, not guess):**
+- `book_similar` is an **intent label, not a tool**. No tool is
+  registered under that name — `scripts/v2/tools/books/` exposes
+  `find_book`, `find_book_by_topic`, `affinity_by_book`,
+  `book_readability`, `book_archaic_words`, `top_books_by_*`,
+  `book_emotion_profile`. There is no `book_similar` predecessor that
+  `find_book_by_topic` displaced "by mistake."
+- [`_plan_book_similar`](../../scripts/v2/planner/builders/book.py:407)
+  dispatches `find_book_by_topic` **deliberately**, with multi-sprint
+  rationale in-code: Sprint 18 (BGE rerank over noisy bi-encoder), W-13
+  (per_retriever=30 / top=8 latency budget), B8 (topic enrichment
+  «books with similar themes and style to X»). The existing suite
+  (`test_book_similar_routing.py`, `test_e11_book_similar_timeout.py`)
+  codifies this as the intended design.
+- The probe matcher
+  ([predeploy_probe_suite.py:156](../../scripts/predeploy_probe_suite.py:156))
+  checks executed `tool_calls[].name`. The executed tool is and always
+  will be `find_book_by_topic`, so `tool_called: book_similar` was
+  **dead-on-arrival** — it conflated the intent name with a tool name.
+  The probe's own note said "routing = book_similar (topic-enriched)";
+  "topic-enriched" *is* `find_book_by_topic`.
+
+**Decision — Path A.** The probe was stale. Fix the probe, not the
+plan. Adding a `book_similar` tool/alias purely to match a probe string
+is exactly the patch-trash CLAUDE.md forbids (R6 + anti-patterns) and
+would require touching the registry + a re-record — neither warranted.
+
+**Change:** P11 `tool_called` → `find_book_by_topic` (with rationale in
+`reason`/`notes`). Latency rule (`<60s`) untouched. New contract/negative
+gate `ToolCalledNamesAreRegistered` in `test_w18_predeploy_probe_suite.py`
+asserts every probe `tool_called`/`tool_not_called` name is a registered
+tool (and P11 specifically routes to `find_book_by_topic`) — fails on the
+pre-fix config (`book_similar` ∉ REGISTRY), passes after. v2-only; no
+re-record. Bump 2.6.27.
+
+---
+
 ## 2026-05-30 — S-R5b: E1 author_lookup dominant-resolve + book-list render
 
 Follow-up to S-R5's E1 data fix. On live prod 2.6.25 «какие книги у
