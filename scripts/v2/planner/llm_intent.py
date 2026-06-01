@@ -62,7 +62,9 @@ LLM_INTENT_ENABLED = True
 LLM_INTENT_MODEL = os.environ.get("WC_LLM_INTENT_MODEL",
                                   os.environ.get("WC_LLM_MODEL", "wordcracker:v2"))
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://ollama:11434")
-LLM_INTENT_TIMEOUT = float(os.environ.get("WC_LLM_INTENT_TIMEOUT_S", "8"))
+# Default 20s (was 8s): after a num_ctx-aligned runner reload the ~3k-token
+# prefill of the full intent prompt must not blow the timeout. (S-P2)
+LLM_INTENT_TIMEOUT = float(os.environ.get("WC_LLM_INTENT_TIMEOUT_S", "20"))
 
 _CACHE: "OrderedDict[str, str]" = OrderedDict()
 _CACHE_MAX = 256
@@ -409,6 +411,8 @@ def classify_and_extract(text: str, history: list[dict] | None = None
                     )
                 break
 
+    from scripts.v2.token_budget import TokenBudget
+    _budget = TokenBudget(model=LLM_INTENT_MODEL)
     payload = {
         "model": LLM_INTENT_MODEL,
         "messages": [
@@ -420,8 +424,16 @@ def classify_and_extract(text: str, history: list[dict] | None = None
         # Available on recent Ollama; if older runtime ignores it, our
         # _parse_full_json still scrapes a JSON block out of the text.
         "format": "json",
-        "options": {"temperature": 0.0, "num_predict": 200},
+        # num_ctx MUST match the renderer's TokenBudget(model).ctx so the
+        # shared wordcracker:v2 runner isn't rebuilt on a ctx flip (S-P2).
+        "options": {
+            "temperature": 0.0, "num_predict": 200,
+            "num_ctx": _budget.ctx,
+        },
         "keep_alive": -1,
+        # think:false matches the renderer (rag_v2:829) — no hidden reasoning
+        # turn that would add a second prefill on the shared runner. (S-P2)
+        "think": False,
     }
     t0 = time.perf_counter()
     try:

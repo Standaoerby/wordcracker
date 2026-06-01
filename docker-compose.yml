@@ -64,7 +64,10 @@ x-app-volumes: &app-volumes
 
 services:
   ollama:
-    image: ollama/ollama:latest
+    # Pinned for reproducibility (S-P2): the num_ctx-thrash root cause was
+    # diagnosed on the 0.24 runner (one KvSize per runner). `latest` could
+    # silently change KvSize/reload semantics under us.
+    image: ollama/ollama:0.24.0
     container_name: ollama
     ports:
       - "11434:11434"

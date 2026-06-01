@@ -23,6 +23,18 @@ from pathlib import Path
 
 import pandas as pd
 
+# Single source of truth for the Ollama context window. The renderer
+# (rag_v2), critic, planner and llm_intent all size num_ctx via
+# TokenBudget(model).ctx == get_model_ctx(model); reusing the SAME helper
+# here guarantees enrich/translate send a byte-identical num_ctx so Ollama
+# never rebuilds its single KvSize runner on an 8192↔16384 flip (S-P2).
+# try/except covers both import styles (loaded as `scripts.rag_tools` and,
+# in legacy paths, bare `rag_tools` with scripts/ on sys.path).
+try:
+    from scripts.v2.token_budget import get_model_ctx
+except ImportError:  # pragma: no cover — bare-name fallback
+    from v2.token_budget import get_model_ctx
+
 # ---------- paths ----------
 SPGC_METADATA   = Path("/workspace/spgc/SPGC-metadata-2018-07-18.csv")
 SPGC_COUNTS_DIR = Path("/workspace/spgc/SPGC-counts-2018-07-18")
@@ -287,12 +299,16 @@ def _maybe_translate(query: str) -> str:
         # same request to reload it cold. -1 matches the rest of the v2 stack
         # (renderer rag_v2.py, critic, llm_planner, llm_intent all use -1) and
         # just refreshes the idle timer. (S-P1 follow-up)
+        _model = os.environ.get("WC_LLM_MODEL", "qwen3:14b")
         resp = requests.post(f"{OLLAMA_HOST}/api/generate", json={
-            "model": os.environ.get("WC_LLM_MODEL", "qwen3:14b"),
+            "model": _model,
             "system": "You are a translation engine. Output only the "
                       "English translation, nothing else.",
             "prompt": prompt, "stream": False, "keep_alive": -1,
-            "options": {"temperature": 0}, "think": False,
+            # num_ctx MUST match the renderer's TokenBudget(model).ctx so the
+            # shared wordcracker:v2 runner isn't rebuilt on a ctx flip (S-P2).
+            "options": {"temperature": 0, "num_ctx": get_model_ctx(_model)},
+            "think": False,
         }, timeout=60)
         resp.raise_for_status()
         translated = resp.json().get("response", "").strip().strip('"').strip()
