@@ -74,6 +74,29 @@ def _serialize_safely(obj: object) -> object:
     return str(obj)
 
 
+# S-P2c (#2): keys carrying per-call wall-clock that make the fixture BODY
+# non-deterministic — every re-record churns them, drowning real drift in noise
+# (and tripping the deploy F2-RERECORD diff gate on a timing wobble, not a
+# contract change). The real timing is preserved in _manifest.json (the
+# recorder's own `elapsed_s` per result, written below). _elapsed_s is OPTIONAL
+# in every schema (V1Schema is total=False; not in any __required__) and no
+# wrapper reads it, so dropping it from the body keeps RecordedFixtureReplay
+# green with zero schema / return-shape / fingerprint change.
+_VOLATILE_BODY_KEYS = ("_elapsed_s",)
+
+
+def _strip_volatile_body(raw: object) -> object:
+    """Return `raw` without the volatile timing keys at the top level.
+
+    Only the top level is stripped — that is where v1 tools attach
+    `_elapsed_s` (mirrors the schema TypedDicts, which declare it at the
+    top level). Non-dict outputs (list-returning tools) pass through.
+    """
+    if isinstance(raw, dict):
+        return {k: v for k, v in raw.items() if k not in _VOLATILE_BODY_KEYS}
+    return raw
+
+
 def _record_one(v1_qualname: str, args: dict, fixtures_dir: Path) -> dict:
     """Record one binding. Returns a manifest entry summarising the
     outcome. Writes the fixture JSON (success branch) or skips the
@@ -136,7 +159,7 @@ def _record_one(v1_qualname: str, args: dict, fixtures_dir: Path) -> dict:
     out_path = fixtures_dir / f"{v1_qualname}.json"
     try:
         with open(out_path, "w", encoding="utf-8") as fh:
-            json.dump(raw, fh, default=_serialize_safely,
+            json.dump(_strip_volatile_body(raw), fh, default=_serialize_safely,
                       indent=2, ensure_ascii=False, sort_keys=True)
     except Exception as e:
         return {

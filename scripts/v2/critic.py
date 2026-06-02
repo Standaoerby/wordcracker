@@ -233,6 +233,11 @@ def review(answer: str, tool_results_summary: list[dict], *,
         return CriticVerdict.trust()
 
     body = resp.json() or {}
+    try:
+        from scripts.v2.observability import log_llm_latency
+        log_llm_latency("critic", model, budget.ctx, body)
+    except Exception:
+        pass
     content = (body.get("message") or {}).get("content", "")
     # Sprint 17 — surface Ollama prompt/eval token counts for the admin
     # dashboard. Even when the verdict parses as trust, we keep the

@@ -368,6 +368,12 @@ def _call_ollama(user_msg: str) -> str:
                            timeout=LLM_PLANNER_TIMEOUT)
         r.raise_for_status()
         resp = r.json()
+        try:
+            from scripts.v2.observability import log_llm_latency
+            log_llm_latency("llm_planner", payload.get("model"),
+                            payload.get("options", {}).get("num_ctx"), resp)
+        except Exception:
+            pass
         return ((resp.get("message") or {}).get("content") or "").strip()
     except Exception as e:
         log.warning("llm_planner Ollama call failed: %s", e)

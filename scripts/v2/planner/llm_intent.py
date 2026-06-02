@@ -447,6 +447,12 @@ def classify_and_extract(text: str, history: list[dict] | None = None
                           timeout=LLM_INTENT_TIMEOUT)
         r.raise_for_status()
         resp = r.json()
+        try:
+            from scripts.v2.observability import log_llm_latency
+            log_llm_latency("llm_intent", payload.get("model"),
+                            payload.get("options", {}).get("num_ctx"), resp)
+        except Exception:
+            pass
         content = ((resp.get("message") or {}).get("content") or "").strip()
     except Exception as e:
         log.warning("llm_intent classify_and_extract failed: %s", e)
