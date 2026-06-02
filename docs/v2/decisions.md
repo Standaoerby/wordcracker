@@ -6,6 +6,84 @@
 
 ---
 
+## 2026-06-03 — S-P2c: LLM latency log + fixture determinism + warmup model-only trim
+
+Ships in **2.6.40** (branch `s-p2c-fixture-determinism`, off the merged S-B8
+`main`). Closes the loop on the S-B8 ADR's forward-references: S-B8 made the
+heavy-model loads the explicit `/health.ready` definition; **S-P2c is the trim
+those references anticipated** — it removes the per-tool *result-warming*
+dead-weight WITHOUT touching the model loads.
+
+### #1 — structured per-call LLM latency (`log_llm_latency`)
+
+`scripts/v2/observability.py` gains `log_llm_latency(tool, model, num_ctx, body)`,
+emitting one greppable stderr line per ollama call:
+
+    [llm] tool=renderer model=wordcracker:v2 num_ctx=8192 load_ms=1234 \
+          eval_count=512 prompt_eval=2048 total_ms=8765
+
+`load_duration`/`eval_count`/… are read straight from the ollama response body
+(ns → ms). Wired at **all** generate/chat sites — renderer (`rag_v2`), critic,
+`llm_intent` (the live `classify_and_extract`; the dead `classify_with_llm` is
+skipped per R8), `llm_planner`, `translate` (`rag_tools`), `enrich_word`
+(`learning_tools`), the v1 agent loop (`rag_query`), and the warmup touch
+(`chat_server`). Guarded local import; the helper is internally exception-safe
+so observability can never take down the request path.
+
+### #2 — fixture-body determinism (`_elapsed_s` out of the body)
+
+`record_fixtures` strips `_VOLATILE_BODY_KEYS = ("_elapsed_s",)` from the fixture
+**body** at write time. Every re-record used to churn `_elapsed_s` with a fresh
+wall-clock value, drowning real contract drift in noise and tripping the deploy
+F2-RERECORD diff gate on a timing wobble. Safe by construction: `_elapsed_s` is
+**optional** in every schema (`V1Schema` is `total=False`; it is in no
+`__required__`, and `assert_matches_schema` only checks `__required__`) and no
+wrapper reads it, so `RecordedFixtureReplay` stays green with zero schema /
+return-shape change. The real timing already lives in `_manifest.json` (the
+recorder's own `elapsed_s`). The 5 fixtures that carried it are stripped in-PR so
+the upcoming re-record is itself a zero-noise diff. New gate
+`FixtureBodyDeterminism` blocks a creep-back.
+
+### #3 — deploy.sh F2-RERECORD budget 600 → 900s
+
+The wall-clock backstop is raised so a genuinely slow-but-progressing re-record
+(cold corpus + contended host) is detected as **real drift on completion**
+rather than guillotined as a false timeout.
+
+### #4 — warmup model-only trim (readiness preserved)
+
+The S-R5 cold-start fix warmed P7/P8 by dispatching the FULL tools, which also
+computed+cached a result — that compute is the dead-weight довесок. Per the S-B8
+ADR the model loads ARE the readiness definition, so:
+
+* **CUT** the pure result-cache dispatches: `corpus_overview`,
+  `top_authors_by`×3, `author_metadata` (no model — pure parquet/result cache).
+* **REPLACE** the spaCy/ollama-loading dispatches (`learning_words`,
+  `hybrid_search`, `enrich_word`, `word_etymology`) with **model-only touches**:
+  `spacy.load("en_core_web_sm")` and a 1-token ollama `/api/generate` at
+  `keep_alive=-1` and `num_ctx=get_model_ctx(model)` (the S-P2 ctx-thrash guard —
+  a wrong num_ctx would rebuild the shared runner on the first real call).
+* **KEEP** the already-separate model warms: chroma+embedder (`col.query`) and
+  the BGE reranker (`rk.compute`).
+
+`test_warmup_does_model_only_touches` (renamed from `test_warmup_drives_probe_paths`)
+pins it: warmup loads spaCy + ollama and dispatches **no** tool. **Acceptance
+guard:** the cold deploy-gate must stay 12/12 after the trim — if P7/P8 regress, a
+model-only touch missed its path; the warmup-timing lines confirm the
+cache-dispatches are gone.
+
+### Re-record coupling (expected F2 red until done)
+
+#1 instruments `_maybe_translate` and `enrich_word`, which are **depth-1 callees**
+of the stamped bindings `semantic_search` / `find_book` (`rag_tools`) and
+`book_archaic_words` (`learning_tools`). Since `ast_fingerprint` includes depth-1
+callees, those three fingerprints shift → `FixtureFreshnessGate` is red on CI
+until a prod `record_fixtures` re-stamps them (and re-stamps `python_minor`). This
+is the documented F2 flow (D-SF2-5 bootstrap-red), not a defect — the re-record +
+`_manifest.json`/fixtures commit on this branch turns it green.
+
+---
+
 ## 2026-06-02 — S-B8: probe-gate teeth + explicit `/health.ready` (async warmup)
 
 *(Sprint label **S-B8** = this readiness/teeth work. **S-P2c** is the separate, later step that trims the per-tool warmup dead-weight — referenced below as the thing the readiness gate must survive; the result-warming довесок it cuts shipped in 2.6.31 / `b3219c9`.)*
