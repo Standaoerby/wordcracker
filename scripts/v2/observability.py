@@ -60,6 +60,45 @@ def _today_log_path() -> Path:
     return LOG_DIR / f"queries-{d}.jsonl"
 
 
+import sys as _sys
+
+
+def log_llm_latency(tool: str, model: str, num_ctx, body: dict | None) -> None:
+    """S-P2c (#1): emit ONE structured stderr line per ollama generate/chat
+    call so per-tool LLM latency is greppable in container logs.
+
+    `body` is the ollama response JSON (it carries `load_duration`,
+    `eval_count`, `prompt_eval_count`, `total_duration` in nanoseconds /
+    tokens). Replaces the coarse `_elapsed_s`-in-fixture-body signal (removed
+    in #2) with a richer, deterministic-format line:
+
+        [llm] tool=renderer model=wordcracker:v2 num_ctx=8192 load_ms=1234               eval_count=512 prompt_eval=2048 total_ms=8765
+
+    Best-effort and exception-safe — a logging failure must NEVER break the
+    actual LLM call (callers also wrap it, belt-and-suspenders).
+    """
+    try:
+        b = body or {}
+
+        def _ms(ns):
+            return round(ns / 1e6) if isinstance(ns, (int, float)) else "?"
+
+        def _v(x):
+            return x if x is not None else "?"
+
+        print(
+            f"[llm] tool={tool} model={model} num_ctx={_v(num_ctx)} "
+            f"load_ms={_ms(b.get('load_duration'))} "
+            f"eval_count={_v(b.get('eval_count'))} "
+            f"prompt_eval={_v(b.get('prompt_eval_count'))} "
+            f"total_ms={_ms(b.get('total_duration'))}",
+            file=_sys.stderr, flush=True,
+        )
+    except Exception:
+        # observability must never take down the request path
+        pass
+
+
 def log_request(payload: dict) -> None:
     """Stash a structured record. Caller passes a dict already shaped for
     aggregation; we add timestamp + request_id if missing."""

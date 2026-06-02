@@ -311,7 +311,13 @@ def _maybe_translate(query: str) -> str:
             "think": False,
         }, timeout=60)
         resp.raise_for_status()
-        translated = resp.json().get("response", "").strip().strip('"').strip()
+        _body = resp.json()
+        try:
+            from scripts.v2.observability import log_llm_latency
+            log_llm_latency("translate", _model, get_model_ctx(_model), _body)
+        except Exception:
+            pass
+        translated = (_body.get("response") or "").strip().strip('"').strip()
         _log(f"translated query: {translated!r}")
         return translated or query
     except Exception as e:

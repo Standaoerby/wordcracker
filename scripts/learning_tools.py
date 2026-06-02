@@ -645,7 +645,13 @@ def enrich_word(word: str, contexts: list[str] | None = None,
     try:
         resp = requests.post(f"{OLLAMA_HOST}/api/generate", json=payload, timeout=90)
         resp.raise_for_status()
-        raw = resp.json().get("response", "").strip()
+        _body = resp.json()
+        try:
+            from scripts.v2.observability import log_llm_latency
+            log_llm_latency("enrich_word", _model, get_model_ctx(_model), _body)
+        except Exception:
+            pass
+        raw = (_body.get("response") or "").strip()
         # Qwen sometimes wraps json in ```; strip
         if raw.startswith("```"):
             raw = raw.strip("`")

@@ -175,7 +175,14 @@ def _call_chat(messages: list, model: str, ollama_host: str,
     }
     resp = requests.post(f"{ollama_host}/api/chat", json=payload, timeout=eff)
     resp.raise_for_status()
-    return resp.json()
+    _body = resp.json()
+    try:
+        from scripts.v2.observability import log_llm_latency
+        log_llm_latency("agent", model,
+                        payload.get("options", {}).get("num_ctx"), _body)
+    except Exception:
+        pass
+    return _body
 
 
 def _execute_tool(name: str, args: dict) -> dict:

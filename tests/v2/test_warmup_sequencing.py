@@ -18,9 +18,11 @@ Guards:
      warm-before-bind ordering.)
   2. test_no_warmup_flag_skips_warmup — --no-warmup skips _warmup but still
      serves AND reports ready immediately (never stuck at ready=false).
-  3. test_warmup_drives_probe_paths — pins that _warmup dispatches the P7/P8
-     tools, so the probe paths actually get warmed. Heavy neighbours
-     (chromadb, BGE) are stubbed so the test is corpus- and model-free.
+  3. test_warmup_does_model_only_touches — pins that _warmup loads ONLY the
+     P7/P8 MODELS (spaCy + an ollama keep_alive=-1 generate at aligned
+     num_ctx) and dispatches NO tool (the result-cache warming is cut, S-P2c
+     #4). Heavy neighbours (chromadb, BGE, spaCy, ollama) are stubbed so the
+     test is corpus- and model-free.
 """
 from __future__ import annotations
 
@@ -184,7 +186,7 @@ class ChatEndpointGatedUntilReady(unittest.TestCase):
                             "ready runtime must not bounce chat with 503")
 
 
-class WarmupDrivesProbePaths(unittest.TestCase):
+class WarmupDoesModelOnlyTouches(unittest.TestCase):
     def setUp(self):
         try:
             import scripts.chat_server as cs  # noqa: F401
@@ -222,43 +224,85 @@ class WarmupDrivesProbePaths(unittest.TestCase):
 
         scoring.REGISTRY["bge_reranker"] = _StubReranker()
 
+        # Fake `spacy` module so `import spacy; spacy.load(...)` is RECORDED,
+        # not actually run (no model on the test box needed).
+        import sys as _sys, types as _types
+        self.spacy_loads = []
+        _fake_spacy = _types.ModuleType("spacy")
+        _fake_spacy.load = lambda name, **k: (self.spacy_loads.append(name)
+                                              or object())
+        self._orig_spacy = _sys.modules.get("spacy")
+        _sys.modules["spacy"] = _fake_spacy
+
+        # Stub requests.post (the ollama model-only touch) — record, don't call.
+        import requests as _rq
+        self._rq = _rq
+        self.posts = []
+        self._orig_post = _rq.post
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"response": ""}
+
+        def _fake_post(url, json=None, timeout=None, **k):
+            self.posts.append((url, json))
+            return _Resp()
+
+        _rq.post = _fake_post
+
+        # Stub get_model_ctx so the warmup's num_ctx is deterministic.
+        import scripts.v2.token_budget as _tb
+        self._tb = _tb
+        self._orig_ctx = _tb.get_model_ctx
+        _tb.get_model_ctx = lambda _m: 4096
+
     def tearDown(self):
+        import sys as _sys
         self.treg.dispatch = self._orig_dispatch
         self.scoring.REGISTRY["bge_reranker"] = self._orig_plugin
         if self._rt is not None:
             self._rt._get_chroma_collection_with_embedder = self._orig_chroma
+        if self._orig_spacy is not None:
+            _sys.modules["spacy"] = self._orig_spacy
+        else:
+            _sys.modules.pop("spacy", None)
+        self._rq.post = self._orig_post
+        self._tb.get_model_ctx = self._orig_ctx
 
-    def test_warmup_drives_probe_paths(self):
-        """_warmup must dispatch the P7 (word bundle) + P8 (learning) tool
-        paths so the deploy probe finds spaCy / FTS5 / Wiktionary / ollama
-        warm. Pre-fix it warmed only corpus_overview / top_authors / Doyle."""
+    def test_warmup_does_model_only_touches(self):
+        """S-P2c #4: _warmup loads ONLY the P7/P8 models (spaCy + an ollama
+        keep_alive=-1 generate at aligned num_ctx) and dispatches NO tool — the
+        result-cache warming (corpus_overview/top_authors/author_metadata +
+        learning_words/hybrid_search/enrich_word/word_etymology) is cut. chroma
+        + BGE stay (stubbed). Pre-fix _warmup dispatched the full tools."""
+        self.cs._READY.clear()
         self.cs._warmup()
-        names = [n for n, _ in self.dispatched]
 
-        # P8 — learning_words on a concrete book scope.
-        self.assertIn("learning_words", names,
-                      "warmup must warm the learning_words (P8) path")
-        lw_args = next(a for n, a in self.dispatched if n == "learning_words")
-        self.assertEqual(lw_args.get("scope"), {"book": "PG1342"},
-                         "learning_words warmup must use a concrete book scope")
-        # Must NOT pre-cache the exact P8 probe result (probe uses top=20).
-        self.assertNotEqual(lw_args.get("top"), 20,
-                            "warmup must not pre-fill the P8 probe's exact "
-                            "cache key (top=20) — keep the probe a live test")
+        # spaCy model loaded (P8 lemmatizer/POS + P7 word POS) — model-only.
+        self.assertIn("en_core_web_sm", self.spacy_loads,
+                      "warmup must load the spaCy model (model-only touch)")
 
-        # P7 — word bundle component tools.
-        for tool_name in ("hybrid_search", "enrich_word", "word_etymology"):
-            self.assertIn(tool_name, names,
-                          f"warmup must warm the {tool_name} (P7 bundle) path")
-        hs_args = next(a for n, a in self.dispatched if n == "hybrid_search")
-        self.assertEqual(hs_args.get("rerank_with"), "bge_reranker",
-                         "hybrid_search warmup must exercise the BGE rerank leg")
-        # Representative word, not the probe word 'ajar'.
-        for tool_name in ("enrich_word", "word_etymology"):
-            a = next(ar for n, ar in self.dispatched if n == tool_name)
-            self.assertNotEqual((a.get("word") or "").lower(), "ajar",
-                                f"{tool_name} warmup must not use the probe "
-                                "word 'ajar' (would game P7)")
+        # ollama model-only generate: keep_alive=-1, num_ctx from get_model_ctx.
+        self.assertTrue(self.posts,
+                        "warmup must do an ollama /api/generate model touch")
+        url, body = self.posts[-1]
+        self.assertTrue(url.endswith("/api/generate"), f"unexpected url {url}")
+        self.assertEqual(body.get("keep_alive"), -1,
+                         "ollama touch must hold the runner (keep_alive=-1)")
+        self.assertEqual(body.get("options", {}).get("num_ctx"), 4096,
+                         "ollama num_ctx must come from get_model_ctx (S-P2 "
+                         "ctx-thrash guard)")
+
+        # The cut: NO tool dispatched at all anymore.
+        self.assertEqual(self.dispatched, [],
+                         f"warmup must dispatch no tool now; got {self.dispatched}")
+
+        # readiness still flips after the (now model-only) warmup completes.
+        self.assertTrue(self.cs._READY.is_set(),
+                        "warmup must still set _READY at completion")
 
 
 if __name__ == "__main__":

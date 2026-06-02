@@ -863,6 +863,11 @@ def _llm_render(question: str, plan: plan_mod.QueryPlan,
     finally:
         resp.close()
     body = last_obj or {}
+    try:
+        from scripts.v2.observability import log_llm_latency
+        log_llm_latency("renderer", model, budget.ctx, body)
+    except Exception:
+        pass
     text = "".join(parts).strip()
     meta = {
         "prompt_tokens": body.get("prompt_eval_count"),

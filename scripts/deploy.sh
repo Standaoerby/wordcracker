@@ -66,10 +66,13 @@ CHAT_BASE_URL="${CHAT_BASE_URL:-http://127.0.0.1:8890}"
 # S-B7 F2-DEPLOY-RERECORD: hard wall-clock backstop for the fixture
 # re-record gate. --skip-heavy already drops the multi-minute corpus
 # scans (HEAVY_BINDINGS), so the remaining sweep is well under a minute
-# on prod; 600s is a generous ceiling that still guarantees the gate
-# cannot hang a deploy indefinitely if a tool wedges. Override per-host
-# with WC_RERECORD_BUDGET_SECS.
-RERECORD_BUDGET_SECS="${WC_RERECORD_BUDGET_SECS:-600}"
+# on prod; 900s (S-P2c #3, was 600) is a generous ceiling that still
+# guarantees the gate cannot hang a deploy indefinitely if a tool wedges.
+# Raised 600->900 so a genuinely slow-but-progressing re-record (cold corpus
+# + contended host) is detected as REAL drift on completion rather than
+# guillotined by the wall-clock as a false timeout. Override per-host with
+# WC_RERECORD_BUDGET_SECS.
+RERECORD_BUDGET_SECS="${WC_RERECORD_BUDGET_SECS:-900}"
 export VERIFY_HEALTHCHECK_BUDGET_S="${VERIFY_HEALTHCHECK_BUDGET_S:-360}"
 
 usage() {

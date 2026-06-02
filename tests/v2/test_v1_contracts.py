@@ -529,5 +529,69 @@ class FixtureFreshnessGate(unittest.TestCase):
         )
 
 
+class FixtureBodyDeterminism(unittest.TestCase):
+    """S-P2c (#2) — fixture BODIES must not carry per-call wall-clock.
+
+    `_elapsed_s` (and any _VOLATILE_BODY_KEYS) made every re-record churn the
+    body with a fresh timing value, drowning real contract drift in noise and
+    tripping the deploy F2-RERECORD diff gate on a timing wobble. The recorder
+    now strips them at write time; the real timing lives in _manifest.json.
+
+    Two guards:
+      1. no committed fixture body carries a volatile key (catches a creep-back
+         or a fixture recorded by an older recorder);
+      2. the stripper drops exactly the volatile keys and nothing else.
+    Both fail on the pre-S-P2c recorder (which wrote _elapsed_s into the body).
+    """
+
+    def test_no_fixture_body_carries_volatile_keys(self):
+        from scripts.v2.contracts.record_fixtures import _VOLATILE_BODY_KEYS
+        if not _FIXTURES_DIR.exists():
+            return  # CoverageGate carries the loud complaint
+        offenders = []
+        for fp in sorted(_FIXTURES_DIR.glob("*.json")):
+            if fp.name == "_manifest.json":
+                continue
+            try:
+                raw = json.loads(fp.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue  # RecordedFixtureReplay reports unreadable fixtures
+            if isinstance(raw, dict):
+                present = [k for k in _VOLATILE_BODY_KEYS if k in raw]
+                if present:
+                    offenders.append((fp.name, present))
+        self.assertEqual(
+            offenders, [],
+            f"fixture bodies carry volatile timing keys {offenders} — re-record "
+            f"on prod with the current recorder (it strips _VOLATILE_BODY_KEYS); "
+            f"the real timing stays in _manifest.json.")
+
+    def test_stripper_drops_only_volatile_keys(self):
+        from scripts.v2.contracts.record_fixtures import (
+            _strip_volatile_body, _VOLATILE_BODY_KEYS,
+        )
+        self.assertIn("_elapsed_s", _VOLATILE_BODY_KEYS)
+        body = {"word": "ajar", "samples": [1, 2], "_elapsed_s": 20.18}
+        self.assertEqual(_strip_volatile_body(body),
+                         {"word": "ajar", "samples": [1, 2]})
+        # idempotent + non-dict passthrough (list-returning tools)
+        self.assertEqual(_strip_volatile_body({"a": 1}), {"a": 1})
+        self.assertEqual(_strip_volatile_body([1, 2, 3]), [1, 2, 3])
+
+    def test_elapsed_s_is_not_a_required_schema_key(self):
+        """Removal is only legitimate because _elapsed_s is optional in every
+        schema. If a future schema marks it required, this fails loud — strip it
+        from __required__ or stop stripping it from the body."""
+        from scripts.v2.contracts.registry import V1_CONTRACTS
+        bad = []
+        for b in V1_CONTRACTS.values():
+            req = getattr(b.schema, "__required__", frozenset())
+            if "_elapsed_s" in req:
+                bad.append(b.schema_name)
+        self.assertEqual(bad, [],
+                         f"_elapsed_s is __required__ in {bad} but the recorder "
+                         f"strips it from the body — contradiction.")
+
+
 if __name__ == "__main__":
     unittest.main()

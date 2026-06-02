@@ -1282,26 +1282,12 @@ def _warmup():
     except Exception as e:
         print(f"[chat] warmup failed (non-fatal): {type(e).__name__}: {e}",
               file=_sys.stderr, flush=True)
-    # v2.5 demo polish: pre-run the cheap meta queries so the first user
-    # query that hits them isn't paying cold-cache latency. These warm
-    # the v2 dispatch + cache layers (v2 is the only engine path).
-    try:
-        from scripts.v2.tool_registry import dispatch
-        t = _time.perf_counter()
-        # corpus_overview is the typical first-time-user opener
-        dispatch("corpus_overview", {})
-        # top authors (books / downloads / tokens — all three cached separately)
-        dispatch("top_authors_by", {"metric": "books", "top": 10})
-        dispatch("top_authors_by", {"metric": "downloads", "top": 10})
-        dispatch("top_authors_by", {"metric": "tokens", "top": 10})
-        # one popular author_metadata to warm the parquet read + geo lookup
-        dispatch("author_metadata", {"author_regex": "^Doyle,"})
-        print(f"[chat] v2 dispatch warmed in {_time.perf_counter()-t:.1f}s "
-              f"(corpus_overview + 3 top_authors variants + Doyle metadata)",
-              file=_sys.stderr, flush=True)
-    except Exception as e:
-        print(f"[chat] v2 dispatch warmup failed (non-fatal): "
-              f"{type(e).__name__}: {e}", file=_sys.stderr, flush=True)
+    # S-P2c (#4): the v2 dispatch meta-query warming (corpus_overview,
+    # top_authors_by x3, author_metadata) was pure result-CACHE warming — no
+    # model load — i.e. the dead-weight довесок. CUT: it only pre-filled
+    # parquet/result caches the deploy probe never measures, at startup cost.
+    # The load-bearing model warms (chroma+embedder above, BGE below, spaCy +
+    # ollama below) are what /health.ready actually gates on (S-B8 ADR).
     # S-R5 coldstart P11 (2026-05-31) — warm the BGE cross-encoder reranker.
     # The chromadb+embedder warm above covers hybrid_search's BI-encoder,
     # but find_book_by_topic's planner path (book_similar / «что почитать
@@ -1330,59 +1316,64 @@ def _warmup():
     except Exception as e:
         print(f"[chat] BGE reranker warmup failed (non-fatal): "
               f"{type(e).__name__}: {e}", file=_sys.stderr, flush=True)
-    # S-R5 warmup-sequencing (2026-05-31) — warm the P7/P8 deploy-probe paths.
-    # Diagnosis (by code, not the brief's hypothesis): _warmup() ALREADY runs
-    # synchronously BEFORE the listening socket binds — main() calls it before
-    # ThreadingHTTPServer(...) — so :8890/health is connection-refused until
-    # warmup returns, and every deploy gate (compose healthcheck → verify
-    # poll_until_healthy → predeploy wait_for_health) already waits for it.
-    # The cold-probe latency is NOT warmup↔probe GPU contention; it's the
-    # FIRST call into tool paths this warmup never touched paying model/import
-    # load inside the probe request:
-    #   • P7 «что значит X» word bundle → hybrid_search (FTS5 + Chroma + BGE
-    #     rerank) ∥ enrich_word (ollama LLM round-trip + Wiktionary dict) ∥
-    #     word_etymology (family_chain)
-    #   • P8 «N слов уровня B2 из <book>» → learning_words (spaCy lemmatizer +
-    #     POS tagger + per-book counts band-pass)
-    # Representative inputs — a common word ('house', NOT the probe word
-    # 'ajar') and P&P at the DEFAULT top=30 (NOT the probe's top=20) — warm the
-    # shared spaCy / FTS5 / Wiktionary / ollama models WITHOUT pre-caching any
-    # probe's exact result, so the probes still exercise the live path, just on
-    # warm infrastructure. This is deliberately NOT page-cache warming: the
-    # 6000-book P6 period_vocab scan stays cold by design (too expensive to
-    # prewarm; the E6 ThreadPool cap is meant to fit it in budget regardless).
+    # S-P2c (#4) — MODEL-ONLY readiness touches for the P7/P8 tool paths.
+    # The S-R5 fix warmed these paths by dispatching the FULL tools
+    # (learning_words / hybrid_search / enrich_word / word_etymology), which
+    # ALSO computed+cached a result — that compute is the cuttable dead-weight.
+    # Per the S-B8 ADR the *model loads* ARE the /health.ready definition and
+    # must stay, so here we load ONLY the models the probes pay cold, WITHOUT
+    # computing any tool result:
+    #   • spaCy en_core_web_sm — the model P8 (learning_words lemmatizer/POS)
+    #     and P7 (word POS) cold-load on first use; warming the model dir into
+    #     page cache + the spaCy import is the load-bearing part.
+    #   • ollama wordcracker:v2 — P7 enrich_word does an /api/generate round
+    #     trip; a 1-token generate at the SAME num_ctx (get_model_ctx) +
+    #     keep_alive=-1 loads the runner into VRAM so the first real enrich
+    #     neither cold-loads NOR rebuilds on a ctx flip (S-P2 num_ctx thrash).
+    # chroma+embedder (P7 hybrid_search BI-encoder) and BGE rerank are loaded
+    # in the blocks above and stay. FTS5 (sqlite) is not a model — its first
+    # query is sub-second off the page cache. Acceptance guard: cold-gate must
+    # stay 12/12 after this trim; if P7/P8 regress, a model-only touch missed
+    # its path (and warmup-timing logs confirm the cache-dispatches are gone).
     try:
-        from scripts.v2.tool_registry import dispatch
+        import spacy
         t = _time.perf_counter()
-        # P8 — loads the spaCy lemmatizer + POS tagger and the per-book counts
-        # band-pass. top=30 (default) ≠ the probe's top=20 so the cacheable
-        # result is not pre-filled.
-        dispatch("learning_words",
-                 {"scope": {"book": "PG1342"}, "level": "intermediate", "top": 30})
-        print(f"[chat] learning_words path warmed in {_time.perf_counter()-t:.1f}s "
-              f"(spaCy lemmatizer + counts band-pass)",
+        spacy.load("en_core_web_sm")
+        print(f"[chat] spaCy en_core_web_sm warmed in {_time.perf_counter()-t:.1f}s "
+              f"(model-only load, no tool result)",
               file=_sys.stderr, flush=True)
     except Exception as e:
-        print(f"[chat] learning_words warmup failed (non-fatal): "
+        print(f"[chat] spaCy warmup failed (non-fatal): "
               f"{type(e).__name__}: {e}", file=_sys.stderr, flush=True)
     try:
-        from scripts.v2.tool_registry import dispatch
+        import os as _os, requests as _requests
+        from scripts.v2.token_budget import get_model_ctx
         t = _time.perf_counter()
-        # P7 — word-info bundle component tools. hybrid_search warms FTS5 +
-        # Chroma merge + BGE rerank; enrich_word warms the ollama LLM round-trip
-        # + Wiktionary word_dictionary; word_etymology warms the family_chain
-        # path. A common word ('house'), not a probe word — no probe result is
-        # pre-cached.
-        dispatch("hybrid_search",
-                 {"query": "house", "k": 12, "per_retriever": 50,
-                  "rerank_with": "bge_reranker"})
-        dispatch("enrich_word", {"word": "house"})
-        dispatch("word_etymology", {"word": "house"})
-        print(f"[chat] word-bundle path warmed in {_time.perf_counter()-t:.1f}s "
-              f"(hybrid_search + enrich_word LLM + word_etymology)",
+        _model = _os.environ.get("WC_LLM_MODEL", "qwen3:14b")
+        _host = _os.environ.get("OLLAMA_HOST", "http://ollama:11434")
+        # 1-token generate: loads the runner into VRAM (keep_alive=-1) at the
+        # num_ctx enrich/renderer use, computing no enrichment. Mirrors the
+        # enrich call's options so the shared wordcracker:v2 runner isn't
+        # rebuilt on a ctx flip when the first real enrich arrives (S-P2).
+        _wresp = _requests.post(f"{_host}/api/generate", json={
+            "model": _model,
+            "prompt": "warmup",
+            "stream": False,
+            "keep_alive": -1,
+            "options": {"temperature": 0, "num_ctx": get_model_ctx(_model)},
+            "think": False,
+        }, timeout=60)
+        try:
+            from scripts.v2.observability import log_llm_latency
+            log_llm_latency("warmup", _model, get_model_ctx(_model),
+                            _wresp.json())
+        except Exception:
+            pass
+        print(f"[chat] ollama {_model} warmed in {_time.perf_counter()-t:.1f}s "
+              f"(model-only generate, keep_alive=-1, num_ctx aligned)",
               file=_sys.stderr, flush=True)
     except Exception as e:
-        print(f"[chat] word-bundle warmup failed (non-fatal): "
+        print(f"[chat] ollama warmup failed (non-fatal): "
               f"{type(e).__name__}: {e}", file=_sys.stderr, flush=True)
     # S-B8: warmup complete (each step above is individually non-fatal, so we
     # always reach here) — flip readiness so /health.ready=true and the deploy
