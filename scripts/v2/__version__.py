@@ -23,7 +23,7 @@ process-lifetime constant, so the tiny per-call overhead is invisible.
 """
 import os
 
-ANALYTICS_VERSION = "2.6.37"
+ANALYTICS_VERSION = "2.6.38"
 
 _UNKNOWN = "unknown"
 
