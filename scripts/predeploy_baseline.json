@@ -1,0 +1,19 @@
+{
+  "_note": "Committed seed baseline (S-B8 readiness work). Records the real WARM 12/12 verdicts. version is the last shipped label (2.6.38, = origin/main) so deploying 2.6.39 passes the version-bump-vs-baseline gate; re-record on prod after deploy with `predeploy_gate.sh --update-baseline` once /health.ready=true.",
+  "version": "2.6.38",
+  "recorded_at": "2026-06-02T00:00:00+00:00",
+  "verdicts": {
+    "P1": "PASS",
+    "P2": "PASS",
+    "P3": "PASS",
+    "P4": "PASS",
+    "P5": "PASS",
+    "P6": "PASS",
+    "P7": "PASS",
+    "P8": "PASS",
+    "P9": "PASS",
+    "P10": "PASS",
+    "P11": "PASS",
+    "P12": "PASS"
+  }
+}

@@ -166,20 +166,27 @@ services:
       # ExecStartPost curl-loop (`for i in $(seq 1 30); do sleep 2;
       # curl ...; done`). Uses python urllib instead of curl to avoid
       # depending on curl being in the runtime layer of the image.
-      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8890/health', timeout=2).status == 200 else 1)\""]
+      #
+      # S-B8: gate on /health.ready, NOT just HTTP 200. Since _warmup() now
+      # runs in a background thread (chat_server.main binds the socket first),
+      # /health answers 200 the moment the socket is up but reports
+      # ready=false until warmup finishes. Gating on 200 alone would flip the
+      # container "healthy" while still cold — routing traffic and satisfying
+      # `depends_on: service_healthy` before the models are loaded. Parsing
+      # ready=true is what keeps the old "healthy ⇒ warm" guarantee. A
+      # connection-refused (pre-bind) or ready=false both keep it "starting".
+      test: ["CMD-SHELL", "python -c \"import urllib.request,json,sys; b=json.load(urllib.request.urlopen('http://127.0.0.1:8890/health', timeout=2)); sys.exit(0 if b.get('ready') else 1)\""]
       interval: 30s
       timeout: 5s
       retries: 3
-      # start_period sizes the synchronous startup _warmup() in
-      # chat_server.main(): it runs BEFORE the listening socket binds, so
-      # /health is connection-refused (→ healthcheck "starting") until warmup
-      # returns. Warmup now loads ChromaDB + bi-encoder + BGE reranker AND
-      # pre-runs the P7/P8 deploy-probe tool paths (learning_words spaCy band-
-      # pass + hybrid_search + enrich_word LLM round-trip + word_etymology) so
-      # the post-deploy probe runs warm. That fuller warmup can exceed the old
-      # 60s on a cold host (empty page cache + ollama model load), so the
-      # budget is raised to 120s — comfortably under verify_deployed_image.sh's
-      # poll_until_healthy budget (VERIFY_HEALTHCHECK_BUDGET_S=180s).
+      # start_period sizes the background _warmup() in chat_server.main():
+      # the socket binds immediately but ready=false until warmup loads
+      # ChromaDB + bi-encoder + BGE reranker (+ the per-tool result-warming
+      # dead-weight that S-P2c trims). A cold host (empty page cache + ollama
+      # model load) can take >60s, so the budget is 120s — comfortably under
+      # verify_deployed_image.sh's poll_until_healthy budget
+      # (VERIFY_HEALTHCHECK_BUDGET_S=180s) and the probe suite's 180s
+      # wait_for_health readiness budget.
       start_period: 120s
 
   admin:

@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -27,6 +28,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root for scripts.v2.*
 from rag_query import ASSISTANT_NAME
 from rag_query import TOOLS_SPEC  # combined rag_tools + learning_tools
+
+# S-B8 readiness gate. /health answers 200 for *liveness* as soon as the
+# socket binds, but reports `ready: false` until _warmup() finishes loading the
+# heavy models (chroma+embedder, BGE reranker, spaCy/ollama) in a background
+# thread. The deploy gate (compose healthcheck + predeploy wait_for_health)
+# waits for ready=true before firing probes, so the post-deploy probe still
+# runs warm — without warmup blocking the bind. The heavy-model loads ARE the
+# readiness definition; only the per-tool result-warming dispatch() calls are
+# the dead-weight S-P2c trims. See docs/v2/decisions.md → S-B8.
+_READY = threading.Event()
 
 # v2 engine — lazy-imported on first request. Lazy because import cost
 # is non-trivial (ChromaDB + SentenceTransformer pull in) and we don't
@@ -896,8 +907,12 @@ class Handler(BaseHTTPRequestHandler):
             # the running process matches the expected SHA. HTTP 200
             # semantics unchanged → compose healthcheck still works.
             from scripts.v2.__version__ import runtime_identity
+            body = dict(runtime_identity())
+            # S-B8: liveness is 200 (socket bound); readiness is this flag,
+            # which flips true only when the background _warmup() completes.
+            body["ready"] = _READY.is_set()
             return self._send(200,
-                              json.dumps(runtime_identity(), ensure_ascii=False),
+                              json.dumps(body, ensure_ascii=False),
                               "application/json; charset=utf-8")
         if self.path == "/api/tools":
             tools = [{"name": t["function"]["name"],
@@ -1157,6 +1172,22 @@ class Handler(BaseHTTPRequestHandler):
         return question, history, None
 
     def do_POST(self):
+        # S-B8: reject real chat traffic until warmup completes. nginx
+        # proxy_pass to :8890 has no health gating, so now that the socket
+        # binds BEFORE warmup it would otherwise forward requests into a
+        # cold/racing runtime. A 503 preserves the old "no cold requests during
+        # warmup" guarantee (previously enforced by connection-refused) and
+        # avoids racing the warmup thread's model loads. Liveness/diagnostic
+        # GETs (/health, /api/tools, /api/stats) stay up. /api/flag_bad_answer
+        # needs no models, so it is not gated.
+        if (self.path == "/api/chat/stream"
+                or self.path == "/api/chat"
+                or self.path.startswith("/api/chat?")) and not _READY.is_set():
+            return self._send(503,
+                              json.dumps({"error": "warming up — model load in "
+                                                   "progress, retry shortly",
+                                          "ready": False}, ensure_ascii=False),
+                              "application/json; charset=utf-8")
         if self.path == "/api/chat/stream":
             payload, err = self._read_payload_capped()
             if err:
@@ -1353,6 +1384,11 @@ def _warmup():
     except Exception as e:
         print(f"[chat] word-bundle warmup failed (non-fatal): "
               f"{type(e).__name__}: {e}", file=_sys.stderr, flush=True)
+    # S-B8: warmup complete (each step above is individually non-fatal, so we
+    # always reach here) — flip readiness so /health.ready=true and the deploy
+    # gate stops waiting and fires its probes against a warm runtime.
+    _READY.set()
+    print("[chat] warmup complete — /health ready=true", file=_sys.stderr, flush=True)
 
 
 def main():
@@ -1362,10 +1398,21 @@ def main():
     ap.add_argument("--no-warmup", action="store_true",
                     help="skip ChromaDB/SentenceTransformer warmup at startup")
     args = ap.parse_args()
-    if not args.no_warmup:
-        _warmup()
+    # S-B8: bind the listening socket FIRST so /health answers 200 (liveness)
+    # immediately, then run _warmup() in a background daemon thread. /health
+    # reports ready=false until that thread sets _READY at completion. This
+    # inverts the old warm-before-bind sequencing: readiness is now an explicit
+    # signal (the heavy-model loads), not a side effect of socket-bind timing,
+    # so the deploy gate can wait on ready even after S-P2c trims the per-tool
+    # result-warming dead-weight. See docs/v2/decisions.md → S-B8.
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"wordcracker chat on http://{args.host}:{args.port}/")
+    if args.no_warmup:
+        # Emergency escape hatch: nothing to warm, so report ready at once —
+        # the server must never get stuck at ready=false and block the gate.
+        _READY.set()
+    else:
+        threading.Thread(target=_warmup, name="warmup", daemon=True).start()
     srv.serve_forever()
 
 
