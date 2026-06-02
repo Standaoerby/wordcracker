@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import time
+import threading
 from pathlib import Path
 from typing import Iterator
 
@@ -721,7 +722,8 @@ def _truncate_for_render(obj, _depth: int = 0):
 def _llm_render(question: str, plan: plan_mod.QueryPlan,
                 results: list[ToolResult], *, model: str,
                 ollama_host: str,
-                history: list[dict] | None = None) -> tuple[str, dict]:
+                history: list[dict] | None = None,
+                cancel_event=None) -> tuple[str, dict]:
     """Send one /api/chat call with the render prompt + tool data. No tools.
 
     Sprint 17: returns (answer_text, meta) where meta carries Ollama's
@@ -828,10 +830,40 @@ def _llm_render(question: str, plan: plan_mod.QueryPlan,
         "options": {"temperature": temp, "num_ctx": budget.ctx},
         "think": False,
     }
-    resp = requests.post(f"{ollama_host}/api/chat", json=payload, timeout=120)
-    resp.raise_for_status()
-    body = resp.json() or {}
-    text = (body.get("message", {}) or {}).get("content", "").strip()
+    # S-P2b — stream the render so an orphaned generation (client dropped
+    # the SSE mid-answer) can be cancelled. Closing the socket makes
+    # Ollama 0.24 abort the in-flight gen and free the single runner slot
+    # (~2.7s, confirmed by repro 2026-06-02). cancel_event is set by the
+    # SSE pump (chat_server._stream_chat) on client disconnect; default
+    # None -> a private never-set Event so non-streaming callers (ask())
+    # are unaffected.
+    if cancel_event is None:
+        cancel_event = threading.Event()
+    payload["stream"] = True
+    parts: list[str] = []
+    last_obj: dict = {}
+    resp = requests.post(f"{ollama_host}/api/chat", json=payload,
+                         stream=True, timeout=120)
+    try:
+        resp.raise_for_status()
+        for raw in resp.iter_lines():
+            if cancel_event.is_set():
+                resp.close()
+                raise RenderCancelled("client disconnected during render")
+            if not raw:
+                continue
+            try:
+                obj = json.loads(raw)
+            except (ValueError, TypeError):
+                continue
+            last_obj = obj
+            piece = (obj.get("message") or {}).get("content") or ""
+            if piece:
+                parts.append(piece)
+    finally:
+        resp.close()
+    body = last_obj or {}
+    text = "".join(parts).strip()
     meta = {
         "prompt_tokens": body.get("prompt_eval_count"),
         "eval_tokens":   body.get("eval_count"),
@@ -1009,6 +1041,7 @@ def _dispatch_render(
     model: str,
     ollama_host: str,
     history: list[dict] | None = None,
+    cancel_event=None,
 ) -> tuple[str, dict]:
     """Single render path: `_llm_render` (RENDER_PROMPT + free-form LLM).
 
@@ -1043,7 +1076,16 @@ def _dispatch_render(
         question, plan, results,
         model=model, ollama_host=ollama_host,
         history=history,
+        cancel_event=cancel_event,
     )
+
+
+class RenderCancelled(Exception):
+    """Raised inside _llm_render when cancel_event fires (client dropped
+    the SSE mid-render). Caught quietly in ask_stream — NOT surfaced to
+    the user as an error. Its job is to break the blocking Ollama read
+    and close the socket so the single runner slot frees. (S-P2b)"""
+    pass
 
 
 class _ToolPipelineEmpty(Exception):
@@ -1564,9 +1606,12 @@ def ask_stream(
     history: list[dict] | None = None,
     model: str = DEFAULT_MODEL,
     ollama_host: str = DEFAULT_OLLAMA_HOST,
+    cancel_event=None,
     **kwargs,
 ) -> Iterator[dict]:
     """SSE events compatible with v1 plus v2-specific intent/plan/clarify."""
+    if cancel_event is None:
+        cancel_event = threading.Event()
     yield {"event": "start"}
     t0 = time.perf_counter()
     # v5 Phase 5 — optional envelope (trace + budget). None when flag off.
@@ -1875,6 +1920,8 @@ def ask_stream(
             # use the same injector logic the non-streaming router uses
             args = router_mod._inject(step.args, results, step.depends_on,
                                       step.inject_result_as)
+            if cancel_event.is_set():
+                return
             yield {"event": "tool_call", "name": step.tool, "args": args}
             from scripts.v2.tool_registry import dispatch
             tr = dispatch(step.tool, args, budget=_v5_stream_budget)
@@ -1895,7 +1942,12 @@ def ask_stream(
                 question, plan, results,
                 model=model, ollama_host=ollama_host,
                 history=history,
+                cancel_event=cancel_event,
             )
+        except RenderCancelled:
+            log.info("ask_stream: render cancelled (client disconnect) — "
+                     "stopping pump cleanly, runner slot freed")
+            return
         except Exception as e:
             # Sprint 21 B104 — soft network-error fix in streaming path.
             log.exception("renderer LLM failed (stream)")
@@ -1905,6 +1957,11 @@ def ask_stream(
             # BEFORE the final `answer` event lands.
             yield {"event": "error", "kind": "renderer",
                    "message": _short_render_error_message(e)}
+
+    # S-P2b — client vanished during render? don't spend the slot on
+    # critic/audit for an answer nobody will read.
+    if cancel_event.is_set():
+        return
 
     # Critic pass — same logic as ask() above. We emit the verdict as its
     # own SSE event so the UI can show a confidence badge before the final

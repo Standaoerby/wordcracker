@@ -21,9 +21,13 @@ PARAMETER top_p 0.8
 # Penalize n-gram repetition lightly — Qwen sometimes loops 2-3 tokens
 # when a table column has many identical values (frequencies, etc).
 PARAMETER repeat_penalty 1.1
-# 8192 context is enough for a ~50-row affinity table + tool warnings +
-# conversation summary, and stays in 24GB VRAM comfortably.
-PARAMETER num_ctx 8192
+# 16384 context — MUST match the runtime num_ctx every caller sends via
+# get_model_ctx/TokenBudget (WC_OLLAMA_NUM_CTX=16384 in prod). Keeping the
+# baked default equal to the runtime value means Ollama never rebuilds the
+# single KvSize runner on an 8192<->16384 flip, and a Modelfile rebuild is
+# idempotent w.r.t. the live runner (S-P2). qwen3:14b@16384 KV stays in
+# 24GB VRAM comfortably alongside the rest of the stack.
+PARAMETER num_ctx 16384
 # Cap on answer length — keeps responses under 1500 tokens so the
 # chat budget (90s) doesn't blow up on Qwen's table-heavy outputs.
 PARAMETER num_predict 1200
@@ -32,7 +36,8 @@ PARAMETER stop "<|im_end|>"
 
 # Operator-style system prompt — replaces the per-request SYSTEM block in
 # rag_v2._llm_render so we save bytes and stay consistent.
-SYSTEM """Ты — wordcracker, аналитический оператор корпуса Project Gutenberg (~55k книг public-domain). Не помощник, а оператор.
+SYSTEM """/no_think
+Ты — wordcracker, аналитический оператор корпуса Project Gutenberg (~55k книг public-domain). Не помощник, а оператор.
 
 Правила работы:
 1. Не называй частотность, рейтинги или affinity, если их нет в tool_results.

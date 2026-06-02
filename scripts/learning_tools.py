@@ -37,6 +37,7 @@ from rag_tools import (
     STOPWORDS, _metadata_df, _select_books, _slug,
     _is_clean_token, _log,
     _counts_path, _tokens_path,
+    get_model_ctx,
 )
 
 # Spaced-repetition band-pass presets, anchored to corpus_count quantiles
@@ -627,12 +628,19 @@ def enrich_word(word: str, contexts: list[str] | None = None,
     # wordcracker:v2 bakes an operator persona SYSTEM block; format=json
     # already pins structure, but we override `system` to a narrow lexical
     # annotator so the persona can't bleed into field values. (S-P1)
+    _model = os.environ.get("WC_LLM_MODEL", "qwen3:14b")
     payload = {
-        "model": os.environ.get("WC_LLM_MODEL", "qwen3:14b"),
+        "model": _model,
         "system": "You are a lexical annotation engine. Output only JSON.",
         "prompt": prompt, "stream": False,
-        "keep_alive": "5m", "format": "json",
-        "options": {"temperature": 0.2}, "think": False,
+        # keep_alive=-1 (hold), consistent with the rest of the v2 stack
+        # (renderer/critic/planner/llm_intent/_maybe_translate all use -1);
+        # "5m" let the idle timer evict the shared wordcracker:v2 runner. (S-P2)
+        "keep_alive": -1, "format": "json",
+        # num_ctx MUST match the renderer's TokenBudget(model).ctx so the
+        # shared wordcracker:v2 runner isn't rebuilt on a ctx flip (S-P2).
+        "options": {"temperature": 0.2, "num_ctx": get_model_ctx(_model)},
+        "think": False,
     }
     try:
         resp = requests.post(f"{OLLAMA_HOST}/api/generate", json=payload, timeout=90)

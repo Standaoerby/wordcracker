@@ -111,6 +111,10 @@ class RendererSendsNumCtx(unittest.TestCase):
             captured["payload"] = json
             class FakeResp:
                 def raise_for_status(self): pass
+                def iter_lines(self):
+                    import json as _j
+                    return [_j.dumps(self.json()).encode()]
+                def close(self): pass
                 def json(self):
                     return {"message": {"content": "ok"},
                             "prompt_eval_count": 100,
@@ -145,6 +149,10 @@ class RendererSendsNumCtx(unittest.TestCase):
         def fake_post(url, json=None, timeout=None, **kw):
             class FakeResp:
                 def raise_for_status(self): pass
+                def iter_lines(self):
+                    import json as _j
+                    return [_j.dumps(self.json()).encode()]
+                def close(self): pass
                 def json(self):
                     return {"message": {"content": "ok"},
                             "prompt_eval_count": 1234, "eval_count": 567}
