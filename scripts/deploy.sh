@@ -70,6 +70,7 @@ CHAT_BASE_URL="${CHAT_BASE_URL:-http://127.0.0.1:8890}"
 # cannot hang a deploy indefinitely if a tool wedges. Override per-host
 # with WC_RERECORD_BUDGET_SECS.
 RERECORD_BUDGET_SECS="${WC_RERECORD_BUDGET_SECS:-600}"
+export VERIFY_HEALTHCHECK_BUDGET_S="${VERIFY_HEALTHCHECK_BUDGET_S:-360}"
 
 usage() {
     sed -n '2,/^set -euo/p' "$0" | head -30
