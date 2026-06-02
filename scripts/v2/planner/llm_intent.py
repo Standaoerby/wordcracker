@@ -232,6 +232,12 @@ def classify_with_llm(text: str, history: list[dict] | None = None
             "num_ctx": _budget.ctx,
         },
         "keep_alive": -1,
+        # think:false matches the live classify_and_extract path (:436) and
+        # the renderer (rag_v2:829). classify_with_llm is currently dead
+        # (no caller), but pinning it here means a future re-activation
+        # can't reintroduce a hidden reasoning prefill on the shared
+        # runner. (S-P2b hygiene)
+        "think": False,
     }
     t0 = time.perf_counter()
     try:

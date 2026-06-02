@@ -440,14 +440,18 @@ class TokenObservability(unittest.TestCase):
         from scripts.v2 import rag_v2
         from scripts.v2.planner.plan import QueryPlan
         from scripts.v2.planner.entities import Entities
-        fake_resp = _mock.MagicMock()
-        fake_resp.json.return_value = {
+        import json as _json
+        _body = {
             "message": {"content": "the answer"},
             "prompt_eval_count": 4096,
             "eval_count": 128,
             "total_duration": 3_500_000_000,
             "load_duration": 100_000_000,
         }
+        fake_resp = _mock.MagicMock()
+        fake_resp.json.return_value = _body
+        fake_resp.iter_lines.return_value = [_json.dumps(_body).encode()]
+        fake_resp.close.return_value = None
         fake_resp.raise_for_status.return_value = None
         plan = QueryPlan(intent="author_metadata", entities=Entities(),
                           steps=[], explain="test")

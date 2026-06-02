@@ -1011,10 +1011,15 @@ class Handler(BaseHTTPRequestHandler):
         import queue, threading
         ev_q: queue.Queue = queue.Queue()
         SENTINEL = object()
+        # S-P2b — set on client disconnect so the producer thread closes
+        # the Ollama socket and the single runner slot frees (~2.7s)
+        # instead of finishing an orphaned 60-120s generation.
+        cancel_event = threading.Event()
 
         def _producer():
             try:
-                for ev in ask_stream(question, history=history):
+                for ev in ask_stream(question, history=history,
+                                     cancel_event=cancel_event):
                     ev_q.put(ev)
             except Exception as e:
                 ev_q.put({"_producer_error": e})
@@ -1033,8 +1038,10 @@ class Handler(BaseHTTPRequestHandler):
                         self.wfile.write(b": keepalive\n\n")
                         self.wfile.flush()
                     except (BrokenPipeError, ConnectionResetError):
+                        cancel_event.set()  # S-P2b — free the runner slot
                         return
                     except Exception:
+                        cancel_event.set()
                         return
                     continue
                 if ev is SENTINEL:
@@ -1046,8 +1053,10 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(line.encode("utf-8"))
                     self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
+                    cancel_event.set()  # S-P2b — signal producer to close socket
                     return  # client gone — stop pumping events
                 except Exception:
+                    cancel_event.set()
                     return  # client gone (TLS error, etc.)
         except Exception as e:
             # Sprint 21 B104 — soft fix for «network error». Top-level
