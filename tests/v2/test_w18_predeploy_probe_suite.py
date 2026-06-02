@@ -604,5 +604,170 @@ class MatchAcrossRunsUnknownKind(unittest.TestCase):
         self.assertIn("unknown across-runs", reasons[0])
 
 
+# ---------------------------------------------------------------------------
+# S-B8: baseline is no longer inert. A committed, all-PASS baseline gives the
+# regression gate teeth — a 11/12 run (one probe FAIL) is a PASS->FAIL
+# regression and main() must exit 2 (deploy BLOCKED / RED). Without a baseline
+# the gate is inert (exit 0) — which is exactly why predeploy_baseline.json is
+# committed.
+# ---------------------------------------------------------------------------
+
+import scripts.predeploy_probe_suite as ps  # noqa: E402
+from scripts.predeploy_probe_suite import DEFAULT_BASELINE  # noqa: E402
+
+
+class CommittedBaselineIsArmed(unittest.TestCase):
+    def test_baseline_exists_all_pass_and_versioned(self):
+        """Acceptance: baseline != <none>, persistent, all-PASS so any probe
+        going FAIL is a detectable regression."""
+        bl = load_baseline(DEFAULT_BASELINE)
+        self.assertIsNotNone(
+            bl, f"{DEFAULT_BASELINE} must exist & parse — else the gate is inert")
+        verdicts = bl.get("verdicts", {})
+        self.assertEqual(set(verdicts), {f"P{i}" for i in range(1, 13)},
+                         "baseline must cover all 12 probes")
+        self.assertTrue(all(v == "PASS" for v in verdicts.values()),
+                        "seed baseline records the real WARM 12/12 count")
+        self.assertNotIn(bl.get("version", "<none>"), (None, "", "<none>"),
+                         "baseline must be versioned")
+
+
+class RegressionGateHasTeeth(unittest.TestCase):
+    """End-to-end through main(): 11/12 vs an all-PASS baseline -> exit 2."""
+
+    def _run_main_with(self, baseline_path, fail_id):
+        orig_fire = ps.fire_probe
+        orig_eval = ps.evaluate_probe
+
+        def fake_fire(base_url, question, engine, timeout):
+            return {"answer": "ok", "intent": "x", "tool_calls": []}, 1.0, None
+
+        def fake_eval(probe, universal, payload, elapsed, terr):
+            if probe["id"] == fail_id:
+                return False, [f"injected regression ({fail_id})"]
+            return True, []
+
+        try:
+            ps.fire_probe = fake_fire
+            ps.evaluate_probe = fake_eval
+            return ps.main(["--no-health", "--no-require-version-bump",
+                            "--baseline", str(baseline_path)])
+        finally:
+            ps.fire_probe = orig_fire
+            ps.evaluate_probe = orig_eval
+
+    def test_eleven_of_twelve_is_red_vs_all_pass_baseline(self):
+        with tempfile.TemporaryDirectory() as td:
+            bl = Path(td) / "baseline.json"
+            write_baseline(bl, "0.0.0-test",
+                           [{"id": f"P{i}", "passed": True} for i in range(1, 13)])
+            rc = self._run_main_with(bl, fail_id="P6")
+        self.assertEqual(rc, 2,
+                         "11/12 vs an all-PASS baseline must exit 2 — deploy "
+                         "BLOCKED (proves the gate is NOT inert)")
+
+    def test_no_baseline_is_inert_exit_zero(self):
+        """Contrast: with no baseline the same 11/12 run is NOT blocked
+        (exit 0). This is the pre-fix inert behaviour and the reason a baseline
+        must be committed."""
+        rc = self._run_main_with(Path("/no/such/baseline.json"), fail_id="P6")
+        self.assertEqual(rc, 0,
+                         "no baseline -> no regression detected -> exit 0 (inert)")
+
+
+# ---------------------------------------------------------------------------
+# S-B8: wait_for_health must block until /health reports ready=true.
+# ---------------------------------------------------------------------------
+
+class _FakeResp:
+    def __init__(self, body):
+        self.status = 200
+        self._b = body.encode("utf-8")
+
+    def read(self):
+        return self._b
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a):
+        return False
+
+
+class WaitForHealthReadinessGate(unittest.TestCase):
+    def _patch(self, bodies):
+        calls = {"n": 0}
+
+        def fake_urlopen(url, timeout=2):
+            i = min(calls["n"], len(bodies) - 1)
+            calls["n"] += 1
+            return _FakeResp(bodies[i])
+
+        return calls, fake_urlopen
+
+    def test_blocks_until_ready_true(self):
+        bodies = [
+            json.dumps({"git_sha": "a", "ready": False}),
+            json.dumps({"git_sha": "a", "ready": False}),
+            json.dumps({"git_sha": "a", "ready": True}),
+        ]
+        calls, fake_urlopen = self._patch(bodies)
+        orig_open = ps.urllib.request.urlopen
+        orig_sleep = ps.time.sleep
+        try:
+            ps.urllib.request.urlopen = fake_urlopen
+            ps.time.sleep = lambda _s: None
+            ok, body = ps.wait_for_health("http://x", timeout_total_s=9999)
+        finally:
+            ps.urllib.request.urlopen = orig_open
+            ps.time.sleep = orig_sleep
+        self.assertTrue(ok)
+        self.assertTrue(body["ready"])
+        self.assertGreaterEqual(calls["n"], 3,
+                                "must keep polling while ready=false")
+
+    def test_missing_ready_key_treated_as_ready(self):
+        """Backward-compat: a runtime that predates the ready key (older image
+        / admin server) omits it -> treated as ready, no infinite wait."""
+        calls, fake_urlopen = self._patch([json.dumps({"git_sha": "a"})])
+        orig_open = ps.urllib.request.urlopen
+        orig_sleep = ps.time.sleep
+        try:
+            ps.urllib.request.urlopen = fake_urlopen
+            ps.time.sleep = lambda _s: None
+            ok, body = ps.wait_for_health("http://x", timeout_total_s=9999)
+        finally:
+            ps.urllib.request.urlopen = orig_open
+            ps.time.sleep = orig_sleep
+        self.assertTrue(ok)
+        self.assertEqual(calls["n"], 1, "no ready key -> return on first 200")
+
+    def test_timeout_while_not_ready_returns_last_body(self):
+        """On readiness timeout, (False, last_body) lets the caller tell
+        'came up but never ready' from 'never came up'."""
+        calls, fake_urlopen = self._patch([json.dumps({"git_sha": "a", "ready": False})])
+        orig_open = ps.urllib.request.urlopen
+        orig_sleep = ps.time.sleep
+        orig_time = ps.time.time
+        ticks = {"t": 0.0}
+
+        def fake_time():
+            ticks["t"] += 1.0
+            return ticks["t"]
+
+        try:
+            ps.urllib.request.urlopen = fake_urlopen
+            ps.time.sleep = lambda _s: None
+            ps.time.time = fake_time
+            ok, body = ps.wait_for_health("http://x", timeout_total_s=3)
+        finally:
+            ps.urllib.request.urlopen = orig_open
+            ps.time.sleep = orig_sleep
+            ps.time.time = orig_time
+        self.assertFalse(ok)
+        self.assertIsNotNone(body)
+        self.assertIs(body.get("ready"), False)
+
+
 if __name__ == "__main__":
     unittest.main()

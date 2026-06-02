@@ -18,8 +18,11 @@ Usage
     # Local dev target:
     python scripts/predeploy_probe_suite.py --base-url http://127.0.0.1:8890
 
-    # Record the current run as the new baseline (only writes when the run
-    # is clean: 12/12 PASS, version bumped, no regressions):
+    # Record the current run as the new baseline. Writes the REAL per-probe
+    # warm verdicts (not a 12/12 constant) as long as the run did not regress
+    # vs the prior baseline and the version label bumped. Recording a run that
+    # regressed is refused, so a regression can never be baked into the
+    # baseline and thereby silenced:
     python scripts/predeploy_probe_suite.py --update-baseline
 
     # Just probes P1, P12 (debugging a specific class):
@@ -222,8 +225,10 @@ def evaluate_across_runs(probe: dict, payloads: list[dict]) -> list[str]:
 # HTTP
 # ---------------------------------------------------------------------------
 
-def wait_for_health(base_url: str, timeout_total_s: int = 60) -> tuple[bool, dict | None]:
-    """Poll /health until 200 OK or timeout. Returns (ok, body_dict).
+def wait_for_health(base_url: str, timeout_total_s: int = 180,
+                    liveness_timeout_s: int = 75,
+                    require_ready: bool = True) -> tuple[bool, dict | None]:
+    """Poll /health until 200 OK *and* ready=true (or timeout). Returns (ok, body_dict).
 
     body_dict is the parsed JSON when /health responded with a JSON
     payload (post-S-B3 contract — see ADR-B3 / D-SB3-2). On older
@@ -231,26 +236,59 @@ def wait_for_health(base_url: str, timeout_total_s: int = 60) -> tuple[bool, dic
     None — `_check_expected_sha` treats that as "cannot verify" and
     the caller decides.
 
-    Mirrors run_functional_40.py behaviour — ChromaDB warmup is ~12s on
-    cold start.
+    Readiness gate (S-B8): /health now answers 200 for *liveness* the moment
+    the socket binds, but reports ``ready: false`` until the background
+    _warmup() finishes loading the heavy models. We must wait for ready=true
+    before firing latency-sensitive probes (P6/P11) — otherwise the first call
+    pays the cold model-load cost inside the probe and the gate reads a false
+    regression. A runtime that predates the ``ready`` key (older image, or the
+    admin server) omits it → ``body.get("ready", True)`` treats it as ready, so
+    this stays backward-compatible.
+
+    Two budgets, because the async topology makes liveness and readiness very
+    different timescales: the socket binds immediately, so a real runtime
+    answers 200 within seconds. ``liveness_timeout_s`` (75s) bounds the wait
+    for the FIRST 200 — if nothing ever answers (wrong/unbound base-url) we
+    bail there rather than burning the whole readiness budget (and overrunning
+    callers' subprocess timeouts, e.g. test_deploy_b4's 120s). Once a 200 is
+    seen, ``timeout_total_s`` (180s) bounds the wait for ready=true — long
+    enough for a cold warmup (BGE ~440MB + spaCy + ollama), matching verify's
+    180s poll budget.
+
+    On timeout we return (False, last_body): when last_body is not None and its
+    ``ready`` is False, the caller can tell "came up but warmup never finished"
+    apart from "never came up".
     """
     url = f"{base_url.rstrip('/')}/health"
-    deadline = time.time() + timeout_total_s
+    start = time.time()
+    deadline = start + timeout_total_s
+    liveness_deadline = start + liveness_timeout_s
+    last_body: dict | None = None
+    seen_200 = False
     while time.time() < deadline:
         try:
             with urllib.request.urlopen(url, timeout=2) as r:
                 if r.status == 200:
+                    seen_200 = True
                     raw = r.read()
                     try:
-                        return True, json.loads(raw)
+                        body = json.loads(raw)
                     except (json.JSONDecodeError, ValueError):
-                        # Older runtime returning bare "ok" — treat as
-                        # "up but identity-opaque". Caller decides.
+                        # Older runtime returning bare "ok" — up but
+                        # identity-opaque and readiness-opaque. Caller decides.
                         return True, None
+                    last_body = body
+                    if not require_ready or body.get("ready", True):
+                        return True, body
+                    # 200 but ready=false — warmup still running; keep waiting.
         except (urllib.error.URLError, urllib.error.HTTPError, ConnectionError, OSError):
             pass
+        # Never saw a 200 within the liveness window → it's not coming up;
+        # don't sit on the full readiness budget.
+        if not seen_200 and time.time() >= liveness_deadline:
+            break
         time.sleep(2)
-    return False, None
+    return False, last_body
 
 
 def _check_expected_sha(body: dict | None, expected: str) -> tuple[bool, str]:
@@ -408,7 +446,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--baseline", default=str(DEFAULT_BASELINE))
     ap.add_argument("--probes", default=None, help="comma-separated subset, e.g. P1,P12 (default: all 12)")
     ap.add_argument("--update-baseline", action="store_true",
-                    help="rewrite baseline if the run is clean (12/12 PASS, version bumped, no regressions)")
+                    help="record the current run's REAL per-probe verdicts as the new baseline "
+                         "(allowed when the run did not regress vs the prior baseline and the "
+                         "version label bumped; a 12/12 sweep is NOT required — the baseline "
+                         "captures the true warm count so a later drop is a detectable regression)")
     ap.add_argument("--no-health", action="store_true", help="skip /health poll")
     ap.add_argument("--expected-sha", default=os.environ.get("WC_PROBE_EXPECTED_SHA"),
                     help="D-SB4-1: after /health is up, assert its reported git_sha equals "
@@ -444,9 +485,14 @@ def main(argv: list[str] | None = None) -> int:
 
     # Health check (skipped on subset runs by default? no — always run unless --no-health).
     if not args.no_health:
-        print(f"[predeploy] waiting for {args.base_url}/health ...", flush=True)
+        print(f"[predeploy] waiting for {args.base_url}/health (200 + ready) ...", flush=True)
         ok, health_body = wait_for_health(args.base_url)
         if not ok:
+            if health_body is not None and health_body.get("ready") is False:
+                die(4, f"{args.base_url}/health came up but ready never became "
+                       f"true within the budget — _warmup() did not finish, so a "
+                       f"probe would measure cold-model latency. Inspect the chat "
+                       f"container's warmup-thread logs.")
             die(4, f"health check never came up at {args.base_url}/health")
         # D-SB4-1: identity gate before behaviour gate.
         if args.expected_sha:
@@ -523,13 +569,28 @@ def main(argv: list[str] | None = None) -> int:
                      baseline_version, current_version, regressions)
 
     # --- baseline update ---
-    clean_run = (n_pass == n) and not regressions and version_bumped
+    # Record the REAL warm verdicts. We deliberately do NOT require a 12/12
+    # sweep here: gating the write on a clean 12/12 (the old behaviour) meant
+    # the baseline was only ever written on a mythical perfect cold run, so in
+    # practice the file never got written, `detect_regressions(None, ...)`
+    # always returned [], and the gate was inert (S-D1: "5 FAIL пропустились").
+    # The only thing we refuse is recording a run that REGRESSED vs the prior
+    # baseline (that would bake the regression in and silence it forever) or a
+    # run whose version label did not bump (can't tell builds apart).
+    recordable = (not regressions) and version_bumped
     if args.update_baseline:
-        if clean_run:
+        if recordable:
             write_baseline(baseline_path, current_version, results)
-            print(f"[predeploy] baseline updated: {baseline_path}", flush=True)
+            print(f"[predeploy] baseline updated ({n_pass}/{n} PASS @ {current_version}): "
+                  f"{baseline_path}", flush=True)
+        elif regressions:
+            print(f"[predeploy] refusing to update baseline — run regressed {regressions} "
+                  f"vs prior baseline (recording would silence the regression)",
+                  file=sys.stderr, flush=True)
         else:
-            print(f"[predeploy] refusing to update baseline — run is not clean", file=sys.stderr, flush=True)
+            print(f"[predeploy] refusing to update baseline — version label did not bump "
+                  f"(current={current_version}); bump ANALYTICS_VERSION first",
+                  file=sys.stderr, flush=True)
 
     # --- exit code (priority order: transport/health > regressions > version > all-pass) ---
     if regressions:

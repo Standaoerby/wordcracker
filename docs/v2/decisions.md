@@ -6,6 +6,85 @@
 
 ---
 
+## 2026-06-02 — S-B8: probe-gate teeth + explicit `/health.ready` (async warmup)
+
+*(Sprint label **S-B8** = this readiness/teeth work. **S-P2c** is the separate, later step that trims the per-tool warmup dead-weight — referenced below as the thing the readiness gate must survive; the result-warming довесок it cuts shipped in 2.6.31 / `b3219c9`.)*
+
+Closes two probe-gate debts carried over from the R-24 closeout. Ships in
+**2.6.39**. v2-only — no wrapper / depth-1 callee edits, so **no re-record**.
+
+### Debt 1 — the baseline was inert (the gate had no teeth)
+
+`scripts/predeploy_baseline.json` never existed. `write_baseline` only fired
+under `--update-baseline` **and** `clean_run = (n_pass==n) and not regressions
+and version_bumped` — i.e. it required a perfect **12/12** sweep. Cold deploys
+are 10/12, so the file was never written; `detect_regressions(None, …)`
+returned `[]` and the gate passed everything (S-D1: "5 FAIL пропустились
+корректно" — the gate was inert, not lenient). `check_version_bump --against
+baseline` was inert for the same reason (no file → "no prior → bumped").
+
+**Fix.** The write-gate now records the **real** per-probe warm verdicts:
+`recordable = (not regressions) and version_bumped` — the `n_pass==n`
+requirement is dropped. The only things refused are recording a *regressed*
+run (which would bake the regression in and silence it) or a run whose version
+label didn't bump. A seed `predeploy_baseline.json` is **committed** (real warm
+12/12; `version` = last-shipped 2.6.37 so the 2.6.38 deploy passes the
+version-bump-vs-baseline gate). Operators re-record on prod after deploy once
+`/health.ready=true`. Now any probe going PASS→FAIL is a detected regression →
+exit 2 → deploy BLOCKED. Proven by `RegressionGateHasTeeth` (11/12 vs an
+all-PASS baseline → `main()` exits 2) with a contrast test showing the no-
+baseline case is inert (exit 0) — the reason the baseline is committed.
+
+### Debt 2 — cold-gate readiness, made explicit (async warmup)
+
+Old topology: `chat_server.main()` ran `_warmup()` **synchronously before**
+binding the socket, so `/health` was connection-refused until warmup returned —
+readiness was an *implicit* side effect of bind timing. Cold P6/P11 latency was
+then patched by warming specific tool paths *inside* `_warmup` (the per-tool
+`dispatch()` result-warming). That result-warming is the "dead-weight довесок".
+
+**Fix.** Readiness is now an **explicit signal**. `main()` binds the socket
+FIRST (so `/health` answers 200 for liveness immediately), runs `_warmup()` in
+a background daemon thread, and `/health` reports `ready: false` until that
+thread sets the module `_READY` event at completion (`--no-warmup` sets it at
+once). The deploy gate waits for `ready=true` before firing probes:
+`predeploy_probe_suite.wait_for_health` now polls for 200 **and** `ready=true`
+(liveness budget 75s for the first 200; readiness budget 180s for the flag,
+since the socket binds fast but a cold warmup of BGE+spaCy+ollama is slow), and
+the **compose chat healthcheck gates on `ready`** (not just 200) so the
+orchestrator doesn't flip the container "healthy" / satisfy `depends_on:
+service_healthy` while still cold. Backward-compatible: a runtime without the
+`ready` key (older image, admin server) is treated as ready.
+
+The old warm-before-bind invariant and its guard `test_main_warms_before_serving`
+are **retired**, replaced by `test_binds_before_warmup_completes` (binds+serves
+without waiting for warmup; `ready` stays false during warmup, flips true after).
+
+Because nginx `proxy_pass` to :8890 has **no health gating**, the chat request handlers (`/api/chat`, `/api/chat/stream`) now return **503** while `_READY` is clear — preserving the old "no cold requests during warmup" guarantee (previously enforced by connection-refused) and avoiding a race between an early user request and the warmup thread's model loads. Liveness GETs (`/health`, `/api/tools`, `/api/stats`) and `/api/flag_bad_answer` stay up.
+
+### ⚠️ Flagged conflict — readiness gates on model loads; only result-warming is cuttable
+
+A `ready` flag warms nothing by itself. Cold P6/P11 are fast **only** if the
+heavy models (chroma+embedder, BGE reranker ~440MB, spaCy, ollama) are loaded
+before the probe fires. Therefore:
+
+* **The heavy-model loads ARE the readiness definition** — `ready=true` ⟺
+  those models are in memory. They are **not** dead-weight and must stay in
+  `_warmup`.
+* **Only the per-tool `dispatch()` result-warming is the cuttable dead-weight**
+  (`corpus_overview`, `top_authors_by×3`, the `learning_words{…}` /
+  `hybrid_search{…}` / `enrich_word` result pre-fill). Cutting those keeps
+  cold-gate green because the models stay warm and the probes still exercise
+  the live path (just on warm infrastructure).
+* **If S-P2c removes the model loads too**, no readiness gate can keep cold =
+  12/12 — the first probe pays the cold model load regardless. In that case the
+  acceptance ("cold deploy-gate 12/12") is infeasible and must be revisited
+  (e.g. bake the models into the image / a readiness-triggered model load).
+  This is the conflict to resolve when scoping the S-P2c warmup trim — do not
+  silently delete the model touches along with the result-warming.
+
+---
+
 ## 2026-05-31 — S-R5-E8: P8 «0 слов» guard — probe false-positive (missing left boundary)
 
 Re-opens and resolves E8. The 2026-05-30 S-R5 triage disproved the
