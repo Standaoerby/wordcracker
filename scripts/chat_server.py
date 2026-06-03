@@ -1261,53 +1261,6 @@ class Handler(BaseHTTPRequestHandler):
                           "application/json; charset=utf-8")
 
 
-def _warm_page_cache(paths, label, *, log=None):
-    """S-E11 (2026-06-03) — pull retrieval-store files into the OS page cache.
-
-    Root cause of P11 cold latency (79-294s, diagnosed 2026-06-03 via prod
-    [tool]-trace): the first cache-MISS find_book_by_topic after a fresh image
-    pays cold page-cache reads of the FTS5 index + Chroma store (incl. the
-    per-candidate chunk/document text the BGE rerank scores). prod disk I/O is
-    non-parallel, so a 60-candidate rerank serialises 60 cold reads. The single
-    representative dispatch in _warmup warms only ITS query's pages; an
-    arbitrary probe topic touches different chunk pages and stays cold (prod:
-    2nd fresh query still 79s). Reading the WHOLE store here makes ANY first
-    miss warm (~7s). Read-and-discard only: no parsing, no model, no result
-    cache — the probe stays a live test. Bounded by store size; non-fatal.
-
-    Returns total bytes read.
-    """
-    import os as _os
-    total = 0
-    for pth in paths:
-        try:
-            if _os.path.isdir(pth):
-                targets = [
-                    _os.path.join(root, nm)
-                    for root, _dirs, names in _os.walk(pth)
-                    for nm in names
-                ]
-            elif _os.path.exists(pth):
-                targets = [pth]
-            else:
-                targets = []
-            for fp in targets:
-                try:
-                    with open(fp, "rb", buffering=0) as fh:
-                        while True:
-                            chunk = fh.read(8 << 20)  # 8 MiB
-                            if not chunk:
-                                break
-                            total += len(chunk)
-                except OSError:
-                    continue
-        except OSError:
-            continue
-    if log is not None:
-        log(f"{label} page-cache warmed: {total / 1e6:.0f} MB")
-    return total
-
-
 def _warmup():
     """Pre-load ChromaDB + SentenceTransformer on cuda so the first user
     query that hits semantic_search or word_contexts_global doesn't pay the
@@ -1421,66 +1374,6 @@ def _warmup():
               file=_sys.stderr, flush=True)
     except Exception as e:
         print(f"[chat] ollama warmup failed (non-fatal): "
-              f"{type(e).__name__}: {e}", file=_sys.stderr, flush=True)
-    # S-P2c-followup (E6/P6) — page-cache touch-warm the period_vocab book-scan.
-    # The deploy cold-gate (2.6.41) rolled back on P6: period_vocab scans ~6000
-    # token files from disk; the model touches above do NOT cover that I/O, so
-    # ready=true was a false guarantee for E6 and the cold scan hit the 180s
-    # probe cap. S-B8 ready-gating now lets us pre-read those files into the OS
-    # page cache here (the probe waits for ready → no scan/probe race). This is
-    # a PAGE-CACHE touch, not result-warming: read+discard the same files,
-    # compute no n-grams, cache no result → the probe stays a live test.
-    try:
-        from rag_tools import warm_period_tokens
-        t = _time.perf_counter()
-        n_files = warm_period_tokens(year_from=1837, year_to=1901)
-        print(f"[chat] E6 period tokens page-cache warmed in "
-              f"{_time.perf_counter()-t:.1f}s ({n_files} files)",
-              file=_sys.stderr, flush=True)
-    except Exception as e:
-        print(f"[chat] E6 period-token warmup failed (non-fatal): "
-              f"{type(e).__name__}: {e}", file=_sys.stderr, flush=True)
-    # S-E11 (2026-06-03) — broad page-cache warm of the retrieval store so the
-    # FIRST cache-miss find_book_by_topic (incl. the deploy probe, whose
-    # AST-invalidated cache forces a miss on an ARBITRARY topic) reads from a
-    # warm page cache instead of cold disk. Complements the single
-    # representative dispatch below (which warms code paths + _metadata_df +
-    # models, but only its own query's chunk pages). Non-fatal.
-    try:
-        import os as _os
-        t = _time.perf_counter()
-        _mb = _warm_page_cache(
-            [_os.environ.get("WC_FTS_DB",
-                             "/workspace/spgc/derived/v2_fts.sqlite"),
-             "/workspace/chroma_db"],
-            "retrieval store (FTS5+Chroma)",
-        ) / 1e6
-        print(f"[chat] retrieval-store page-cache warm done in "
-              f"{_time.perf_counter()-t:.1f}s ({_mb:.0f} MB)",
-              file=_sys.stderr, flush=True)
-    except Exception as e:
-        print(f"[chat] retrieval-store page-cache warmup failed (non-fatal): "
-              f"{type(e).__name__}: {e}", file=_sys.stderr, flush=True)
-    # S-P2c-followup (E11/P11) — touch-warm the find_book_by_topic path. P11
-    # (book_similar «что почитать после X») dispatches find_book_by_topic →
-    # hybrid_search (FTS5 + Chroma + BGE rerank over chunk text). chroma/BGE/
-    # ollama are model-warm above, but the FTS5 index load + per-candidate
-    # chunk reads are not — cold on first call. One representative (non-probe)
-    # topic warms FTS5 + the rerank chunk-read path WITHOUT caching the probe's
-    # exact result. This is the ONE targeted dispatch re-added on top of the
-    # S-P2c model-only trim — for the path the cold-gate proved model touches
-    # miss, not a blanket re-add of the cut result-warming.
-    try:
-        from scripts.v2.tool_registry import dispatch
-        t = _time.perf_counter()
-        dispatch("find_book_by_topic",
-                 {"topic": "seafaring adventure novels", "top": 8,
-                  "rerank_with": "bge_reranker"})
-        print(f"[chat] E11 find_book_by_topic path warmed in "
-              f"{_time.perf_counter()-t:.1f}s",
-              file=_sys.stderr, flush=True)
-    except Exception as e:
-        print(f"[chat] E11 find_book_by_topic warmup failed (non-fatal): "
               f"{type(e).__name__}: {e}", file=_sys.stderr, flush=True)
     # S-B8: warmup complete (each step above is individually non-fatal, so we
     # always reach here) — flip readiness so /health.ready=true and the deploy

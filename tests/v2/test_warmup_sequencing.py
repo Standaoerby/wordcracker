@@ -280,11 +280,17 @@ class WarmupDoesModelOnlyTouches(unittest.TestCase):
         self._tb.get_model_ctx = self._orig_ctx
 
     def test_warmup_does_model_only_touches(self):
-        """S-P2c #4: _warmup loads ONLY the P7/P8 models (spaCy + an ollama
-        keep_alive=-1 generate at aligned num_ctx) and dispatches NO tool — the
-        result-cache warming (corpus_overview/top_authors/author_metadata +
-        learning_words/hybrid_search/enrich_word/word_etymology) is cut. chroma
-        + BGE stay (stubbed). Pre-fix _warmup dispatched the full tools."""
+        """S-P2c #4 + S-E11 revert (2.6.45): _warmup loads ONLY the P7/P8 models
+        (spaCy + an ollama keep_alive=-1 generate at aligned num_ctx) and
+        dispatches NO tool. The S-P2c-cut result-warming
+        (corpus_overview/top_authors/author_metadata +
+        learning_words/hybrid_search/enrich_word/word_etymology) stays cut, AND
+        the 2.6.44 retrieval warms — the E6 warm_period_tokens page-cache touch,
+        the broad retrieval-store page-cache read, and the E11
+        find_book_by_topic dispatch — are now REMOVED too (they added ~97.5s of
+        churn that bought nothing: the 115GB store dwarfs RAM, so warmed pages
+        were evicted before the probe ran; P6/P11 are ADVISORY in the gate
+        instead). chroma + BGE stay (stubbed)."""
         self.cs._READY.clear()
         self.cs._warmup()
 
@@ -303,32 +309,22 @@ class WarmupDoesModelOnlyTouches(unittest.TestCase):
                          "ollama num_ctx must come from get_model_ctx (S-P2 "
                          "ctx-thrash guard)")
 
-        # E6 — page-cache touch-warm called for the period_vocab book-scan.
-        self.assertEqual(len(self.warm_calls), 1,
-                         f"warmup must call warm_period_tokens once; got "
-                         f"{self.warm_calls}")
-        self.assertEqual(self.warm_calls[0],
-                         {"year_from": 1837, "year_to": 1901},
-                         "E6 warm must cover the Victorian period the probe asks")
+        # S-E11 revert (2.6.45): the E6 period_vocab page-cache warm
+        # (warm_period_tokens) is REMOVED — warmup must NOT call it.
+        self.assertEqual(self.warm_calls, [],
+                         f"S-E11 2.6.45: warmup must NOT call warm_period_tokens "
+                         f"(E6 page-cache warm removed — the period_vocab scan is "
+                         f"not warmable and is now ADVISORY); got {self.warm_calls}")
 
-        # E11 — exactly ONE targeted dispatch re-added (find_book_by_topic),
-        # NOT a blanket re-add of the cut result-warming. The S-P2c-cut
-        # pure-cache tools must still NOT be dispatched.
+        # S-E11 revert (2.6.45): the E11 find_book_by_topic dispatch (and the
+        # broad retrieval-store page-cache read) are REMOVED — warmup is
+        # model-only readiness and dispatches NO tool at all. This subsumes the
+        # S-P2c invariant that the pure-cache result-warming stays cut.
         names = [n for n, _ in self.dispatched]
-        self.assertEqual(names, ["find_book_by_topic"],
-                         f"warmup must dispatch only find_book_by_topic (E11); "
-                         f"got {names}")
-        fb_args = self.dispatched[0][1]
-        self.assertEqual(fb_args.get("rerank_with"), "bge_reranker",
-                         "E11 warm must exercise the BGE rerank leg")
-        self.assertNotIn("преступлен", str(fb_args.get("topic", "")).lower(),
-                         "E11 warm must NOT use the probe's exact topic "
-                         "(keep P11 a live test)")
-        for cut in ("corpus_overview", "top_authors_by", "author_metadata",
-                    "learning_words", "hybrid_search", "enrich_word",
-                    "word_etymology"):
-            self.assertNotIn(cut, names,
-                             f"S-P2c-cut result-warming {cut!r} must stay cut")
+        self.assertEqual(names, [],
+                         f"S-E11 2.6.45: warmup must dispatch NO tool (E11 "
+                         f"find_book_by_topic warm removed; the heavy-model loads "
+                         f"ARE the readiness definition); got {names}")
 
         # readiness still flips after warmup completes.
         self.assertTrue(self.cs._READY.is_set(),

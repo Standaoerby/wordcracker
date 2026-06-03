@@ -390,6 +390,21 @@ class ShippedConfigShape(unittest.TestCase):
         self.assertIn("regex_no_match", kinds)
         self.assertIn("answer_not_empty", kinds)
 
+    def test_p6_p11_are_advisory_and_others_are_not(self):
+        """S-E11 (2.6.45): exactly the two cold-disk-bound retrieval probes
+        (P6 period_vocab scan, P11 115GB-store find_book_by_topic) carry
+        advisory=true, each with a non-empty advisory_reason. The other 10 stay
+        hard-gated, so a real PASS->FAIL on any of them still blocks deploy."""
+        repo_cfg = Path(__file__).resolve().parents[2] / "scripts" / "predeploy_probes.json"
+        cfg = load_config(repo_cfg)
+        advisory = {p["id"] for p in cfg["probes"] if p.get("advisory")}
+        self.assertEqual(advisory, {"P6", "P11"},
+                         "only P6/P11 (cold retrieval slow-cold) may be advisory")
+        for p in cfg["probes"]:
+            if p.get("advisory"):
+                self.assertTrue((p.get("advisory_reason") or "").strip(),
+                                f"{p['id']} advisory probe must carry a reason")
+
     def test_shipped_config_p12_uses_repeat_for_determinism(self):
         """P12 (E12 — renderer non-determinism) must run 3 times and check
         determinism across runs. Source: error_taxonomy_probe_suite §3 table."""
@@ -657,14 +672,79 @@ class RegressionGateHasTeeth(unittest.TestCase):
             ps.evaluate_probe = orig_eval
 
     def test_eleven_of_twelve_is_red_vs_all_pass_baseline(self):
+        # P1 is a HARD (non-advisory) probe: its PASS->FAIL must block. (P6/P11
+        # are advisory now, so injecting on them would NOT exit 2 — see
+        # test_advisory_probe_regression_is_not_blocking below.)
         with tempfile.TemporaryDirectory() as td:
             bl = Path(td) / "baseline.json"
             write_baseline(bl, "0.0.0-test",
                            [{"id": f"P{i}", "passed": True} for i in range(1, 13)])
-            rc = self._run_main_with(bl, fail_id="P6")
+            rc = self._run_main_with(bl, fail_id="P1")
         self.assertEqual(rc, 2,
-                         "11/12 vs an all-PASS baseline must exit 2 — deploy "
-                         "BLOCKED (proves the gate is NOT inert)")
+                         "a HARD-probe PASS->FAIL vs an all-PASS baseline must "
+                         "exit 2 — deploy BLOCKED (proves the gate is NOT inert)")
+
+    def test_advisory_probe_regression_is_not_blocking(self):
+        """S-E11 (2.6.45): P6/P11 are advisory — their cold PASS->FAIL is a
+        WARN, not a deploy-blocker. Injecting a regression on P6 alone (vs an
+        all-PASS baseline) must NOT exit 2; the deploy proceeds (exit 0)."""
+        for adv_id in ("P6", "P11"):
+            with tempfile.TemporaryDirectory() as td:
+                bl = Path(td) / "baseline.json"
+                write_baseline(bl, "0.0.0-test",
+                               [{"id": f"P{i}", "passed": True} for i in range(1, 13)])
+                rc = self._run_main_with(bl, fail_id=adv_id)
+            self.assertEqual(rc, 0,
+                             f"advisory probe {adv_id} regressing must NOT block "
+                             f"the deploy (WARN only); got exit {rc}")
+
+    def test_hard_regression_blocks_even_when_advisory_also_red(self):
+        """A hard regression wins: P1 (hard) AND P6 (advisory) both red -> still
+        exit 2. Advisory probes never MASK a real regression, they only fail to
+        cause one on their own."""
+        def fake_eval(probe, universal, payload, elapsed, terr):
+            if probe["id"] in ("P1", "P6"):
+                return False, [f"injected ({probe['id']})"]
+            return True, []
+        orig_fire, orig_eval = ps.fire_probe, ps.evaluate_probe
+        try:
+            ps.fire_probe = lambda *a, **k: ({"answer": "ok", "intent": "x", "tool_calls": []}, 1.0, None)
+            ps.evaluate_probe = fake_eval
+            with tempfile.TemporaryDirectory() as td:
+                bl = Path(td) / "baseline.json"
+                write_baseline(bl, "0.0.0-test",
+                               [{"id": f"P{i}", "passed": True} for i in range(1, 13)])
+                rc = ps.main(["--no-health", "--no-require-version-bump",
+                              "--baseline", str(bl)])
+        finally:
+            ps.fire_probe, ps.evaluate_probe = orig_fire, orig_eval
+        self.assertEqual(rc, 2, "a hard regression must block even when an "
+                               "advisory probe is also red")
+
+    def test_advisory_regression_still_records_honest_baseline(self):
+        """--update-baseline on an advisory-only regression is NOT refused: the
+        run is recordable (no HARD regression), so the new baseline captures the
+        advisory probe's REAL (now-FAIL) verdict — keeping the baseline honest
+        rather than frozen at a warm PASS it can no longer reach."""
+        orig_fire, orig_eval = ps.fire_probe, ps.evaluate_probe
+        try:
+            ps.fire_probe = lambda *a, **k: ({"answer": "ok", "intent": "x", "tool_calls": []}, 1.0, None)
+            ps.evaluate_probe = lambda probe, *a, **k: (
+                (False, ["injected (P6)"]) if probe["id"] == "P6" else (True, []))
+            with tempfile.TemporaryDirectory() as td:
+                bl = Path(td) / "baseline.json"
+                write_baseline(bl, "0.0.0-old",
+                               [{"id": f"P{i}", "passed": True} for i in range(1, 13)])
+                rc = ps.main(["--no-health", "--no-require-version-bump",
+                              "--update-baseline", "--baseline", str(bl)])
+                recorded = load_baseline(bl)
+        finally:
+            ps.fire_probe, ps.evaluate_probe = orig_fire, orig_eval
+        self.assertEqual(rc, 0, "advisory-only regression must not block")
+        self.assertEqual(recorded["verdicts"]["P6"], "FAIL",
+                         "baseline must honestly record the advisory probe's FAIL")
+        self.assertEqual(recorded["verdicts"]["P1"], "PASS",
+                         "healthy probes still recorded PASS")
 
     def test_no_baseline_is_inert_exit_zero(self):
         """Contrast: with no baseline the same 11/12 run is NOT blocked

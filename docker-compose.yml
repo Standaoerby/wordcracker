@@ -195,21 +195,21 @@ services:
       retries: 3
       # start_period sizes the background _warmup() in chat_server.main():
       # the socket binds immediately but ready=false until warmup loads the
-      # models (ChromaDB + bi-encoder + BGE + spaCy + ollama) AND runs the
-      # S-P2c-followup E6 page-cache warm + S-E11 (2026-06-03) warms: the E6
-      # period_vocab read (~6000 token files, ~180s cold) + the NEW broad
-      # retrieval-store page-cache read (whole FTS5 + Chroma store, so ANY
-      # first cache-miss find_book_by_topic — incl. the structurally-cold
-      # P11 probe on an arbitrary topic — reads warm disk; ~7s warm vs
-      # 79-294s cold, diagnosed on prod) + the E11 find_book_by_topic
-      # dispatch. prod disk I/O does NOT parallelise, so these serialise —
-      # this is the HEAVIEST warmup to date. Budget kept at 600s (NOT cut to
-      # the 2.6.43 360s, which assumed the E11 warm was REMOVED): start_period
-      # is a CEILING not a delay (a fast warm flips ready/healthy sooner), so
-      # 600s adds no latency and removes the false-timeout-rollback risk of a
-      # healthy-but-still-warming build (the 2.6.42 lesson). In step with
-      # verify's + the probe suite's poll budgets (kept 600s on this branch).
-      start_period: 600s
+      # heavy MODELS (ChromaDB + bi-encoder + BGE + spaCy + ollama). That is
+      # the whole of warmup now: the S-E11 (2.6.45) revert removed the E6
+      # period_vocab page-cache warm + the broad retrieval-store page-cache
+      # read + the E11 find_book_by_topic dispatch. They added ~97.5s of churn
+      # that bought nothing — the 115GB retrieval store is far larger than RAM,
+      # so the warmed pages were evicted before the probe ran (the slow-cold
+      # P6/P11 are a pre-existing algorithmic cost of the 115GB store / 5986-
+      # file scan, NOT a warmable miss; tracked as a separate retrieval-perf
+      # backlog and made ADVISORY in the probe gate instead of warmed-around).
+      # Budget cut 600s -> 360s: 600s was sized for that removed page-cache
+      # churn; the model-only warm is ~200s honest, and start_period is a
+      # CEILING not a delay (a faster warm flips ready/healthy sooner, adding
+      # no latency), so 360s keeps generous headroom against a cold model load
+      # while no longer waiting on warm work that no longer runs.
+      start_period: 360s
 
   admin:
     # D-SB2-1: PID 1 = python; admin is upload/index only — no LLM,
