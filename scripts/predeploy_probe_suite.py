@@ -32,7 +32,10 @@ Exit codes
 ----------
     0  — all probes PASS, no regressions, version label bumped (deploy OK)
     1  — script-level error (missing config, network setup, etc.)
-    2  — at least one regression PASS->FAIL vs baseline (deploy BLOCKED)
+    2  — at least one HARD-probe regression PASS->FAIL vs baseline (deploy
+         BLOCKED). Probes flagged "advisory": true in the config (P6/P11, the
+         cold-disk-bound retrieval probes) are EXCLUDED from this gate: their
+         PASS->FAIL is a WARN only and never returns 2 — see main().
     3  — version label did not bump vs baseline (deploy BLOCKED;
          only when --require-version-bump is set, which is the default)
     4  — health check never came up OR /health.git_sha did not match
@@ -549,8 +552,28 @@ def main(argv: list[str] | None = None) -> int:
 
     baseline = load_baseline(baseline_path)
     regressions = detect_regressions(baseline, results)
-    if regressions:
-        print(f"[predeploy] REGRESSIONS PASS->FAIL vs baseline ({baseline_path.name}): {regressions}",
+    # W-18 / S-E11 (2.6.45): split regressions into deploy-BLOCKING (hard) and
+    # ADVISORY. A probe flagged `"advisory": true` in the config (P6/P11 — the
+    # period_vocab 5986-file scan and the find_book_by_topic 115GB-store query)
+    # is cold-disk slow on a fresh image by pre-existing ALGORITHMIC cost, not
+    # by any code regression, and the store is far larger than RAM so it cannot
+    # be warmed (S-E11 removed the futile page-cache warm). Letting its cold
+    # PASS->FAIL roll back the deploy was the false-rollback bug. So an advisory
+    # regression is surfaced as a loud WARN but does NOT block the deploy or
+    # refuse the baseline update; only a HARD regression (any of the 10 healthy
+    # probes) gates the rollout. Retrieval-perf is a separate backlog project.
+    advisory_ids = {p["id"] for p in probes_all if p.get("advisory")}
+    hard_regressions = [pid for pid in regressions if pid not in advisory_ids]
+    advisory_regressions = [pid for pid in regressions if pid in advisory_ids]
+    if hard_regressions:
+        print(f"[predeploy] REGRESSIONS PASS->FAIL vs baseline ({baseline_path.name}): "
+              f"{hard_regressions} — deploy BLOCKED",
+              file=sys.stderr, flush=True)
+    if advisory_regressions:
+        print(f"[predeploy] ADVISORY probes regressed PASS->FAIL vs baseline "
+              f"({baseline_path.name}): {advisory_regressions} — WARN only, NOT "
+              f"deploy-blocking (cold retrieval-store slow-cold; see each probe's "
+              f"`advisory_reason`). Does not roll back or refuse baseline update.",
               file=sys.stderr, flush=True)
 
     # Version bump check
@@ -577,14 +600,14 @@ def main(argv: list[str] | None = None) -> int:
     # The only thing we refuse is recording a run that REGRESSED vs the prior
     # baseline (that would bake the regression in and silence it forever) or a
     # run whose version label did not bump (can't tell builds apart).
-    recordable = (not regressions) and version_bumped
+    recordable = (not hard_regressions) and version_bumped
     if args.update_baseline:
         if recordable:
             write_baseline(baseline_path, current_version, results)
             print(f"[predeploy] baseline updated ({n_pass}/{n} PASS @ {current_version}): "
                   f"{baseline_path}", flush=True)
-        elif regressions:
-            print(f"[predeploy] refusing to update baseline — run regressed {regressions} "
+        elif hard_regressions:
+            print(f"[predeploy] refusing to update baseline — run regressed {hard_regressions} "
                   f"vs prior baseline (recording would silence the regression)",
                   file=sys.stderr, flush=True)
         else:
@@ -593,7 +616,7 @@ def main(argv: list[str] | None = None) -> int:
                   file=sys.stderr, flush=True)
 
     # --- exit code (priority order: transport/health > regressions > version > all-pass) ---
-    if regressions:
+    if hard_regressions:
         return 2
     if args.require_version_bump and not version_bumped:
         return 3
