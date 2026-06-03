@@ -1261,6 +1261,53 @@ class Handler(BaseHTTPRequestHandler):
                           "application/json; charset=utf-8")
 
 
+def _warm_page_cache(paths, label, *, log=None):
+    """S-E11 (2026-06-03) — pull retrieval-store files into the OS page cache.
+
+    Root cause of P11 cold latency (79-294s, diagnosed 2026-06-03 via prod
+    [tool]-trace): the first cache-MISS find_book_by_topic after a fresh image
+    pays cold page-cache reads of the FTS5 index + Chroma store (incl. the
+    per-candidate chunk/document text the BGE rerank scores). prod disk I/O is
+    non-parallel, so a 60-candidate rerank serialises 60 cold reads. The single
+    representative dispatch in _warmup warms only ITS query's pages; an
+    arbitrary probe topic touches different chunk pages and stays cold (prod:
+    2nd fresh query still 79s). Reading the WHOLE store here makes ANY first
+    miss warm (~7s). Read-and-discard only: no parsing, no model, no result
+    cache — the probe stays a live test. Bounded by store size; non-fatal.
+
+    Returns total bytes read.
+    """
+    import os as _os
+    total = 0
+    for pth in paths:
+        try:
+            if _os.path.isdir(pth):
+                targets = [
+                    _os.path.join(root, nm)
+                    for root, _dirs, names in _os.walk(pth)
+                    for nm in names
+                ]
+            elif _os.path.exists(pth):
+                targets = [pth]
+            else:
+                targets = []
+            for fp in targets:
+                try:
+                    with open(fp, "rb", buffering=0) as fh:
+                        while True:
+                            chunk = fh.read(8 << 20)  # 8 MiB
+                            if not chunk:
+                                break
+                            total += len(chunk)
+                except OSError:
+                    continue
+        except OSError:
+            continue
+    if log is not None:
+        log(f"{label} page-cache warmed: {total / 1e6:.0f} MB")
+    return total
+
+
 def _warmup():
     """Pre-load ChromaDB + SentenceTransformer on cuda so the first user
     query that hits semantic_search or word_contexts_global doesn't pay the
@@ -1392,6 +1439,27 @@ def _warmup():
               file=_sys.stderr, flush=True)
     except Exception as e:
         print(f"[chat] E6 period-token warmup failed (non-fatal): "
+              f"{type(e).__name__}: {e}", file=_sys.stderr, flush=True)
+    # S-E11 (2026-06-03) — broad page-cache warm of the retrieval store so the
+    # FIRST cache-miss find_book_by_topic (incl. the deploy probe, whose
+    # AST-invalidated cache forces a miss on an ARBITRARY topic) reads from a
+    # warm page cache instead of cold disk. Complements the single
+    # representative dispatch below (which warms code paths + _metadata_df +
+    # models, but only its own query's chunk pages). Non-fatal.
+    try:
+        import os as _os
+        t = _time.perf_counter()
+        _mb = _warm_page_cache(
+            [_os.environ.get("WC_FTS_DB",
+                             "/workspace/spgc/derived/v2_fts.sqlite"),
+             "/workspace/chroma_db"],
+            "retrieval store (FTS5+Chroma)",
+        ) / 1e6
+        print(f"[chat] retrieval-store page-cache warm done in "
+              f"{_time.perf_counter()-t:.1f}s ({_mb:.0f} MB)",
+              file=_sys.stderr, flush=True)
+    except Exception as e:
+        print(f"[chat] retrieval-store page-cache warmup failed (non-fatal): "
               f"{type(e).__name__}: {e}", file=_sys.stderr, flush=True)
     # S-P2c-followup (E11/P11) — touch-warm the find_book_by_topic path. P11
     # (book_similar «что почитать после X») dispatches find_book_by_topic →

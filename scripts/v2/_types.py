@@ -181,6 +181,15 @@ class ToolResult:
 
     def with_cache_hit(self, hit: bool = True) -> ToolResult:
         self.cache_hit = hit
+        if hit:
+            # S-E11 (2026-06-03): a cache HIT did ~no tool compute this
+            # request. The stored `runtime_ms` is the ORIGINAL cold-compute
+            # stamp from when the entry was written; surfacing it as THIS
+            # request's runtime is a phantom (observed: 156_433 ms on a 19 s
+            # request). Zero it so dashboards / feedback / probes read the
+            # truth — `cache_hit=True` already flags served-from-cache
+            # provenance for anyone who needs the distinction.
+            self.runtime_ms = 0
         return self
 
 
