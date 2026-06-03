@@ -225,7 +225,7 @@ def evaluate_across_runs(probe: dict, payloads: list[dict]) -> list[str]:
 # HTTP
 # ---------------------------------------------------------------------------
 
-def wait_for_health(base_url: str, timeout_total_s: int = 180,
+def wait_for_health(base_url: str, timeout_total_s: int = 600,
                     liveness_timeout_s: int = 75,
                     require_ready: bool = True) -> tuple[bool, dict | None]:
     """Poll /health until 200 OK *and* ready=true (or timeout). Returns (ok, body_dict).

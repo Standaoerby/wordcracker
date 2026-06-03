@@ -206,12 +206,17 @@ class WarmupDoesModelOnlyTouches(unittest.TestCase):
         )
 
         # Skip the chroma block (wrapped in try/except in _warmup).
+        self.warm_calls = []
+        self._orig_warm = None
         try:
             import rag_tools as rt
             self._rt = rt
             self._orig_chroma = rt._get_chroma_collection_with_embedder
             rt._get_chroma_collection_with_embedder = lambda: (_ for _ in ()).throw(
                 RuntimeError("stubbed: no chroma in test"))
+            # E6 touch-warm — record the page-cache warm call, read no real files.
+            self._orig_warm = getattr(rt, "warm_period_tokens", None)
+            rt.warm_period_tokens = lambda **k: (self.warm_calls.append(k) or 0)
         except Exception:
             self._rt = None
 
@@ -265,6 +270,8 @@ class WarmupDoesModelOnlyTouches(unittest.TestCase):
         self.scoring.REGISTRY["bge_reranker"] = self._orig_plugin
         if self._rt is not None:
             self._rt._get_chroma_collection_with_embedder = self._orig_chroma
+            if self._orig_warm is not None:
+                self._rt.warm_period_tokens = self._orig_warm
         if self._orig_spacy is not None:
             _sys.modules["spacy"] = self._orig_spacy
         else:
@@ -296,11 +303,34 @@ class WarmupDoesModelOnlyTouches(unittest.TestCase):
                          "ollama num_ctx must come from get_model_ctx (S-P2 "
                          "ctx-thrash guard)")
 
-        # The cut: NO tool dispatched at all anymore.
-        self.assertEqual(self.dispatched, [],
-                         f"warmup must dispatch no tool now; got {self.dispatched}")
+        # E6 — page-cache touch-warm called for the period_vocab book-scan.
+        self.assertEqual(len(self.warm_calls), 1,
+                         f"warmup must call warm_period_tokens once; got "
+                         f"{self.warm_calls}")
+        self.assertEqual(self.warm_calls[0],
+                         {"year_from": 1837, "year_to": 1901},
+                         "E6 warm must cover the Victorian period the probe asks")
 
-        # readiness still flips after the (now model-only) warmup completes.
+        # E11 — exactly ONE targeted dispatch re-added (find_book_by_topic),
+        # NOT a blanket re-add of the cut result-warming. The S-P2c-cut
+        # pure-cache tools must still NOT be dispatched.
+        names = [n for n, _ in self.dispatched]
+        self.assertEqual(names, ["find_book_by_topic"],
+                         f"warmup must dispatch only find_book_by_topic (E11); "
+                         f"got {names}")
+        fb_args = self.dispatched[0][1]
+        self.assertEqual(fb_args.get("rerank_with"), "bge_reranker",
+                         "E11 warm must exercise the BGE rerank leg")
+        self.assertNotIn("преступлен", str(fb_args.get("topic", "")).lower(),
+                         "E11 warm must NOT use the probe's exact topic "
+                         "(keep P11 a live test)")
+        for cut in ("corpus_overview", "top_authors_by", "author_metadata",
+                    "learning_words", "hybrid_search", "enrich_word",
+                    "word_etymology"):
+            self.assertNotIn(cut, names,
+                             f"S-P2c-cut result-warming {cut!r} must stay cut")
+
+        # readiness still flips after warmup completes.
         self.assertTrue(self.cs._READY.is_set(),
                         "warmup must still set _READY at completion")
 

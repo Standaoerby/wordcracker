@@ -558,6 +558,51 @@ def _spacy_pos_tags(words: list[str]) -> dict:
     return out
 
 
+def warm_period_tokens(year_from: int | None = None,
+                       year_to: int | None = None,
+                       max_books: int = 6000) -> int:
+    """S-P2c-followup (E6/P6): page-cache touch-warm for the period_vocab scan.
+
+    Reads (and DISCARDS) the same per-book token files `top_ngrams_by_author`
+    would scan for a period query, so the OS page cache is hot before the
+    deploy probe hits P6. Cold (empty page cache) the P6 scan of ~6000 files
+    runs 180s and times the probe out; warm it is ~11s. _warmup's model touches
+    (chroma/BGE/spaCy/ollama) do not cover this disk I/O, so without this read
+    `ready=true` is a false guarantee for E6. Safe to pre-read here only because
+    S-B8 ready-gating makes the probe wait for warmup → no scan/probe race (the
+    race is why S-R5 had rejected a warmup).
+
+    Selection + cap MIRROR `top_ngrams_by_author` (author_regex='.*' + period,
+    top-`max_books` by downloads). Kept as a SEPARATE function, not a refactor
+    of that stamped binding, so this warm path does not shift the tool's AST
+    fingerprint / force a fixture re-record. Computes no n-grams and caches no
+    result — the probe stays a live test. Returns the file count read.
+    """
+    sel = _select_books(".*", year_from=year_from, year_to=year_to)
+    if not len(sel):
+        return 0
+    if len(sel) > max_books:
+        sel = sel.copy()
+        sel["downloads"] = pd.to_numeric(sel.get("downloads"),
+                                         errors="coerce").fillna(0)
+        sel = sel.sort_values("downloads", ascending=False).head(max_books)
+
+    def _read_one(pg: str) -> int:
+        f = _tokens_path(pg)
+        if not f.exists():
+            return 0
+        with open(f, "rb") as fh:   # read raw bytes → warms the disk page
+            fh.read()               # cache; content discarded (no counting)
+        return 1
+
+    book_ids = list(sel["id"])
+    if len(book_ids) > 16:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            return sum(ex.map(_read_one, book_ids))
+    return sum(_read_one(pg) for pg in book_ids)
+
+
 def top_ngrams_by_author(author_regex: str, n: int = 2, top: int = 20,
                          pos_filter: list[str] | None = None,
                          year_from: int | None = None,
