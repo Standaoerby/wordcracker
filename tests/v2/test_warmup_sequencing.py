@@ -311,24 +311,23 @@ class WarmupDoesModelOnlyTouches(unittest.TestCase):
                          {"year_from": 1837, "year_to": 1901},
                          "E6 warm must cover the Victorian period the probe asks")
 
-        # E11 — exactly ONE targeted dispatch re-added (find_book_by_topic),
-        # NOT a blanket re-add of the cut result-warming. The S-P2c-cut
-        # pure-cache tools must still NOT be dispatched.
+        # E11 (2.6.43) — the find_book_by_topic warm dispatch is REMOVED.
+        # P11 is agentic-latency-bound (dozens of renderers per call, not
+        # cold disk), so warming find_book_by_topic only bloated _warmup
+        # (>600s, deploy 2.6.42 hung) without moving P11. _warmup now
+        # dispatches NO tool at all — the probe stays a fully live test and
+        # the S-P2c-cut result-warming stays cut.
         names = [n for n, _ in self.dispatched]
-        self.assertEqual(names, ["find_book_by_topic"],
-                         f"warmup must dispatch only find_book_by_topic (E11); "
-                         f"got {names}")
-        fb_args = self.dispatched[0][1]
-        self.assertEqual(fb_args.get("rerank_with"), "bge_reranker",
-                         "E11 warm must exercise the BGE rerank leg")
-        self.assertNotIn("преступлен", str(fb_args.get("topic", "")).lower(),
-                         "E11 warm must NOT use the probe's exact topic "
-                         "(keep P11 a live test)")
-        for cut in ("corpus_overview", "top_authors_by", "author_metadata",
+        self.assertEqual(names, [],
+                         f"warmup must dispatch NO tool (E11 find_book_by_topic "
+                         f"warm removed in 2.6.43); got {names}")
+        for cut in ("find_book_by_topic",
+                    "corpus_overview", "top_authors_by", "author_metadata",
                     "learning_words", "hybrid_search", "enrich_word",
                     "word_etymology"):
             self.assertNotIn(cut, names,
-                             f"S-P2c-cut result-warming {cut!r} must stay cut")
+                             f"warmup must not dispatch {cut!r} (model-only + "
+                             f"E6 page-cache touch; no agentic/result-warming)")
 
         # readiness still flips after warmup completes.
         self.assertTrue(self.cs._READY.is_set(),

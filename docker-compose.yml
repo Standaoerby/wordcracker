@@ -173,24 +173,40 @@ services:
       # ready=false until warmup finishes. Gating on 200 alone would flip the
       # container "healthy" while still cold — routing traffic and satisfying
       # `depends_on: service_healthy` before the models are loaded. Parsing
-      # ready=true is what keeps the old "healthy ⇒ warm" guarantee. A
-      # connection-refused (pre-bind) or ready=false both keep it "starting".
-      test: ["CMD-SHELL", "python -c \"import urllib.request,json,sys; b=json.load(urllib.request.urlopen('http://127.0.0.1:8890/health', timeout=2)); sys.exit(0 if b.get('ready') else 1)\""]
+      # ready=true is what keeps the old "healthy ⇒ warm" guarantee.
+      #
+      # 2.6.43 rollback-compat: b.get('ready', True) is the SAME version-
+      # agnostic rule predeploy_probe_suite.wait_for_health already uses. An
+      # S-B8+ image emits ready=false→true, so the "healthy ⇒ warm" gate stays
+      # exactly as strict for every image that HAS a readiness concept. A
+      # pre-S-B8 rollback target (e.g. baca1a8/2.6.37) serves /health JSON
+      # WITHOUT a ready key — there 'ready' defaults to True so the old image
+      # goes healthy on liveness instead of hanging 'starting' forever under
+      # this newer healthcheck (the bug that made deploy.sh's rollback verify
+      # poll_until_healthy time out and falsely report a 'bad state'). A
+      # pre-B3 plain-text body ('ok', non-JSON) is likewise healthy on 200.
+      # Only an explicit ready=false keeps it 'starting'. The forward-deploy
+      # silent-success guard is unaffected: verify still requires JSON +
+      # matching git_sha and the probe gate still waits for ready=true — the
+      # healthcheck is the coarse signal, not the gate.
+      test: ["CMD-SHELL", "python -c \"import urllib.request,json,sys; raw=urllib.request.urlopen('http://127.0.0.1:8890/health', timeout=2).read(); b=json.loads(raw) if raw.lstrip()[:1]==b'{' else {}; sys.exit(0 if b.get('ready', True) else 1)\""]
       interval: 30s
       timeout: 5s
       retries: 3
       # start_period sizes the background _warmup() in chat_server.main():
       # the socket binds immediately but ready=false until warmup loads the
       # models (ChromaDB + bi-encoder + BGE + spaCy + ollama) AND runs the
-      # S-P2c-followup E6/E11 touch-warms — the E6 period_vocab page-cache
-      # read (~6000 token files) + the E11 find_book_by_topic retrieval warm
-      # add ~340s on a cold host (empty page cache; prod disk I/O does NOT
-      # parallelise, so these serialise). Budget raised 120s -> 600s to keep
-      # the healthcheck "starting" (not "unhealthy") through the full warm,
-      # in step with verify's 600s poll budget and the probe suite's 600s
-      # wait_for_health readiness budget. start_period is a ceiling: a faster
-      # warm flips ready (and the container "healthy") sooner.
-      start_period: 600s
+      # S-P2c-followup E6 page-cache touch-warm. The E11 find_book_by_topic
+      # warm was REMOVED in 2.6.43 (agentic — dozens of renderers per call —
+      # it drove _warmup past 600s without moving P11 and hung the 2.6.42
+      # deploy). What remains: base model loads (~15-20s) + the E6 period_vocab
+      # page-cache read (~6000 token files, ~180s cold; prod disk I/O does NOT
+      # parallelise) ≈ ~200s honest warm. Budget set to 360s — ~1.8x the honest
+      # warm, well below the old 600s yet clear of the ~200s worst case, in
+      # step with verify's 360s poll budget and the probe suite's 360s
+      # wait_for_health budget. start_period is a ceiling: a faster warm flips
+      # ready (and the container "healthy") sooner.
+      start_period: 360s
 
   admin:
     # D-SB2-1: PID 1 = python; admin is upload/index only — no LLM,

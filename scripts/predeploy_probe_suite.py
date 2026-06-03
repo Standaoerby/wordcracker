@@ -225,7 +225,7 @@ def evaluate_across_runs(probe: dict, payloads: list[dict]) -> list[str]:
 # HTTP
 # ---------------------------------------------------------------------------
 
-def wait_for_health(base_url: str, timeout_total_s: int = 600,
+def wait_for_health(base_url: str, timeout_total_s: int = 360,
                     liveness_timeout_s: int = 75,
                     require_ready: bool = True) -> tuple[bool, dict | None]:
     """Poll /health until 200 OK *and* ready=true (or timeout). Returns (ok, body_dict).
@@ -251,9 +251,12 @@ def wait_for_health(base_url: str, timeout_total_s: int = 600,
     for the FIRST 200 — if nothing ever answers (wrong/unbound base-url) we
     bail there rather than burning the whole readiness budget (and overrunning
     callers' subprocess timeouts, e.g. test_deploy_b4's 120s). Once a 200 is
-    seen, ``timeout_total_s`` (180s) bounds the wait for ready=true — long
-    enough for a cold warmup (BGE ~440MB + spaCy + ollama), matching verify's
-    180s poll budget.
+    seen, ``timeout_total_s`` (360s) bounds the wait for ready=true — long
+    enough for a cold warmup (BGE ~440MB + spaCy + ollama + the E6 period-
+    vocab page-cache read ~180s), matching verify's 360s poll budget. (Was
+    600s in 2.6.42 to cover the E11 find_book_by_topic warm; that agentic
+    warm was removed in 2.6.43, so the honest warm is ~200s and the budget
+    came back down to 360s with margin.)
 
     On timeout we return (False, last_body): when last_body is not None and its
     ``ready`` is False, the caller can tell "came up but warmup never finished"
