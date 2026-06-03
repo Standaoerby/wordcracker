@@ -180,14 +180,17 @@ services:
       timeout: 5s
       retries: 3
       # start_period sizes the background _warmup() in chat_server.main():
-      # the socket binds immediately but ready=false until warmup loads
-      # ChromaDB + bi-encoder + BGE reranker (+ the per-tool result-warming
-      # dead-weight that S-P2c trims). A cold host (empty page cache + ollama
-      # model load) can take >60s, so the budget is 120s — comfortably under
-      # verify_deployed_image.sh's poll_until_healthy budget
-      # (VERIFY_HEALTHCHECK_BUDGET_S=180s) and the probe suite's 180s
-      # wait_for_health readiness budget.
-      start_period: 120s
+      # the socket binds immediately but ready=false until warmup loads the
+      # models (ChromaDB + bi-encoder + BGE + spaCy + ollama) AND runs the
+      # S-P2c-followup E6/E11 touch-warms — the E6 period_vocab page-cache
+      # read (~6000 token files) + the E11 find_book_by_topic retrieval warm
+      # add ~340s on a cold host (empty page cache; prod disk I/O does NOT
+      # parallelise, so these serialise). Budget raised 120s -> 600s to keep
+      # the healthcheck "starting" (not "unhealthy") through the full warm,
+      # in step with verify's 600s poll budget and the probe suite's 600s
+      # wait_for_health readiness budget. start_period is a ceiling: a faster
+      # warm flips ready (and the container "healthy") sooner.
+      start_period: 600s
 
   admin:
     # D-SB2-1: PID 1 = python; admin is upload/index only — no LLM,

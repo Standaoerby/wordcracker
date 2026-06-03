@@ -1375,6 +1375,45 @@ def _warmup():
     except Exception as e:
         print(f"[chat] ollama warmup failed (non-fatal): "
               f"{type(e).__name__}: {e}", file=_sys.stderr, flush=True)
+    # S-P2c-followup (E6/P6) — page-cache touch-warm the period_vocab book-scan.
+    # The deploy cold-gate (2.6.41) rolled back on P6: period_vocab scans ~6000
+    # token files from disk; the model touches above do NOT cover that I/O, so
+    # ready=true was a false guarantee for E6 and the cold scan hit the 180s
+    # probe cap. S-B8 ready-gating now lets us pre-read those files into the OS
+    # page cache here (the probe waits for ready → no scan/probe race). This is
+    # a PAGE-CACHE touch, not result-warming: read+discard the same files,
+    # compute no n-grams, cache no result → the probe stays a live test.
+    try:
+        from rag_tools import warm_period_tokens
+        t = _time.perf_counter()
+        n_files = warm_period_tokens(year_from=1837, year_to=1901)
+        print(f"[chat] E6 period tokens page-cache warmed in "
+              f"{_time.perf_counter()-t:.1f}s ({n_files} files)",
+              file=_sys.stderr, flush=True)
+    except Exception as e:
+        print(f"[chat] E6 period-token warmup failed (non-fatal): "
+              f"{type(e).__name__}: {e}", file=_sys.stderr, flush=True)
+    # S-P2c-followup (E11/P11) — touch-warm the find_book_by_topic path. P11
+    # (book_similar «что почитать после X») dispatches find_book_by_topic →
+    # hybrid_search (FTS5 + Chroma + BGE rerank over chunk text). chroma/BGE/
+    # ollama are model-warm above, but the FTS5 index load + per-candidate
+    # chunk reads are not — cold on first call. One representative (non-probe)
+    # topic warms FTS5 + the rerank chunk-read path WITHOUT caching the probe's
+    # exact result. This is the ONE targeted dispatch re-added on top of the
+    # S-P2c model-only trim — for the path the cold-gate proved model touches
+    # miss, not a blanket re-add of the cut result-warming.
+    try:
+        from scripts.v2.tool_registry import dispatch
+        t = _time.perf_counter()
+        dispatch("find_book_by_topic",
+                 {"topic": "seafaring adventure novels", "top": 8,
+                  "rerank_with": "bge_reranker"})
+        print(f"[chat] E11 find_book_by_topic path warmed in "
+              f"{_time.perf_counter()-t:.1f}s",
+              file=_sys.stderr, flush=True)
+    except Exception as e:
+        print(f"[chat] E11 find_book_by_topic warmup failed (non-fatal): "
+              f"{type(e).__name__}: {e}", file=_sys.stderr, flush=True)
     # S-B8: warmup complete (each step above is individually non-fatal, so we
     # always reach here) — flip readiness so /health.ready=true and the deploy
     # gate stops waiting and fires its probes against a warm runtime.

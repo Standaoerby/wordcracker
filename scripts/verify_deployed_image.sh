@@ -162,7 +162,8 @@ fi
 #           is left closed. Closes the rollback-to-pre-B3 dead-end
 #           without re-opening the forward-deploy silent-success
 #           vector.
-# VERIFY_HEALTHCHECK_BUDGET_S env (default 180) sizes the poll
+# VERIFY_HEALTHCHECK_BUDGET_S env (default 600 — S-P2c-followup: the
+# E6/E11 page-cache + retrieval touch-warms add ~340s to _warmup) sizes the poll
 # budget. Tests in tests/v2/test_verify_deployed_image.py drive
 # the poll via a `docker` PATH shim that returns controlled
 # `.State.Health.Status` values — no env-knob escape hatch in
@@ -179,7 +180,7 @@ fi
 poll_until_healthy() {
     local service="$1"
     local container_name="$2"
-    local budget="${VERIFY_HEALTHCHECK_BUDGET_S:-180}"
+    local budget="${VERIFY_HEALTHCHECK_BUDGET_S:-600}"
     local interval=5
     local elapsed=0
     local status
