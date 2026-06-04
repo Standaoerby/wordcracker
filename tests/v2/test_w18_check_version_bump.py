@@ -22,6 +22,7 @@ Positive tests:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -38,6 +39,7 @@ from scripts.check_version_bump import (  # noqa: E402
     read_current_version,
     read_version_from_baseline,
     read_version_from_file,
+    resolve_merge_base,
 )
 
 
@@ -234,6 +236,159 @@ class MainAgainstGitMocked(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 main(["--against", "git", "--git-ref", "nonsuch"])
             self.assertEqual(cm.exception.code, 1)
+
+
+class MainAgainstMergeBaseMocked(unittest.TestCase):
+    """`--against merge-base`: resolve the fork point, then compare the
+    label there vs current. We mock subprocess.check_output so the unit
+    test is decoupled from real history; the two calls (merge-base, then
+    git show) are fed in order via side_effect."""
+
+    def test_bumped_vs_merge_base_exits_0(self):
+        # call 1: git merge-base -> a fork-point sha; call 2: git show at
+        # that sha -> an OLD version. current (repo file) differs -> bump.
+        with mock.patch(
+            "scripts.check_version_bump.subprocess.check_output",
+            side_effect=[b"deadbeef\n", b'ANALYTICS_VERSION = "0.0.1-fork"\n'],
+        ):
+            self.assertEqual(
+                main(["--against", "merge-base", "--git-ref", "origin/main"]),
+                0,
+            )
+
+    def test_same_at_merge_base_exits_3(self):
+        current = read_current_version()
+        with mock.patch(
+            "scripts.check_version_bump.subprocess.check_output",
+            side_effect=[b"deadbeef\n", f'ANALYTICS_VERSION = "{current}"\n'.encode()],
+        ):
+            with self.assertRaises(SystemExit) as cm:
+                main(["--against", "merge-base", "--git-ref", "origin/main"])
+            self.assertEqual(cm.exception.code, 3)
+
+    def test_bad_base_ref_exits_1(self):
+        err = subprocess.CalledProcessError(
+            returncode=128, cmd=["git", "merge-base", "HEAD", "origin/nope"],
+            stderr=b"fatal: Not a valid object name origin/nope\n",
+        )
+        with mock.patch("scripts.check_version_bump.subprocess.check_output",
+                        side_effect=err):
+            with self.assertRaises(SystemExit) as cm:
+                resolve_merge_base("origin/nope")
+            self.assertEqual(cm.exception.code, 1)
+
+    def test_empty_merge_base_exits_1(self):
+        # Unrelated histories -> merge-base prints nothing, exit 0. The
+        # resolver must treat the empty result as a hard error, not a
+        # silent "compare against <empty>".
+        with mock.patch("scripts.check_version_bump.subprocess.check_output",
+                        return_value=b"\n"):
+            with self.assertRaises(SystemExit) as cm:
+                resolve_merge_base("origin/main")
+            self.assertEqual(cm.exception.code, 1)
+
+
+def _have_git() -> bool:
+    try:
+        return subprocess.run(["git", "--version"], capture_output=True,
+                              timeout=5).returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+class MainAgainstMergeBaseRealGit(unittest.TestCase):
+    """End-to-end against a throwaway git repo, with REPO_ROOT patched to
+    it. Reproduces the R-25 false-red: comparing against the moving
+    origin/main *tip* reds a legitimately-bumped branch once the base
+    advances; the merge-base (fork point) does not.
+
+    Three scenarios from the brief:
+      * merged branch (base advanced past it) -> NOT red
+      * PR with a bump                        -> green
+      * PR without a bump                     -> red
+    """
+
+    def setUp(self):
+        if not _have_git():
+            self.skipTest("git not on PATH")
+        self._env = os.environ.copy()
+        self._env.update({
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+        })
+        self._td = tempfile.TemporaryDirectory()
+        self.repo = Path(self._td.name)
+        self.vpath = self.repo / "scripts" / "v2" / "__version__.py"
+        self.vpath.parent.mkdir(parents=True)
+        self._git("init", "-q", "-b", "main")
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _git(self, *args):
+        proc = subprocess.run(["git", *args], cwd=str(self.repo),
+                              capture_output=True, text=True, env=self._env)
+        assert proc.returncode == 0, f"git {args} failed: {proc.stderr}"
+        return proc
+
+    def _set_version(self, v: str):
+        self.vpath.write_text(f'ANALYTICS_VERSION = "{v}"\n', encoding="utf-8")
+
+    def _commit(self, msg: str):
+        self._git("add", "-A")
+        self._git("commit", "-qm", msg)
+
+    def _run_merge_base(self):
+        # Patch REPO_ROOT so read_current_version + git calls all target
+        # the throwaway repo. `origin/main` is faked as a local ref.
+        with mock.patch("scripts.check_version_bump.REPO_ROOT", self.repo):
+            try:
+                return main(["--against", "merge-base", "--git-ref", "main"])
+            except SystemExit as e:
+                return e.code
+
+    def test_pr_with_bump_is_green(self):
+        self._set_version("2.6.44")
+        self._commit("main @ 2.6.44")
+        self._git("checkout", "-q", "-b", "feat")
+        self._set_version("2.6.45")
+        self._commit("feat: bump 2.6.45")
+        self.assertEqual(self._run_merge_base(), 0)
+
+    def test_pr_without_bump_is_red(self):
+        self._set_version("2.6.45")
+        self._commit("main @ 2.6.45")
+        self._git("checkout", "-q", "-b", "feat")
+        (self.repo / "unrelated.txt").write_text("x", encoding="utf-8")
+        self._commit("feat: no version change")
+        self.assertEqual(self._run_merge_base(), 3)
+
+    def test_merged_branch_not_red_after_base_advances(self):
+        # main @ 2.6.44 (fork point M0).
+        self._set_version("2.6.44")
+        self._commit("main @ 2.6.44")
+        fork = self._git("rev-parse", "HEAD").stdout.strip()
+        # feat off M0, bumps to 2.6.45.
+        self._git("checkout", "-q", "-b", "feat")
+        self._set_version("2.6.45")
+        self._commit("feat: bump 2.6.45")
+        # main advances to 2.6.45 too (squash-merge equivalent: a NEW
+        # commit on main carrying the bumped label, parent = M0, NOT feat).
+        self._git("checkout", "-q", "main")
+        self._set_version("2.6.45")
+        self._commit("main: squash-merge of feat (2.6.45)")
+        # Re-run the PR's version-bump on feat's head. The moving-tip
+        # compare would now read main==2.6.45==current and FALSE-RED;
+        # merge-base resolves to M0 (2.6.44) and stays green.
+        self._git("checkout", "-q", "feat")
+        self.assertEqual(
+            self._run_merge_base(), 0,
+            "merged branch re-run must NOT red once the base advanced "
+            "past it (R-25 false-red fix)",
+        )
+        # Guard the test's own premise: feat's merge-base with main is M0.
+        with mock.patch("scripts.check_version_bump.REPO_ROOT", self.repo):
+            self.assertEqual(resolve_merge_base("main"), fork)
 
 
 class MainStrictIncrease(unittest.TestCase):

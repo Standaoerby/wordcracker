@@ -390,11 +390,22 @@ def load_baseline(path: Path) -> dict | None:
 
 
 def write_baseline(path: Path, version: str, results: list[dict]) -> None:
-    payload = {
+    payload = {}
+    # S-B10: carry the human-facing `_note` forward across re-stamps. It is
+    # documentation only (no gate reads it — detect_regressions reads
+    # `verdicts`, the bump gate reads `version`), but a prod
+    # `--update-baseline` previously DROPPED it, so the committed
+    # honest-baseline note silently rotted to nothing. Preserving it keeps
+    # the doc truthful after each prod re-record. Does NOT change the
+    # gate-relevant shape (version / recorded_at / verdicts) one bit.
+    existing = load_baseline(path)
+    if existing and isinstance(existing.get("_note"), str):
+        payload["_note"] = existing["_note"]
+    payload.update({
         "version": version,
         "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "verdicts": {r["id"]: ("PASS" if r["passed"] else "FAIL") for r in results},
-    }
+    })
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
