@@ -1,4 +1,5 @@
 {
+  "_note": "HONEST baseline (not a seed, not a mythical 12/12). `verdicts` are the REAL warm per-probe outcomes from the last clean prod run at `version`; `predeploy_probe_suite.py` writes them via --update-baseline whenever a run did not HARD-regress and the label bumped (a 12/12 sweep is NOT required — recording the true warm count is what makes a later drop a detectable regression). Gate semantics: 10 HARD probes block rollout on any PASS->FAIL; P6 (period_vocab full-corpus scan) and P11 (find_book_by_topic 115GB-store query) are ADVISORY — cold-disk slow by pre-existing algorithmic cost, store >> RAM so un-warmable, so their cold PASS->FAIL only WARNs and never rolls back or refuses a baseline update. Version-bump-vs-baseline is the separate first gate. Re-stamp on prod after a deploy with `predeploy_gate.sh --update-baseline` once /health.ready=true. `_note` is documentation only — no gate reads it, and write_baseline carries it forward across re-stamps.",
   "version": "2.6.45",
   "recorded_at": "2026-06-03T18:59:52+00:00",
   "verdicts": {

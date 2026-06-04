@@ -33,27 +33,50 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          # We need the parent commit for `git show HEAD~1:...`.
+          # Full history: push needs HEAD~1; pull_request needs the
+          # merge-base of the PR head against origin/<base>.
           fetch-depth: 0
+          # CRITICAL for the merge-base compare: on pull_request, check
+          # out the PR *head* commit, NOT the default merge commit. For
+          # a merge commit, origin/<base> is a parent, so
+          # `git merge-base HEAD origin/<base>` collapses to the base tip
+          # and the moving-tip false-red comes straight back. `head.sha`
+          # is empty on push events → checkout falls back to the pushed
+          # commit (the HEAD~1 path below).
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
-      - name: Resolve base ref
+      - name: Resolve compare mode
         id: base
+        # pull_request: compare against the STABLE fork point
+        # (merge-base HEAD origin/<base>), immune to the base branch
+        # advancing — a squash-merged branch re-run, or any post-merge
+        # state where origin/main already carries the bumped label, no
+        # longer false-reds (the R-25 bug: 4 false reds vs the moving tip).
+        # push-to-main: HEAD~1 is the unambiguous previous tip — leave it.
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # Ensure origin/<base> resolves for `git merge-base` — fetch
+            # the base branch into its remote-tracking ref explicitly
+            # (checkout's narrow refspec may not have populated it).
+            git fetch --no-tags origin \
+              "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+            echo "against=merge-base" >> $GITHUB_OUTPUT
             echo "ref=origin/${{ github.base_ref }}" >> $GITHUB_OUTPUT
           else
+            echo "against=git" >> $GITHUB_OUTPUT
             echo "ref=HEAD~1" >> $GITHUB_OUTPUT
           fi
 
       - name: Check ANALYTICS_VERSION moved
         run: |
           python scripts/check_version_bump.py \
-            --against git --git-ref "${{ steps.base.outputs.ref }}"
+            --against "${{ steps.base.outputs.against }}" \
+            --git-ref "${{ steps.base.outputs.ref }}"
 
   probe-config-sanity:
     name: 12-probe config sanity

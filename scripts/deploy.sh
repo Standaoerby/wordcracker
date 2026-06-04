@@ -74,6 +74,42 @@ CHAT_BASE_URL="${CHAT_BASE_URL:-http://127.0.0.1:8890}"
 # WC_RERECORD_BUDGET_SECS.
 RERECORD_BUDGET_SECS="${WC_RERECORD_BUDGET_SECS:-900}"
 export VERIFY_HEALTHCHECK_BUDGET_S="${VERIFY_HEALTHCHECK_BUDGET_S:-600}"
+# S-B10 #1: grace window between SIGTERM and SIGKILL for the re-record
+# `timeout`. The recorder os._exit()s on its own, but if a tool wedges
+# the SIGTERM may be swallowed — escalate to SIGKILL after this.
+RERECORD_KILL_AFTER="${WC_RERECORD_KILL_AFTER:-30s}"
+
+# --- single cleanup path (S-B10) ---
+# One trap drives every teardown so all exit paths (success, rollback,
+# exit 10/11/12, set -e abort) leave the host clean:
+#   * CHAT_LOG_PID  — the background `docker compose logs -f chat` writer
+#                     (S-B10 #3a); killed so it never lingers past deploy.
+#   * RR_CONTAINER  — the ephemeral re-record container (S-B10 #1); the
+#                     re-record `timeout` only signals the compose CLIENT,
+#                     not the daemon-side container, so a timed-out run
+#                     orphans it (<defunct>, observed R-25). An explicit
+#                     `docker rm -f` is the real process-tree kill.
+#   * TMP_ENV       — the atomic .env staging file.
+# Every command is `|| true` and the trap never calls `exit`, so cleanup
+# cannot mask the script's real exit code.
+CHAT_LOG_PID=""
+RR_CONTAINER=""
+TMP_ENV=""
+cleanup() {
+    if [[ -n "$CHAT_LOG_PID" ]]; then
+        kill "$CHAT_LOG_PID" 2>/dev/null || true
+        CHAT_LOG_PID=""
+    fi
+    if [[ -n "$RR_CONTAINER" ]]; then
+        docker rm -f "$RR_CONTAINER" >/dev/null 2>&1 || true
+        RR_CONTAINER=""
+    fi
+    if [[ -n "$TMP_ENV" && -f "$TMP_ENV" ]]; then
+        rm -f "$TMP_ENV" || true
+        TMP_ENV=""
+    fi
+}
+trap cleanup EXIT
 
 usage() {
     sed -n '2,/^set -euo/p' "$0" | head -30
@@ -192,6 +228,13 @@ else
             echo "ERROR: image-relevant paths are dirty (would diverge prod from HEAD):" >&2
             printf '  %s\n' "${dirty_blockers[@]}" >&2
             echo "Commit, stash, or pass --allow-dirty (tags <sha>-dirty)." >&2
+            # S-B10 #3b: the common cause on prod is a tracked file left
+            # modified/staged by a previous run (e.g. a re-record fixture
+            # write). Spell out the discard command so the operator does
+            # not have to reach for it — `git checkout HEAD -- <file>`
+            # restores both staged and unstaged changes to the HEAD blob.
+            echo "To discard a stale modified/staged tracked file, restore it to HEAD:" >&2
+            echo "    git checkout HEAD -- <file>" >&2
             echo "Scope: COPY sources from Dockerfile = ${COPY_SOURCES[*]}" >&2
             exit 6
         fi
@@ -248,9 +291,11 @@ if [[ "$MODE" == "deploy" ]]; then
 fi
 
 # --- write .env atomically ---
+# TMP_ENV is reaped by the shared `cleanup` trap (set at the top) on any
+# early exit; clearing it after the successful `mv` stops cleanup from
+# chasing the now-renamed file.
 ENV_FILE=".env"
 TMP_ENV="$(mktemp ".env.XXXXXX")"
-trap 'rm -f "$TMP_ENV"' EXIT
 
 # Preserve any other vars in .env, replace/insert WC_IMAGE_TAG only.
 if [[ -f "$ENV_FILE" ]]; then
@@ -258,7 +303,7 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 echo "WC_IMAGE_TAG=${SHA}" >> "$TMP_ENV"
 mv "$TMP_ENV" "$ENV_FILE"
-trap - EXIT
+TMP_ENV=""
 echo "[deploy] .env updated: WC_IMAGE_TAG=${SHA}"
 
 # --- bring up new containers ---
@@ -270,6 +315,22 @@ echo "[deploy] .env updated: WC_IMAGE_TAG=${SHA}"
 # alone would silently leave chat/admin on the old image.
 echo "[deploy] docker compose up -d --force-recreate gutenberg-lab chat admin ..."
 WC_IMAGE_TAG="${SHA}" docker compose -f docker-compose.yml up -d --force-recreate gutenberg-lab chat admin
+
+# --- capture chat container logs over the verify+probe window (S-B10 #3a) ---
+# Stream chat's stdout to /tmp/deploy_<sha>_chat.log starting the instant
+# the new container is up, so the warmup + [llm] latency lines that drive
+# deploy diagnosis are persisted BEFORE any rollback `--force-recreate`
+# discards the failed container's logs. Background writer; the shared
+# `cleanup` trap kills it on exit. `--no-log-prefix` keeps the raw lines.
+# Best-effort: a logging failure must never affect the deploy decision.
+CHAT_LOG="/tmp/deploy_${SHA}_chat.log"
+# Backgrounded directly (no subshell wrapper) so $! is the `docker compose
+# logs` process itself — the shared `cleanup` trap's `kill` then reliably
+# stops the writer instead of orphaning it behind a subshell.
+docker compose -f docker-compose.yml logs -f --no-color --no-log-prefix chat \
+    > "$CHAT_LOG" 2>&1 &
+CHAT_LOG_PID=$!
+echo "[deploy] capturing chat logs -> ${CHAT_LOG} (pid ${CHAT_LOG_PID})"
 
 # --- verify (D-SB1-5 + D-SB3-3) ---
 # verify_deployed_image.sh checks BOTH surfaces of build identity:
@@ -404,32 +465,53 @@ fi
 # The drift signal keeps its full value as a logged warning.
 RERECORD_FIXTURES_DIR="scripts/v2/contracts/fixtures"
 if [[ "$MODE" == "deploy" ]]; then
-    echo "[deploy] fixture re-record gate (advisory): ephemeral dev-overlay container, record_fixtures --skip-heavy (budget ${RERECORD_BUDGET_SECS}s)"
+    echo "[deploy] fixture re-record gate (advisory): record_fixtures --skip-heavy (budget ${RERECORD_BUDGET_SECS}s)"
+    # S-B10 #1: bound the run AND kill its process tree on timeout.
+    #   * `timeout --kill-after` escalates SIGTERM -> SIGKILL so a
+    #     TERM-swallowing client still dies inside the budget.
+    #   * `--name` pins the container so the shared `cleanup` trap (and the
+    #     explicit reap below) can `docker rm -f` it. `timeout` only signals
+    #     the compose CLIENT — the recorder runs in a daemon-managed
+    #     container that survives as <defunct> otherwise (the R-25 hang).
+    # SHA may carry a `-dirty` suffix; sanitise to a legal container name.
+    RR_CONTAINER="wc-rerecord-${SHA//[^A-Za-z0-9_.-]/_}"
+    docker rm -f "$RR_CONTAINER" >/dev/null 2>&1 || true
     rerecord_rc=0
-    WC_IMAGE_TAG="${SHA}" timeout "${RERECORD_BUDGET_SECS}" \
+    WC_IMAGE_TAG="${SHA}" timeout --kill-after="${RERECORD_KILL_AFTER}" "${RERECORD_BUDGET_SECS}" \
         docker compose -f docker-compose.yml -f docker-compose.dev.yml \
-        run --rm -T -w /workspace gutenberg-lab \
+        run --rm -T --name "${RR_CONTAINER}" -w /workspace gutenberg-lab \
         "${PYTHON}" -m scripts.v2.contracts.record_fixtures --skip-heavy \
         || rerecord_rc=$?
+    # Reap the (possibly orphaned) container NOW — before the diff/restore —
+    # so a timed-out recorder still writing fixtures can't re-dirty the tree
+    # after we restore it (the R-25 race). No-op on a clean `--rm` exit.
+    docker rm -f "$RR_CONTAINER" >/dev/null 2>&1 || true
+    RR_CONTAINER=""
     if [[ "$rerecord_rc" -ne 0 ]]; then
-        echo "[deploy] WARN: fixture re-record gate — recorder errored or timed out (rc=${rerecord_rc}, >${RERECORD_BUDGET_SECS}s). ADVISORY: deploy continues (service is already verify+probe green and live)." >&2
-        # Restore any partial fixture writes so the working tree stays
-        # clean for the NEXT deploy's dirty-check (a left-dirty tracked
-        # file would block it).
+        echo "[deploy] WARN: re-record gate — recorder errored or timed out (rc=${rerecord_rc}, >${RERECORD_BUDGET_SECS}s). ADVISORY: deploy continues (verify+probe already green)." >&2
         git checkout -- "${RERECORD_FIXTURES_DIR}" 2>/dev/null || true
     # git diff over the fixture JSONs, EXCLUDING the volatile manifest.
     elif ! git diff --exit-code -- "${RERECORD_FIXTURES_DIR}" ":(exclude)${RERECORD_FIXTURES_DIR}/_manifest.json"; then
-        echo "[deploy] WARN: FIXTURE DRIFT — committed v1 contract fixtures look stale vs live v1 output. ADVISORY: deploy continues; re-record soon:" >&2
+        echo "[deploy] WARN: FIXTURE DRIFT — committed v1 fixtures look stale vs live v1 output. ADVISORY: re-record soon:" >&2
         git --no-pager diff --stat -- "${RERECORD_FIXTURES_DIR}" ":(exclude)${RERECORD_FIXTURES_DIR}/_manifest.json" >&2
-        echo "[deploy]   re-record on this host and commit:" >&2
-        echo "[deploy]     docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm gutenberg-lab python -m scripts.v2.contracts.record_fixtures" >&2
-        echo "[deploy]     git add ${RERECORD_FIXTURES_DIR} && git commit -m 'chore: re-record v1 fixtures'" >&2
+        echo "[deploy]   re-record: docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm gutenberg-lab python -m scripts.v2.contracts.record_fixtures" >&2
+        echo "[deploy]   then: git add ${RERECORD_FIXTURES_DIR} && git commit -m 'chore: re-record v1 fixtures'" >&2
         git checkout -- "${RERECORD_FIXTURES_DIR}" 2>/dev/null || true
     else
-        # Clean state: discard the re-recorded files (including the volatile
-        # manifest) so the deployed host's tree matches HEAD exactly.
         git checkout -- "${RERECORD_FIXTURES_DIR}" 2>/dev/null || true
         echo "[deploy] fixture re-record gate OK — no contract drift"
+    fi
+    # Acceptance (S-B10): git status MUST be clean after this step. The
+    # branch `git checkout --` above restores tracked files (fixtures + the
+    # --skip-heavy degraded _manifest.json); this catches any leftover the
+    # recorder ADDED as untracked and `git clean`s it so the next deploy's
+    # dirty-check sees a pristine tree. Advisory: a cleanliness failure does
+    # not fail an already-live deploy.
+    if [[ -n "$(git status --porcelain -- "${RERECORD_FIXTURES_DIR}" 2>/dev/null)" ]]; then
+        echo "[deploy] WARN: fixtures dir not clean after re-record — forcing restore" >&2
+        git status --porcelain -- "${RERECORD_FIXTURES_DIR}" >&2 || true
+        git checkout -- "${RERECORD_FIXTURES_DIR}" 2>/dev/null || true
+        git clean -fdq -- "${RERECORD_FIXTURES_DIR}" 2>/dev/null || true
     fi
 fi
 

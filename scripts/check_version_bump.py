@@ -8,11 +8,23 @@ without needing a reachable prod endpoint.
 It answers one question: did `ANALYTICS_VERSION` in
 `scripts/v2/__version__.py` change vs the prior reference?
 
-Three reference modes:
+Four reference modes:
 
-- `--against git` (default) — compare HEAD against the parent commit
-  (`HEAD~1`). For PR builds where CI provides BASE_SHA, prefer
-  `--git-ref <BASE_SHA>`. Use this in CI.
+- `--against git` (default) — compare HEAD against an explicit commit
+  (`HEAD~1` by default). Use this for the `push`-to-`main` CI run, where
+  `HEAD~1` is the previous main tip and the comparison is unambiguous.
+- `--against merge-base` — compare HEAD against the
+  `git merge-base HEAD <ref>` (fork point), where `<ref>` defaults to
+  `origin/main`. Use this for `pull_request` CI runs. The fork point is
+  STABLE: comparing against the moving `origin/main` *tip* (the old
+  behaviour) produced false reds whenever the base advanced — e.g. a
+  squash-merged branch re-run, where `origin/main` already carried the
+  branch's bumped label so `tip == current` looked like "did not bump"
+  (4 false reds observed in R-25). The merge-base reads the label as it
+  was at the fork, so a real bump stays detected no matter how far the
+  base moves afterward. NOTE: the caller must check out the PR *head*
+  commit (not the pull_request *merge* commit) — for a merge commit,
+  `origin/main` is a parent, so the merge-base collapses back to the tip.
 - `--against baseline` — compare against the version recorded in
   `scripts/predeploy_baseline.json` (whatever the last clean prod run
   pinned). Use this in pre-deploy on the deploy host.
@@ -92,6 +104,35 @@ def read_version_from_git(ref: str) -> str | None:
     return parse_version_text(out.decode("utf-8", "ignore"))
 
 
+def resolve_merge_base(ref: str) -> str:
+    """Return the SHA of `git merge-base HEAD <ref>` — the fork point of
+    the current branch from `<ref>` (default caller passes origin/main).
+
+    This is the STABLE comparison anchor for PR builds: it does not move
+    when `<ref>` advances (merged branches, post-merge re-runs), so a
+    once-bumped label keeps reading as bumped. A bad ref or a history
+    with no common ancestor is a hard error (exit 1) — we will not
+    silently fall back to a tip compare.
+    """
+    try:
+        out = subprocess.check_output(
+            ["git", "merge-base", "HEAD", ref],
+            cwd=REPO_ROOT,
+            stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        die(1, "git not on PATH — required for --against merge-base")
+    except subprocess.CalledProcessError as e:
+        msg = e.stderr.decode("utf-8", "ignore").strip()
+        die(1, f"git merge-base HEAD {ref!r} failed (bad ref, or no common "
+               f"ancestor — is {ref!r} fetched?): {msg}")
+    base = out.decode("utf-8", "ignore").strip()
+    if not base:
+        die(1, f"git merge-base HEAD {ref!r} returned no commit "
+               f"(no common ancestor?)")
+    return base
+
+
 def read_version_from_baseline(path: Path) -> str | None:
     if not path.exists():
         return None
@@ -118,11 +159,14 @@ def die(code: int, msg: str) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="W-18: version-bump gate")
-    ap.add_argument("--against", choices=("git", "baseline", "file"), default="git",
+    ap.add_argument("--against", choices=("git", "merge-base", "baseline", "file"),
+                    default="git",
                     help="reference to compare against (default: git HEAD~1)")
     ap.add_argument("--git-ref", default=None,
-                    help="git ref to compare against when --against git "
-                         "(default: HEAD~1; in CI set this to the PR base SHA)")
+                    help="git ref to compare against. --against git: the commit to "
+                         "diff against (default HEAD~1; push-to-main CI). --against "
+                         "merge-base: the branch whose fork point we compare against "
+                         "(default origin/main; pull_request CI).")
     ap.add_argument("--baseline", default=str(DEFAULT_BASELINE),
                     help=f"baseline path for --against baseline (default: {DEFAULT_BASELINE})")
     ap.add_argument("--file", default=None,
@@ -139,6 +183,11 @@ def main(argv: list[str] | None = None) -> int:
         ref = args.git_ref or os.environ.get("BASE_SHA") or "HEAD~1"
         prior = read_version_from_git(ref)
         ref_label = f"git {ref}"
+    elif args.against == "merge-base":
+        ref = args.git_ref or os.environ.get("BASE_SHA") or "origin/main"
+        base = resolve_merge_base(ref)
+        prior = read_version_from_git(base)
+        ref_label = f"merge-base({ref})={base[:12]}"
     elif args.against == "baseline":
         baseline_path = Path(args.baseline)
         prior = read_version_from_baseline(baseline_path)

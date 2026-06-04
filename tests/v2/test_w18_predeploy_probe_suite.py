@@ -352,6 +352,32 @@ class BaselineRoundtrip(unittest.TestCase):
     def test_load_missing_baseline_returns_none(self):
         self.assertIsNone(load_baseline(Path("/no/such/baseline.json")))
 
+    def test_write_preserves_existing_note_across_restamp(self):
+        # S-B10 #3c: a prod `--update-baseline` re-stamp must carry the
+        # human-facing `_note` forward. R2 negative: pre-fix write_baseline
+        # dropped it, so the committed honest-baseline doc rotted away.
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "baseline.json"
+            p.write_text(json.dumps({
+                "_note": "HONEST baseline doc — keep me.",
+                "version": "2.6.45",
+                "verdicts": {"P1": "PASS"},
+            }), encoding="utf-8")
+            write_baseline(p, "2.6.46", [{"id": "P1", "passed": True}])
+            loaded = load_baseline(p)
+            self.assertEqual(loaded["_note"], "HONEST baseline doc — keep me.",
+                             "re-stamp must preserve _note (S-B10 #3c)")
+            # Gate-relevant shape still updated correctly.
+            self.assertEqual(loaded["version"], "2.6.46")
+            self.assertEqual(loaded["verdicts"], {"P1": "PASS"})
+
+    def test_write_without_prior_note_omits_note(self):
+        # No prior _note → no _note key fabricated (don't invent docs).
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "baseline.json"
+            write_baseline(p, "2.6.46", [{"id": "P1", "passed": True}])
+            self.assertNotIn("_note", load_baseline(p))
+
     def test_load_corrupt_baseline_returns_none(self):
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "baseline.json"
