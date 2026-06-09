@@ -74,8 +74,26 @@ _LITERARY_LOCATION_BLACKLIST = frozenset({
                     },
                     {
                         "type": "object",
-                        "properties": {"author": {"type": "string",
-                                                   "description": "author regex e.g. '^Doyle,'"}},
+                        "properties": {
+                            "author": {"type": "string",
+                                       "description": "author regex e.g. '^Doyle,'"},
+                            # B-LW-corpus (2026-06-09): _select_books supports
+                            # country (ISO alpha-2 via authors_geo.csv) + writing-
+                            # prime year range; v1 now forwards them. Declared
+                            # here so the LLM stops emitting author='.*' for
+                            # "British classics" (which collapsed to the whole
+                            # corpus and returned []).
+                            "country": {"type": "string",
+                                        "description": "ISO alpha-2 e.g. 'GB'/'US'. "
+                                                       "Narrows to that country's authors. "
+                                                       "Use with author='.*' for "
+                                                       "'all British authors'."},
+                            "year_from": {"type": "integer",
+                                          "description": "writing-prime year >= (yob+30), "
+                                                         "e.g. 1837 for Victorians"},
+                            "year_to": {"type": "integer",
+                                        "description": "writing-prime year <=, e.g. 1901"},
+                        },
                         "required": ["author"],
                         "additionalProperties": False,
                     },
@@ -114,7 +132,10 @@ _LITERARY_LOCATION_BLACKLIST = frozenset({
     # (no translation / example / IPA). Stops the LLM from inventing
     # «Перевод» / «Пример» columns that render «—» on every row.
     # Bumping invalidates cached rows that lack the new hints.
-    wrapper_version="v5-w3-columns-hint",
+    # B-LW-corpus (2026-06-09) — v1 now forwards country/year + skips the
+    # ratio guard on whole-corpus scope. Bump busts cached empty results from
+    # `author:".*"` / all_corpus queries.
+    wrapper_version="v6-corpus-scope-fix",
 )
 @v1_contract(v1_fn="scripts.learning_tools.learning_words",
              schema=V1LearningWords)

@@ -395,12 +395,27 @@ def learning_words(
     scope_counts: Counter = Counter()
     scope_tokens = 0
     scope_label = ""
+    # B-LW-corpus (Stan 2026-06-09): when the scope covers (nearly) the whole
+    # library, scope_count == corpus_count for every word, so the author-
+    # uniqueness ratio guard below (`cc < min_corpus_ratio * sc`) drops 100%
+    # of candidates and the tool returns []. Track whole-corpus scope so we
+    # can skip that guard. all_corpus and `author: ".*"` both hit this.
+    is_whole_corpus = False
+    # author-scope narrowing kwargs — v1 used to read only scope["author"] and
+    # silently drop country/year. {"author": ".*", "country": "GB"} therefore
+    # collapsed to the entire corpus instead of British authors only.
+    _sel_kwargs = dict(
+        country=scope.get("country") if isinstance(scope, dict) else None,
+        year_from=scope.get("year_from") if isinstance(scope, dict) else None,
+        year_to=scope.get("year_to") if isinstance(scope, dict) else None,
+    )
     try:
         if isinstance(scope, str) and scope == "all_corpus":
             corpus = _corpus_counts()
             scope_counts = Counter(corpus)
             scope_tokens = _corpus_total_tokens()
             scope_label = "all_corpus"
+            is_whole_corpus = True
         elif isinstance(scope, dict) and scope.get("book"):
             pg_id = scope["book"]
             if not pg_id.startswith("PG") and not pg_id.startswith("U"):
@@ -420,9 +435,23 @@ def learning_words(
                     scope_tokens += c
             scope_label = f"book:{pg_id}"
         elif isinstance(scope, dict) and scope.get("author"):
-            sel = _select_books(scope["author"])
+            sel = _select_books(scope["author"], **_sel_kwargs)
             if not len(sel):
-                return {"error": "no books matched", "author_regex": scope["author"]}
+                return {"error": "no books matched",
+                        "author_regex": scope["author"],
+                        "country": _sel_kwargs["country"]}
+            # whole-corpus detection: a broad regex with no country/year
+            # narrowing can select (almost) the entire English library. In
+            # that case the ratio guard would wipe every word — flag it.
+            if not any(_sel_kwargs.values()):
+                try:
+                    _en = _metadata_df()["language"].fillna("").str.contains(
+                        "'en'", regex=False)
+                    _total_en = int(_en.sum())
+                    if _total_en and len(sel) >= 0.95 * _total_en:
+                        is_whole_corpus = True
+                except Exception:
+                    pass
             for pg in sel["id"]:
                 f = _counts_path(pg)
                 if not f.exists():
@@ -451,7 +480,7 @@ def learning_words(
             pg_id = f"PG{pg_id}"
         context_book_ids = [pg_id]
     elif isinstance(scope, dict) and scope.get("author"):
-        sel = _select_books(scope["author"])
+        sel = _select_books(scope["author"], **_sel_kwargs)
         context_book_ids = list(sel["id"])
     else:
         context_book_ids = []
@@ -505,8 +534,10 @@ def learning_words(
         if cc < cmin or cc > cmax:
             continue
         # heuristic: words whose corpus_count is close to scope_count are
-        # author-unique → almost always proper nouns we don't want for study
-        if cc < min_corpus_ratio * sc:
+        # author-unique → almost always proper nouns we don't want for study.
+        # Meaningless when scope == whole corpus (sc == cc for every word):
+        # applying it there drops 100% of candidates → empty result.
+        if not is_whole_corpus and cc < min_corpus_ratio * sc:
             continue
         candidates.append((w, sc, cc, _score(sc, cc, scope_tokens)))
 
