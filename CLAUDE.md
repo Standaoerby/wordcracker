@@ -57,3 +57,27 @@
 - ❌ Пометка `closed` без негативного теста и сверки с prod-флагами (R2).
 - ❌ `.split()[0][:3]`-усечение строк.
 - ❌ Тихий пропуск отсутствующего поля во view / рендер `None` строкой.
+
+## Пайплайн после фикса (R11 — обязателен)
+
+**Источник истины — ОДИН клон.** Origin: `github.com/Standaoerby/wordcracker`. Рабочая копия — клон с этим origin (проверка: `git remote get-url origin`). Никаких параллельных «снапшотов» рядом — orphan-копии (отдельный `git init` без remote) запрещены: фиксы в них на прод не доезжают. Если копий несколько — удалить все, кроме клона.
+
+**После КАЖДОГО фикса — один скрипт:**
+
+```powershell
+./scripts/ship.ps1 -Message "fix(scope): краткое описание" -Branch fix/<name>
+```
+
+Он по шагам (любой красный = стоп): repo-guard (не orphan) → pytest collect (R10) → pytest run → version-bump gate (vs merge-base с main) → commit на fix-ветке → push. Затем PR → merge в main.
+
+**Локальный Python ≠ 3.11.** Прод/CI/контейнер — Python **3.11**. Локально (Windows, обычно 3.13) тест `FixtureFreshnessGate` всегда ложно красный: fingerprint хэширует `ast.dump()`, чей вывод зависит от минорной версии. Скрипт сам деселектит этот тест вне 3.11 и печатает предупреждение. **Не пытайся ставить `requirements.lock` на Windows** — он под Linux/CUDA/3.11, `nvidia-*` колёс под Win/3.13 нет. Полный зелёный прогон — только на CI/контейнере.
+
+**Деплой — только из main, на SOW:**
+
+```powershell
+./scripts/ship.ps1 -Message "..." -Branch fix/<name> -Deploy   # -Deploy запускает деплой ПОСЛЕ мёрджа PR
+# или вручную:
+ssh sow 'cd ~/wordcracker && git fetch && git pull --ff-only origin main && bash scripts/deploy.sh'
+```
+
+`deploy.sh` сам: build по SHA → compose up → verify SHA на /health → 12-probe gate → авто-rollback на красном → advisory re-record фикстур.
