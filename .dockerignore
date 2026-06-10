@@ -40,3 +40,8 @@ docker-compose.yml
 docker-compose.dev.yml
 .dockerignore
 Dockerfile
+
+# Frontend (S6): web/ sources DO enter the context (webbuild stage needs
+# them); local node_modules / dist never do — dist is built in-stage.
+web/node_modules
+web/dist

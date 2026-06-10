@@ -5963,3 +5963,47 @@ audit and Phase 0 closed them.
 **Note for the audit.** This shifts the "diagnosis vs current state"
 calibration: some of the Class-C issues may also have moved. Phase 0
 gate is now the source of truth, not the audit numbers.
+
+## 2026-06-10 — S6 webapp (D17 / D18)
+
+### D17 — Веб-стек: FastAPI + SSE поверх sync-генератора; React/Vite; zustand-only
+
+**Decision.** Новый сервис `wordcracker-api` (:8000, контейнер
+`wordcracker-api`, тот же образ что chat/admin): FastAPI ≥0.135 со
+встроенным `fastapi.sse` (`EventSourceResponse` + `format_sse_event`,
+кадры пре-форматируются в байты; фолбэк на `sse-starlette` остаётся в
+коде для пина <0.135 — на 0.136 выигрывает fastapi.sse). SSE гонится
+через **sync**-генератор в threadpool (`scripts/api_loop.stream_answer`
+поверх `ask_stream(stream_render=True)`); event loop не блокируется.
+GZipMiddleware на SSE-роуты не вешается. Фронт: Vite + React + TS,
+`react-markdown@^10` (components-проп) + `remark-gfm`, стейт —
+**zustand-only** (react-query отложен до S7: в S6 один POST-стрим и один
+экспорт, кешировать нечего — Q4 ревью). Стрим на клиенте — `fetch POST`
++ `ReadableStream` (EventSource GET-only); кадры режутся и по `\r\n\r\n`,
+и по `\n\n`. LLM — нативный Ollama `/api/chat`, никогда `/v1`.
+
+**Why.** Q1–Q4/Q6 из plan_review_S6 + N1/N2 (решения Stan 2026-06-10).
+Контракт целиком — docs/webapp.md.
+
+**Consequences.** `requirements.in` получил прямые deps
+fastapi/uvicorn/openpyxl → `requirements.lock` пересобрать на проде
+(`build_lockfile.sh`) до деплоя. Эмбеддер запросов — CUDA с
+авто-фолбэком на CPU (`rag_tools._resolve_embedder_device`); mem-limit
+api-контейнера НЕ выставлен до замера под реальной нагрузкой
+(plan.md §6.4).
+
+### D18 — Раздача статики: FastAPI StaticFiles + multi-stage Vite-билд, без nginx-сайдкара
+
+**Decision.** Фронт собирается в стадии `webbuild` (node:22-alpine)
+основного Dockerfile; в runtime-образ попадает только `web/dist`,
+который FastAPI маунтит на `/` ПОСЛЕ всех `/api/*` роутов. SPA
+catch-all в S6 не нужен (один экран). nginx-сайдкар не вводим — лишняя
+движущаяся часть, nginx+CF уже есть выше по стеку. Внутренний цикл —
+Vite dev-сервер :5173 с прокси `/api` → :8000.
+
+**Why.** Q6 ревью: воспроизводимый билд без node на хосте; минимум
+новых контейнеров.
+
+**Consequences.** `web/package-lock.json` нужно сгенерировать при первом
+прод-билде и закоммитить (до этого npm резолвит по semver-диапазонам —
+помечено в PR S6).

@@ -1,3 +1,17 @@
+# --- S6 webapp: frontend build stage (D18 — multi-stage Vite build) ---
+# The React SPA (web/) is compiled here and only its dist/ output is
+# copied into the runtime image below. No node in the runtime image, no
+# node on the host. NB: web/package-lock.json should be generated on the
+# first prod build and committed — until then npm resolves from the
+# semver ranges in package.json (flagged in the S6 PR).
+FROM node:22-alpine AS webbuild
+WORKDIR /web
+COPY web/package.json web/package-lock.json* ./
+RUN if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; \
+    else npm install --no-audit --no-fund; fi
+COPY web/ ./
+RUN npm run build
+
 FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
 
 # ADR-B1 phase 3 + ADR-B2 (S-B1 acceptance): install deps from
@@ -79,6 +93,13 @@ WORKDIR /workspace
 # notebooks/, docs/ never enter the image.
 COPY scripts/ /workspace/scripts/
 COPY tests/ /workspace/tests/
+
+# S6 webapp: FastAPI service code + the Vite-built SPA (webbuild stage
+# above). Served by the `api` compose service (uvicorn :8000); FastAPI
+# StaticFiles mounts /workspace/web/dist on "/" AFTER the /api routes
+# (no SPA catch-all in S6 — single screen). See docs/webapp.md.
+COPY api/ /workspace/api/
+COPY --from=webbuild /web/dist /workspace/web/dist
 
 # ADR-B3 / D-SB3-1 (S-B3): bake runtime build identity into the image.
 # GIT_SHA + BUILD_TIME are surfaced via `/health` JSON (chat:8890 /

@@ -116,9 +116,30 @@ _CHROMA_COLLECTION_CACHE: dict = {"col": None}
 _CHROMA_LOCK = _threading.Lock()
 
 
+def _resolve_embedder_device() -> str:
+    """Query-embedder device: CUDA with automatic CPU fallback (S6, N2).
+
+    Prod (SOW, RTX 3090 24GB) → "cuda": qwen3:14b ≈ 11.7GB pinned
+    (keep_alive=-1), embedder + bge-reranker ≤3GB — fits with headroom.
+    A host without a working CUDA device (or an api container started
+    without the GPU reservation) logs a warning and falls back to CPU
+    instead of crashing on the first query."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.zeros(1, device="cuda")   # smoke: device actually alive
+            return "cuda"
+        _log("WARNING: CUDA unavailable for query embedder — falling "
+             "back to CPU (slower per-query embedding)")
+    except Exception as e:
+        _log(f"WARNING: CUDA probe failed ({e}) — query embedder on CPU")
+    return "cpu"
+
+
 def _get_chroma_collection_with_embedder():
     """Return a cached ChromaDB collection with the multilingual MiniLM
-    embedder bound to cuda. Thread-safe via double-checked locking."""
+    embedder bound to cuda when available, CPU otherwise (see
+    _resolve_embedder_device). Thread-safe via double-checked locking."""
     if _CHROMA_COLLECTION_CACHE["col"] is not None:
         return _CHROMA_COLLECTION_CACHE["col"]
     with _CHROMA_LOCK:
@@ -127,8 +148,10 @@ def _get_chroma_collection_with_embedder():
         import chromadb
         from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
         client = chromadb.PersistentClient(path=CHROMA_PATH)
+        device = _resolve_embedder_device()
+        _log(f"embedder device: {device}")
         embed_fn = SentenceTransformerEmbeddingFunction(
-            model_name=EMBEDDER_NAME, device="cuda"
+            model_name=EMBEDDER_NAME, device=device
         )
         col = client.get_collection(COLLECTION_NAME, embedding_function=embed_fn)
         _CHROMA_COLLECTION_CACHE["col"] = col

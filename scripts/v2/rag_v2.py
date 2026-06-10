@@ -723,8 +723,14 @@ def _llm_render(question: str, plan: plan_mod.QueryPlan,
                 results: list[ToolResult], *, model: str,
                 ollama_host: str,
                 history: list[dict] | None = None,
-                cancel_event=None) -> tuple[str, dict]:
+                cancel_event=None,
+                on_delta=None) -> tuple[str, dict]:
     """Send one /api/chat call with the render prompt + tool data. No tools.
+
+    S6 webapp — `on_delta(piece: str)` surfaces render deltas to the
+    caller as they stream in from Ollama. Default None = no behavioural
+    change for chat_server / ask(); the wordcracker-api SSE path is the
+    only consumer.
 
     Sprint 17: returns (answer_text, meta) where meta carries Ollama's
     prompt_eval_count + eval_count for observability. The token counts
@@ -860,6 +866,14 @@ def _llm_render(question: str, plan: plan_mod.QueryPlan,
             piece = (obj.get("message") or {}).get("content") or ""
             if piece:
                 parts.append(piece)
+                if on_delta is not None:
+                    try:
+                        on_delta(piece)
+                    except Exception:
+                        # A broken delta consumer must not kill the render:
+                        # the full text is still assembled from `parts`.
+                        log.exception("render on_delta consumer failed")
+                        on_delta = None
     finally:
         resp.close()
     body = last_obj or {}
@@ -1047,6 +1061,7 @@ def _dispatch_render(
     ollama_host: str,
     history: list[dict] | None = None,
     cancel_event=None,
+    on_delta=None,
 ) -> tuple[str, dict]:
     """Single render path: `_llm_render` (RENDER_PROMPT + free-form LLM).
 
@@ -1082,6 +1097,7 @@ def _dispatch_render(
         model=model, ollama_host=ollama_host,
         history=history,
         cancel_event=cancel_event,
+        on_delta=on_delta,
     )
 
 
@@ -1612,9 +1628,25 @@ def ask_stream(
     model: str = DEFAULT_MODEL,
     ollama_host: str = DEFAULT_OLLAMA_HOST,
     cancel_event=None,
+    stream_render: bool = False,
+    skip_render: bool = False,
     **kwargs,
 ) -> Iterator[dict]:
-    """SSE events compatible with v1 plus v2-specific intent/plan/clarify."""
+    """SSE events compatible with v1 plus v2-specific intent/plan/clarify.
+
+    S6 webapp (scripts/api_loop.py is the only caller of the new kwargs;
+    chat_server keeps the defaults, so the 8890 event stream is
+    byte-identical and no fixture re-record is needed):
+      - stream_render=True — the renderer LLM call streams its deltas as
+        {"event": "render_token", "delta": str} events, and every
+        tool_result event additionally carries the live ToolResult object
+        under the non-serialisable "_result" key (popped by api_loop for
+        table extraction, never JSON-encoded).
+      - skip_render=True — data_only mode: stop after the tool phase,
+        skip renderer + critic + numeric audit, emit done with answer "".
+        Clarify / out-of-scope / repeat short-circuits still produce their
+        text (the user must see a clarify question even in data_only).
+    """
     if cancel_event is None:
         cancel_event = threading.Event()
     yield {"event": "start"}
@@ -1689,7 +1721,8 @@ def ask_stream(
                         tr = ev.result
                         yield {"event": "tool_result", "name": ev.tool,
                                "ms": tr.runtime_ms, "ok": tr.ok,
-                               "summary": tr.to_llm_string(max_chars=240)}
+                               "summary": tr.to_llm_string(max_chars=240),
+                               **({"_result": tr} if stream_render else {})}
             elif pres is not None and pres.clarify:
                 # Sprint 22+ Round 12 Q11/Q12: v3 rules fallback before
                 # accepting v4 clarify. Same logic as the non-stream path.
@@ -1843,7 +1876,8 @@ def ask_stream(
                         tr = ev.result
                         yield {"event": "tool_result", "name": ev.tool,
                                "ms": tr.runtime_ms, "ok": tr.ok,
-                               "summary": tr.to_llm_string(max_chars=240)}
+                               "summary": tr.to_llm_string(max_chars=240),
+                               **({"_result": tr} if stream_render else {})}
             elif pres is not None and pres.clarify:
                 plan.clarify_question = pres.clarify
                 v4_planner_report = pres
@@ -1933,22 +1967,91 @@ def ask_stream(
             results.append(tr)
             yield {"event": "tool_result", "name": step.tool,
                    "ms": tr.runtime_ms, "ok": tr.ok,
-                   "summary": tr.to_llm_string(max_chars=240)}
+                   "summary": tr.to_llm_string(max_chars=240),
+                   **({"_result": tr} if stream_render else {})}
             if not tr.ok and not step.optional:
                 break
 
     # Renderer
     render_meta: dict = {}
+    if skip_render:
+        # S6 data_only — raw tables straight to the client, no LLM render
+        # pass, no critic/audit (nothing to review). Saves a full qwen3
+        # generation per query. Documented simplification: a data_only
+        # query ends after the (single-batch) tool phase.
+        obs_mod.log_request({
+            "question_truncated": question[:300],
+            "intent": intent.label,
+            "intent_confidence": intent.confidence,
+            "plan_steps": [s.tool for s in plan.steps],
+            "tool_calls": [
+                {"name": r.tool, "runtime_ms": r.runtime_ms,
+                 "ok": r.ok, "cache_hit": r.cache_hit}
+                for r in results
+            ],
+            "total_elapsed_ms": int((time.perf_counter() - t0) * 1000),
+            "answer_truncated": "",
+            "data_only": True,
+            "via_stream": True,
+            "retrieval_log": _extract_retrieval_log(results),
+            **_v5_envelope_extras(_v5_env, intent_label=intent.label),
+        })
+        yield {"event": "answer", "text": ""}
+        yield {"event": "done", "tool_calls":
+               [{"name": r.tool, "args": r.query, "ok": r.ok,
+                 "result_summary": r.to_llm_string(max_chars=240)}
+                for r in results],
+               "iterations": len(results),
+               "elapsed_sec": round(time.perf_counter() - t0, 2),
+               "intent": intent.label}
+        return
     if intent.label == "introduction":
         answer = _intro_text()
     else:
         try:
-            answer, render_meta = _dispatch_render(
-                question, plan, results,
-                model=model, ollama_host=ollama_host,
-                history=history,
-                cancel_event=cancel_event,
-            )
+            if stream_render:
+                # S6 webapp — pump the render through a worker thread so
+                # this generator can yield deltas in real time. The worker
+                # runs the exact same _dispatch_render path; on_delta puts
+                # pieces on a queue the generator drains. Sentinel None =
+                # render finished (result or exception in `box`).
+                import queue as _queue
+                _dq: "_queue.Queue[str | None]" = _queue.Queue()
+                box: dict = {}
+
+                def _render_worker():
+                    try:
+                        box["res"] = _dispatch_render(
+                            question, plan, results,
+                            model=model, ollama_host=ollama_host,
+                            history=history,
+                            cancel_event=cancel_event,
+                            on_delta=_dq.put,
+                        )
+                    except BaseException as e:  # re-raised on main thread
+                        box["err"] = e
+                    finally:
+                        _dq.put(None)
+
+                _rt = threading.Thread(target=_render_worker, daemon=True,
+                                       name="s6-render-stream")
+                _rt.start()
+                while True:
+                    piece = _dq.get()
+                    if piece is None:
+                        break
+                    yield {"event": "render_token", "delta": piece}
+                _rt.join()
+                if "err" in box:
+                    raise box["err"]
+                answer, render_meta = box["res"]
+            else:
+                answer, render_meta = _dispatch_render(
+                    question, plan, results,
+                    model=model, ollama_host=ollama_host,
+                    history=history,
+                    cancel_event=cancel_event,
+                )
         except RenderCancelled:
             log.info("ask_stream: render cancelled (client disconnect) — "
                      "stopping pump cleanly, runner slot freed")

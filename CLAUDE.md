@@ -81,3 +81,16 @@ ssh sow 'cd ~/wordcracker && git fetch && git pull --ff-only origin main && bash
 ```
 
 `deploy.sh` сам: build по SHA → compose up → verify SHA на /health → 12-probe gate → авто-rollback на красном → advisory re-record фикстур.
+
+## Web app (Sprint 6+)
+
+- Backend: FastAPI ≥0.135 (`fastapi.sse`: EventSourceResponse + format_sse_event, кадры пре-форматируются в байты; фолбэк sse-starlette в коде). Сервис `api/main.py` (:8000) — параллелен chat_server:8890, его НЕ трогает.
+- LLM: Ollama НАТИВНЫЙ /api/chat, НИКОГДА /v1 (теряет tool-call дельты под стримингом).
+- НЕ вешать GZipMiddleware на SSE-роуты.
+- Адаптер v2→контракт: `scripts/api_loop.stream_answer` поверх `ask_stream(stream_render=True, skip_render=data_only)`. Default-флаги ask_stream НЕ менять — 8890 должен остаться байт-в-байт (no re-record).
+- Контракт ответа — envelope {answer_md, tables, entities, tool_trace, stop_reason}; entities всегда есть (даже []); стрим ВСЕГДА кончается done. Подробно: @docs/webapp.md
+- Таблицы: ячейки — нативные скаляры (N1, `scripts/v2/table_extract._scalar`); рендер на фронте из tables[] (структурные данные), НЕ из markdown.
+- Frontend: web/ — Vite+React+TS, react-markdown@10 (components-проп, без source/renderers), remark-gfm, zustand-only. Стрим: fetch POST + ReadableStream (НЕ EventSource — GET-only); кадры резать и по \r\n\r\n, и по \n\n.
+- /api/health = чистый liveness (docker healthcheck); /api/ready = Ollama+эмбеддер (503 до прогрева). Не путать.
+- Эмбеддер запросов: CUDA с авто-фолбэком CPU (`rag_tools._resolve_embedder_device`); mem-limit api-контейнера не выставлять до замера (plan.md §6.4).
+- Commands: backend `uvicorn api.main:app --reload --port 8000`; front `cd web && npm run dev` (typecheck отдельно: `npm run typecheck`); тесты веб-слоя `python -m pytest tests/webapp -q`.

@@ -187,11 +187,14 @@ jobs:
             https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl \
             https://github.com/explosion/spacy-models/releases/download/en_core_web_trf-3.8.0/en_core_web_trf-3.8.0-py3-none-any.whl
 
-      - name: Collect tests/v2 (R10 — 0 collection errors)
-        run: '"${{ steps.setup.outputs.python-path }}" -m pytest tests/v2 --collect-only -q'
+      - name: Collect tests/v2 + tests/webapp (R10 — 0 collection errors)
+        run: '"${{ steps.setup.outputs.python-path }}" -m pytest tests/v2 tests/webapp --collect-only -q'
 
-      - name: Run tests/v2 (full directory, NOT a hand-list)
-        run: '"${{ steps.setup.outputs.python-path }}" -m pytest tests/v2 -v'
+      - name: Run tests/v2 + tests/webapp (full directories, NOT a hand-list)
+        # tests/webapp self-skips (importorskip) while fastapi/openpyxl are
+        # not yet in requirements.lock — activates automatically after the
+        # S6 lock regen on the prod host (build_lockfile.sh).
+        run: '"${{ steps.setup.outputs.python-path }}" -m pytest tests/v2 tests/webapp -v'
 
       - name: Cache fingerprint audit (S-F1 / ADR-F1 / D67) — advisory
         # Verifies that any tool whose declared sources changed since

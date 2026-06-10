@@ -43,3 +43,14 @@ services:
     volumes:
       - ./scripts:/workspace/scripts
       - ./tests:/workspace/tests
+
+  api:
+    image: wordcracker-textlab:${WC_IMAGE_TAG:-dev}
+    volumes:
+      - ./scripts:/workspace/scripts
+      - ./tests:/workspace/tests
+      - ./api:/workspace/api
+    environment:
+      # Dev UI runs on the Vite dev server (:5173, proxy /api → :8000);
+      # CORS here is the backstop for direct cross-origin calls.
+      WC_API_CORS_ORIGINS: http://localhost:5173
