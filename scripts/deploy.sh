@@ -18,7 +18,7 @@
 #   3. Build wordcracker-textlab:$SHA (skipped on --rollback if image present).
 #   4. Atomically write WC_IMAGE_TAG=$SHA into .env.
 #   5. docker compose -f docker-compose.yml up -d --force-recreate
-#      gutenberg-lab chat admin. After S-B2 (D-SB2-4) this is the ONLY
+#      gutenberg-lab chat admin api. After S-B2 (D-SB2-4) this is the ONLY
 #      supervision mechanism — chat/admin are compose services, not
 #      systemd-managed `docker exec` clients, so no systemctl restart
 #      loop is needed. wordcracker-status (host-side) is not touched on
@@ -313,8 +313,8 @@ echo "[deploy] .env updated: WC_IMAGE_TAG=${SHA}"
 # `docker exec` clients of gutenberg-lab. Services are named explicitly
 # to prevent the footgun where `up -d --force-recreate gutenberg-lab`
 # alone would silently leave chat/admin on the old image.
-echo "[deploy] docker compose up -d --force-recreate gutenberg-lab chat admin ..."
-WC_IMAGE_TAG="${SHA}" docker compose -f docker-compose.yml up -d --force-recreate gutenberg-lab chat admin
+echo "[deploy] docker compose up -d --force-recreate gutenberg-lab chat admin api ..."
+WC_IMAGE_TAG="${SHA}" docker compose -f docker-compose.yml up -d --force-recreate gutenberg-lab chat admin api
 
 # --- capture chat container logs over the verify+probe window (S-B10 #3a) ---
 # Stream chat's stdout to /tmp/deploy_<sha>_chat.log starting the instant
