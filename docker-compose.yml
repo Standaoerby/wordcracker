@@ -232,3 +232,49 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+
+  api:
+    # S6 webapp — wordcracker-api: FastAPI + SSE on :8000, serves the
+    # React SPA from /workspace/web/dist. Separate service, parallel to
+    # chat (:8890) — same image, same v2 engine, different HTTP layer.
+    # See docs/webapp.md + decisions.md D17/D18.
+    image: *app-image
+    container_name: wordcracker-api
+    command: ["python", "-u", "-m", "uvicorn", "api.main:app",
+              "--host", "0.0.0.0", "--port", "8000"]
+    working_dir: /workspace
+    environment:
+      <<: *app-env
+      WC_WEB_DIST: /workspace/web/dist
+    volumes: *app-volumes
+    ports:
+      - "8000:8000"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    deploy:
+      resources:
+        # NO memory limit yet — deliberate (plan.md §6.4 / review N2):
+        # the cap is set from a measured RSS under a real semantic_search
+        # + rerank load (docker stats + nvidia-smi), not guessed. Numbers
+        # land in infra.md, limit lands in a follow-up commit.
+        reservations:
+          devices:
+            # Query embedder runs on CUDA with auto CPU-fallback
+            # (rag_tools._resolve_embedder_device). VRAM budget on the
+            # 3090: qwen3:14b ≈ 11.7G pinned + embedder/reranker ≤3G.
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      # Q3: /api/health is PURE liveness — no Ollama probe, so an Ollama
+      # restart can't drag api into a restart loop. Readiness (Ollama +
+      # embedder warm) lives on /api/ready for operators/smoke, NOT here.
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2).status == 200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # Socket binds immediately (warmup is a background thread); 60s
+      # covers a slow uvicorn/import start, not the embedder warm.
+      start_period: 60s

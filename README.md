@@ -10,6 +10,28 @@ dashboard), <https://admin.slovoeb.net> (upload новых книг).
 
 ---
 
+## Sprint 6 — веб-каркас: wordcracker-api (:8000) + React SPA
+
+Новый веб-слой поверх того же v2-движка, параллельно чату :8890.
+Контракт и SSE-протокол: [docs/webapp.md](docs/webapp.md); решения — D17/D18.
+
+- [x] T1 — `scripts/api_loop.py`: стримящий адаптер поверх `ask_stream`
+      (`stream_render`/`skip_render`; 8890 байт-в-байт не тронут) +
+      `scripts/v2/table_extract.py` — таблицы с нативными числами (N1)
+- [x] T2 — `api/main.py`: FastAPI + SSE (`fastapi.sse`), `POST /api/query`,
+      `/api/health` (liveness) vs `/api/ready` (readiness), CORS, без gzip на SSE
+- [x] T3 — `web/`: Vite + React + TS, zustand-only, fetch+ReadableStream,
+      `<ResultTable>` из структурных данных + `data-query` ячейки (B105),
+      тумблер «только данные», живая трасса инструментов
+- [x] T4 — `POST /api/export/xlsx`: лист на таблицу, числа остаются числами
+- [x] T5 — упаковка: сервис `api` в compose (GPU, эмбеддер CUDA→CPU-фолбэк),
+      multi-stage Vite-билд в Dockerfile
+- [x] T6 — `tests/webapp/` (51 тест, без Ollama/GPU) + decisions/webapp/CLAUDE.md
+- [ ] follow-up: замер RSS/VRAM под нагрузкой → mem-limit api (plan §6.4)
+- [ ] follow-up: `web/package-lock.json` с первого прод-билда
+
+---
+
 ## v2.3.1 (2026-05-18) — текущая версия
 
 Архитектура переписана на детерминированный планировщик. LLM больше не

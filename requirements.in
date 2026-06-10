@@ -51,5 +51,10 @@ rich
 # HTTP (Ollama calls — see scripts/rag_query.py:176)
 requests
 
+# Web API — S6 wordcracker-api service (docs/webapp.md, decisions D17)
+fastapi>=0.135           # встроенный fastapi.sse (EventSourceResponse)
+uvicorn[standard]        # был транзитивным (chromadb) — теперь прямой деп
+openpyxl                 # xlsx-экспорт (/api/export/xlsx)
+
 # Test infra (used by the predeploy harness — ADR-B4)
 pytest
