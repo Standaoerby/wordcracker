@@ -90,6 +90,14 @@ class NumericMismatch:
     context: str     # surrounding ~40-char snippet for the footer
     nearest_in_data: float | None = None
     nearest_distance_pct: float | None = None
+    # WP2b (R-27, 2026-06-10) — when the audit KNOWS the true value
+    # (count-claim pass: top_returned; table-vs-zero pass: actual row
+    # count), it records it here so `repair_with_audit` can substitute
+    # the fabricated number with the truth. None = no known truth →
+    # the mismatch is suppressed (sentence excised), not rewritten.
+    # NB: `nearest_in_data` is NOT a truth — it's a diagnostic
+    # «closest number» and must never be substituted.
+    repair_value: float | None = None
 
 
 @dataclass
@@ -561,6 +569,8 @@ def _audit_count_claims(answer: str, records: Iterable[dict]) -> AuditReport:
             context=ctx.strip(),
             nearest_in_data=ret,
             nearest_distance_pct=abs(claimed - ret) / max(claimed, 1) * 100,
+            # WP2b — top_returned IS the truth for a count claim.
+            repair_value=ret,
         ))
         if len(rep.mismatches) >= 3:
             break
@@ -636,10 +646,111 @@ def _audit_table_vs_zero_count(answer: str) -> AuditReport:
             nearest_in_data=float(table_rows),
             nearest_distance_pct=(abs(claimed - table_rows)
                                     / max(table_rows, 1) * 100),
+            # WP2b — the rendered table's row count IS the truth here.
+            repair_value=float(table_rows),
         ))
         if len(rep.mismatches) >= 2:
             break
     return rep
+
+
+# =====================================================================
+# WP2b (R-27, 2026-06-10) — repair-or-suppress enforcement.
+#
+# annotate_with_audit() is warn-only: the fabricated number stays in
+# the answer body and the user reads the lie before the footer. R-27
+# WP2b upgrades the pipeline to BLOCK the fabrication:
+#   * known truth (repair_value from the count-claim / table-vs-zero
+#     passes) → substitute the number in place;
+#   * no known truth → excise the sentence carrying the number;
+#   * excision impossible (number lives in a table row / over-long
+#     sentence) → fall back to the warn footer for that item only.
+# Every repair is disclosed in a short 🔧 footer — silent rewriting of
+# the renderer's text would itself be dishonest.
+# =====================================================================
+
+_SENTENCE_BREAK = ".!?…\n"
+
+
+def _excise_sentence(text: str, token: str) -> tuple[str, bool]:
+    """Remove the sentence containing the first non-table occurrence of
+    `token`. Returns (new_text, True) on success, (text, False) when the
+    token is absent, lives only in markdown table rows, or the sentence
+    is suspiciously long (>400 chars — likely a span-detection miss)."""
+    if not token:
+        return text, False
+    start_search = 0
+    idx = -1
+    while True:
+        idx = text.find(token, start_search)
+        if idx == -1:
+            return text, False
+        line_start = text.rfind("\n", 0, idx) + 1
+        line_end = text.find("\n", idx)
+        line_end = len(text) if line_end == -1 else line_end
+        if text[line_start:line_end].lstrip().startswith("|"):
+            start_search = idx + len(token)  # table row — keep looking
+            continue
+        break
+    s = idx
+    while s > 0 and text[s - 1] not in _SENTENCE_BREAK:
+        s -= 1
+    e = idx + len(token)
+    while e < len(text) and text[e] not in _SENTENCE_BREAK:
+        e += 1
+    if e < len(text) and text[e] != "\n":
+        e += 1  # keep the closing punctuation out of the remainder
+    if e - s > 400:
+        return text, False
+    cleaned = text[:s] + text[e:]
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip(), True
+
+
+def _fmt_num(v: float) -> str:
+    return str(int(v)) if float(v).is_integer() else f"{v:g}"
+
+
+def repair_with_audit(answer: str, report: AuditReport) -> str:
+    """WP2b — enforce the audit verdict on the answer body.
+
+    Substitutes count claims with the known truth, excises sentences
+    with unbacked numbers, and appends a 🔧 disclosure footer. Items
+    that can't be repaired safely degrade to the old warn footer."""
+    if not report.has_issues():
+        return answer
+    repaired = answer
+    notes: list[str] = []
+    leftovers: list[NumericMismatch] = []
+    for m in report.mismatches:
+        if (m.repair_value is not None and m.formatted
+                and m.formatted in repaired):
+            old_n, new_n = _fmt_num(m.value), _fmt_num(m.repair_value)
+            if old_n in m.formatted:
+                fixed = m.formatted.replace(old_n, new_n, 1)
+                repaired = repaired.replace(m.formatted, fixed, 1)
+                notes.append(f"«{m.formatted}» → «{fixed}» "
+                             f"(фактический счёт из tool data)")
+                continue
+        cut, ok = _excise_sentence(repaired, m.formatted)
+        if ok:
+            repaired = cut
+            notes.append(f"удалено утверждение с числом `{m.formatted}` — "
+                         f"его нет в tool data")
+        else:
+            leftovers.append(m)
+    if notes:
+        lines = [repaired.rstrip(), "", "---", "",
+                 "🔧 **Honesty repair** — числа сверены с tool data, "
+                 "ответ скорректирован:"]
+        lines.extend(f"- {n}" for n in notes)
+        repaired = "\n".join(lines)
+    if leftovers:
+        repaired = annotate_with_audit(
+            repaired, AuditReport(mismatches=leftovers,
+                                  numbers_checked=report.numbers_checked))
+    return repaired
 
 
 def annotate_with_audit(answer: str, report: AuditReport) -> str:

@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 
 import requests
@@ -50,6 +51,7 @@ _CRITIC_PROMPT = """Ты — критик-верификатор. Получи �
 - PG id типа «PG12345» которого нет ни в одном tool_result.
 - Книга названа канонически (e.g. "Anna Karenina") но её НЕТ в matches / data — а ответ говорит что есть.
 - Цитата в кавычках которая не присутствует в samples / contexts / snippet любого tool.
+- Ответ заявляет ОПЕРАЦИЮ (фильтрацию, исключение, сортировку), которой нет ни в tool args (query), ни в data (proper_noun_filter / _render_note). Пример: «после фильтрации имён собственных и русских фамилий», когда в query только pos_filter и data не сообщает о дропах имён. Заявленная-но-не-выполненная операция = фабрикация.
 
 НЕ ФЛАГАЙ (data echo — это нормально):
 - Любую таблицу из tool_data — даже если ответ перечисляет 20 строк, считай таблицу одним agreement с data.
@@ -309,4 +311,119 @@ def annotate_answer(answer: str, verdict: CriticVerdict) -> str:
             lines.append(f"- {m}")
         lines.append("")
     lines.append(f"_Critic: {verdict.summary}_")
+    return "\n".join(lines)
+
+
+# =====================================================================
+# WP2b (R-27, 2026-06-10) — claimed-but-not-performed operation guard.
+#
+# Repro af384edfae2d / B109: affinity_by_author was called with ONLY
+# pos_filter, yet the renderer wrote «после фильтрации имён собственных
+# и русских фамилий» — claiming a name/surname filter that no tool
+# performed. The LLM critic prompt now lists this as a fabrication sign
+# (probabilistic); this deterministic pass is the enforcing back-stop:
+# the claim is excised from the answer BEFORE it ships (suppression,
+# not warn-only).
+#
+# Evidence model — a name/surname-filter claim is SUPPORTED iff:
+#   * any tool's args (`query`) reference such a filter
+#     (propn / surname / exclude_names / name_filter keys), OR
+#   * any tool's `data` explicitly discloses name-filter drops —
+#     affinity_by_author emits `proper_noun_filter` («v2 surname
+#     blocklist dropped N…») and a `_render_note` mentioning «фильтра
+#     имён собственных» when its built-in PROPN pipeline dropped rows.
+# pos_filter / min_corpus_count are NOT evidence of name filtering.
+# =====================================================================
+
+# Claim shapes: «после фильтрации имён/фамилий», «исключены имена
+# собственные», «отфильтрованы русские фамилии», EN variants.
+_OP_CLAIM_NAME_FILTER_RE = re.compile(
+    r"(?:после\s+фильтрации[^.!?\n]{0,60}?(?:им[ёе]н|фамили)|"
+    r"фильтраци\w+[^.!?\n]{0,40}?(?:им[ёе]н|фамили)|"
+    r"(?:исключ\w+|отфильтрова\w+|убра\w+|удал[ёе]?н\w*)[^.!?\n]{0,40}?"
+    r"(?:имена?\s+собственн\w+|им[ёе]н\w*\s+собственн\w+|фамили\w+)|"
+    r"(?:имена\s+собственные|фамилии)[^.!?\n]{0,40}?"
+    r"(?:исключ\w+|отфильтрован\w+|убран\w+|удал[ёе]н\w+)|"
+    r"filter(?:ed|ing)?\s+(?:out\s+)?proper\s+(?:names|nouns)|"
+    r"(?:proper\s+(?:names|nouns)|surnames)\s+(?:were\s+|have\s+been\s+)?"
+    r"(?:filtered|excluded|removed))",
+    re.IGNORECASE | re.UNICODE,
+)
+
+# Evidence tokens in serialized tool args / data that make the claim true.
+_NAME_FILTER_EVIDENCE_RE = re.compile(
+    r"propn|proper_noun|surname|exclude_names|name_filter|"
+    r"фильтра?\s+им[ёе]н|им[ёе]н\w*\s+собственн",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+@dataclass
+class OperationClaimReport:
+    """Unsupported operation claims found in the rendered answer."""
+    claims: list[str]
+
+    def has_issues(self) -> bool:
+        return bool(self.claims)
+
+
+def _records_carry_name_filter_evidence(tool_records) -> bool:
+    for rec in tool_records or []:
+        if not isinstance(rec, dict):
+            continue
+        for key in ("query", "data"):
+            try:
+                blob = json.dumps(rec.get(key), ensure_ascii=False,
+                                  default=str)
+            except Exception:
+                blob = str(rec.get(key))
+            if blob and _NAME_FILTER_EVIDENCE_RE.search(blob):
+                return True
+    return False
+
+
+def audit_operation_claims(answer: str,
+                           tool_records: list[dict]) -> OperationClaimReport:
+    """Find filter/operation claims in `answer` that no tool performed.
+
+    Deterministic — no LLM call. Currently covers the name/surname-filter
+    claim class (the af384edfae2d / B109 prod bug); extend the claim
+    regex when a new claimed-operation class shows up in feedback."""
+    rep = OperationClaimReport(claims=[])
+    if not answer or not answer.strip():
+        return rep
+    matches = list(_OP_CLAIM_NAME_FILTER_RE.finditer(answer))
+    if not matches:
+        return rep
+    if _records_carry_name_filter_evidence(tool_records):
+        return rep  # claim is backed by args or data disclosure — honest
+    for m in matches[:3]:
+        rep.claims.append(m.group(0).strip())
+    return rep
+
+
+def suppress_operation_claims(answer: str,
+                              report: OperationClaimReport) -> str:
+    """Excise sentences carrying unsupported operation claims and append
+    an honest disclosure instead. The disclosure deliberately does NOT
+    quote the removed claim — re-quoting would put the false statement
+    back into the answer."""
+    if not report.has_issues():
+        return answer
+    from scripts.v2.numeric_audit import _excise_sentence
+    repaired = answer
+    removed = 0
+    for claim in report.claims:
+        cut, ok = _excise_sentence(repaired, claim)
+        if ok:
+            repaired = cut
+            removed += 1
+    if not removed:
+        return answer
+    lines = [repaired.rstrip(), "", "---", "",
+             "🔧 **Honesty guard** — из ответа удалено утверждение о "
+             "фильтрации имён/фамилий: инструменты такую операцию в этом "
+             "запросе не выполняли (её нет в tool calls/args). Если нужна "
+             "такая фильтрация — она пока не поддерживается; в списке "
+             "могут встречаться имена собственные."]
     return "\n".join(lines)
