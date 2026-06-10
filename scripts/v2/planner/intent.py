@@ -1324,6 +1324,19 @@ RULES: list[tuple[Pattern[str], str, float]] = [
          r"this\b|that\b|the\b|a\b|an\b|your\b|that\s+|the\s+book)"
          r"[a-zA-Zа-яё-]{2,30}[\"'»”]?\s*$"),
      "word_contexts", 0.88),
+    # S-R2 (R-27, 2026-06-10) — «расскажи (мне) про слово X» / «tell me
+    # about the word X». Live nit 2026-06-02 (E-routing, backlog п.3):
+    # «расскажи про слово ajar» missed every deterministic rule
+    # (clarify 0.0) and the v4 LLM clarify-rescue picked
+    # word_pos_distribution — a POS histogram instead of the W-10 word
+    # bundle (translation + corpus contexts + etymology). word_contexts'
+    # no-author plan IS that bundle. The literal «слов(о/е)» anchor keeps
+    # «расскажи о себе» (introduction) and «расскажи про корпус»
+    # (corpus_meta) untouched — negative cases in
+    # tests/v2/test_r27_honest_renderer.py.
+    (_re(r"\bрасскажи(?:\s+мне)?\s+(?:про|о|об)\s+слов[ое]\s+\S|"
+         r"\btell\s+me\s+about\s+the\s+word\s+\S"),
+     "word_contexts", 0.92),
 
     # ===== learning =====
     # Q7 (Stan's 2026-05-18 demon round): «20 слов уровня intermediate из

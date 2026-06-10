@@ -124,6 +124,15 @@ RENDER_PROMPT = """Тебя зовут {name}. Ты — литературный
 
     Critic и numeric_audit ловят часть этих случаев пост-фактум, но пользователь уже видит ложь. Лучше написать «не указано в данных» сразу.
 
+21. **Честность чисел и операций (WP2, R-27, 2026-06-10).** Never invent counts, percentages, years, ranks, scores or frequencies. If a number is not present in tool output, omit it. Never claim that a filter, exclusion, or operation was applied unless it is present in the tool calls/args. If the user asked for filtering the tools did not perform, say explicitly that this filtering is not supported yet.
+    Заявление об операции (фильтрация, исключение, сортировка, дедупликация) — такой же факт, как число: оно должно быть подтверждено либо аргументами вызова (`tool_results[*].query` — например `pos_filter`, `min_corpus_count`), либо явным дисклозом в data (`proper_noun_filter`, `_render_note` про дропы имён).
+    - Допустимо: «отфильтровано по части речи (pos_filter=['ADJ'])» — pos_filter есть в query.
+    - Допустимо: «часть имён собственных отсеяна встроенным фильтром» — когда `data.proper_noun_filter` явно сообщает о дропах.
+    - Допустимо: «фильтрация русских фамилий пока не поддерживается — в списке могут встречаться имена» — честный ответ, когда пользователь просил фильтр, которого нет в tool calls.
+    - Запрещено: «после фильтрации имён собственных и русских фамилий» — когда в query только pos_filter и в data нет proper_noun_filter. Stan prod af384edfae2d (2026-06-10): affinity_by_author вызван только с pos_filter, рендерер заявил фильтрацию имён и фамилий, которой не было.
+    - Запрещено: «исключены редкие слова» — когда min_corpus_count отсутствует в query.
+    Заявленная-но-не-выполненная операция = фабрикация уровня rule 20: critic и operation-claims guard вырезают такие фразы из финального ответа.
+
 Tool trace тебе передан как JSON. Каждая запись — {{tool, query, data, warnings, coverage}}. Возьми оттуда factual content. **Ничего вне этих данных.** Помни: «не указано в данных» — это **полноценный честный ответ**, а не пробел, который надо заполнить из своих знаний."""
 
 
@@ -1535,6 +1544,14 @@ def ask(
         }
         for r in rr.results
     ]
+    # WP2b (R-27, 2026-06-10) — claimed-operation guard BEFORE the LLM
+    # critic: a filter claim no tool performed (af384edfae2d: «после
+    # фильтрации имён собственных…» when only pos_filter was passed) is
+    # excised deterministically, so the critic reviews the honest body.
+    op_report = critic_mod.audit_operation_claims(
+        answer, critic_summary_records)
+    answer = critic_mod.suppress_operation_claims(answer, op_report)
+
     verdict = critic_mod.review(
         answer, critic_summary_records, intent=intent.label,
         ollama_host=ollama_host,
@@ -1543,10 +1560,13 @@ def ask(
 
     # Sprint 16 Phase D — programmatic numeric audit. Runs after the
     # critic LLM pass so its footer attaches to the same answer body.
+    # WP2b — repair-or-suppress (was warn-only annotate): fabricated
+    # counts are substituted with the known truth, unbacked numbers are
+    # excised; un-repairable items keep the old 📊 warn footer.
     audit_report = audit_mod.audit_numbers(
         answer, critic_summary_records, intent=intent.label,
     )
-    answer = audit_mod.annotate_with_audit(answer, audit_report)
+    answer = audit_mod.repair_with_audit(answer, audit_report)
 
     tool_calls = [
         {"name": r.tool, "args": r.query,
@@ -1569,6 +1589,9 @@ def ask(
         "critic_verified": verdict.verified,
         "critic_unsupported_n": len(verdict.unsupported_claims),
         "numeric_audit_mismatches": len(audit_report.mismatches),
+        # WP2b (R-27) — how many claimed-but-not-performed operation
+        # claims were suppressed from this answer.
+        "operation_claims_suppressed": len(op_report.claims),
         # Sprint 17 — Ollama-side token counts (renderer + critic).
         # Lets the admin dashboard answer «do we need more num_ctx».
         "renderer_prompt_tokens": render_meta.get("prompt_tokens"),
@@ -2081,15 +2104,23 @@ def ask_stream(
          "warnings": [{"code": w.code, "message": w.message} for w in r.warnings]}
         for r in results
     ]
+    # WP2b (R-27) — claimed-operation guard, mirrors ask(). The final
+    # `answer` event replaces the streamed tokens client-side (done is
+    # the source of truth per docs/webapp.md), so suppression here is
+    # consistent with the existing critic/audit annotate behaviour.
+    op_report = critic_mod.audit_operation_claims(answer, critic_records)
+    answer = critic_mod.suppress_operation_claims(answer, op_report)
+
     verdict = critic_mod.review(answer, critic_records,
                                 intent=intent.label, ollama_host=ollama_host)
     answer = critic_mod.annotate_answer(answer, verdict)
 
     # Sprint 16 Phase D — numeric audit (programmatic; no LLM call).
+    # WP2b — repair-or-suppress instead of warn-only annotate.
     audit_report = audit_mod.audit_numbers(
         answer, critic_records, intent=intent.label,
     )
-    answer = audit_mod.annotate_with_audit(answer, audit_report)
+    answer = audit_mod.repair_with_audit(answer, audit_report)
 
     # Sprint 17 fix: mirror ask()'s success-path log_request so the
     # status dashboard sees stream queries (was previously stream-blind).
@@ -2108,6 +2139,8 @@ def ask_stream(
         "critic_verified": verdict.verified,
         "critic_unsupported_n": len(verdict.unsupported_claims),
         "numeric_audit_mismatches": len(audit_report.mismatches),
+        # WP2b (R-27) — suppressed claimed-operation count (stream path).
+        "operation_claims_suppressed": len(op_report.claims),
         # Sprint 17 — Ollama token counts (renderer + critic).
         "renderer_prompt_tokens": render_meta.get("prompt_tokens"),
         "renderer_eval_tokens":   render_meta.get("eval_tokens"),
@@ -2176,6 +2209,21 @@ def _short_render_error_message(err: Exception) -> str:
     # `_dispatch_render` before the LLM gets a chance to dump raw
     # JSON. Surface a friendly Russian phrasing instead.
     if isinstance(err, _ToolPipelineEmpty):
+        # S-R3 (R-27, 2026-06-10) — honest book-not-found fallback
+        # (B108 текстовая часть). The _ToolPipelineEmpty message embeds
+        # the first concrete tool error («resolve_book_title: no book
+        # matched 'Евгений Онегин'»). Blaming «сервис поиска не
+        # отозвался» for a clean not-found was a lie — the resolver
+        # answered fine, the title just isn't in the corpus under that
+        # name. Surface the truth + the actionable hint (EN title).
+        import re as _re_mod
+        m = _re_mod.search(r"no book matched\s+['\"](.+?)['\"]", str(err))
+        if m:
+            return (f"Книга «{m.group(1)}» не найдена в корпусе под этим "
+                    "названием. Корпус — англоязычный public-domain "
+                    "(Project Gutenberg); попробуй английское название "
+                    "(например, для русской классики — её английский "
+                    "перевод).")
         return ("По этому запросу инструменты не вернули данных — "
                 "возможно, слово/автор не нашлись в корпусе, либо "
                 "сервис поиска не отозвался. Попробуй переформулировать "

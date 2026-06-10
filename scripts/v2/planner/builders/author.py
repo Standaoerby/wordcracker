@@ -451,12 +451,26 @@ def _plan_author_lookup(e: Entities) -> QueryPlan:
         # fixture re-record). The deterministic AUTHOR_METADATA view is
         # not on the live answer path (template_executor.render_view has
         # no production caller), so it is intentionally left untouched.
+        # S-R1 (R-27, 2026-06-10) — anti-fabrication clause. Prod
+        # feedback: the LLM renderer decorated the sample_titles list
+        # with invented per-book annotations (plots, genres, dates).
+        # author_metadata carries ONLY titles + counters — any
+        # description next to a title is fabricated. The note now
+        # forbids it explicitly and redirects the «tell me more»
+        # impulse into a follow-up suggestion (rule 7 of RENDER_PROMPT
+        # already asks for next-step questions).
         render_notes=[
             "Это запрос «какие книги у автора» (author_lookup). Перечисли "
             "конкретные книги автора СПИСКОМ, взяв названия из "
             "tool_results[*].data.sample_titles (они уже отсортированы по "
             "downloads — самые каноничные сверху). Укажи общее число книг "
-            "из books_matched. НЕ ограничивайся биокарточкой с годами жизни."
+            "из books_matched. НЕ ограничивайся биокарточкой с годами жизни.",
+            "НЕ ВЫДУМЫВАЙ описания книг. В data есть ТОЛЬКО названия "
+            "(sample_titles) и счётчики (books_matched) — аннотаций, "
+            "жанров, сюжетов и годов написания там НЕТ. Список = голые "
+            "названия без описаний; любая приписка «роман о…» — "
+            "галлюцинация. Если хочется рассказать о книге — предложи "
+            "follow-up вопрос («расскажи про <название>»), а не сочиняй.",
         ],
         explain=f"author_lookup → author_metadata({e.author_regex}) "
                 "for sample_titles + books_matched",
