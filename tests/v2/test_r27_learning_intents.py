@@ -185,18 +185,17 @@ class InterceptPopularityRoute(unittest.TestCase):
 
     def test_popular_books_not_hijacked(self):
         """«самые популярные книги» — popularity-путь без readability
-        fan-out. (Сегодня фраза классифицируется в top_authors_books →
-        top_authors_by — это существовавший ДО WP1 маршрут; WP1
-        гарантирует лишь, что learning_books её не угоняет.)"""
+        fan-out: ни learning_books не угоняет (WP1), ни top_authors_by
+        не подменяет книги авторами (2026-06-11 builder-disambiguation в
+        _plan_top_authors; раньше тут допускался top_authors_by — это
+        был существовавший ДО WP1 мис-маршрут, теперь закрыт)."""
         q = "самые популярные книги"
         m = int_mod.classify(q)
         self.assertNotEqual(m.label, "learning_books", m.matched_pattern)
         p = plan_mod.build(m.label, _e(q))
         tools = [s.tool for s in p.steps]
         self.assertNotIn("book_readability", tools)
-        self.assertTrue(
-            set(tools) <= {"top_books_by_downloads", "top_authors_by"},
-            tools)
+        self.assertEqual(tools, ["top_books_by_downloads"], tools)
 
     def test_samaya_populyarnaya_kniga_still_top_books(self):
         """Singular-superlative остаётся на top_books_by_downloads."""

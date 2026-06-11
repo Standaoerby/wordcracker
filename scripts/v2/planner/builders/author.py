@@ -20,6 +20,7 @@ from scripts.v2.planner.builders._common import (
 )
 from scripts.v2.planner.builders.book import (
     _plan_book_lookup,
+    _plan_book_recommendation,
     _plan_book_vocab,
 )
 
@@ -74,7 +75,45 @@ def _query_mentions_two_countries(text: str) -> bool:
     return len(seen) >= 2
 
 
+def _plan_top_authors_is_books_query(raw_text: str) -> bool:
+    """Books-vs-authors disambiguation for the `top_authors_books` label.
+
+    The intent rules deliberately funnel BOTH «топ авторов» and «топ книг /
+    самые популярные книги» into one label (plural superlatives must not
+    leak into the singular book_extremum path — see the W-11 note in
+    intent.py). The label promise «handles both top-N books and authors»
+    is honoured HERE: a query that talks about books and never mentions
+    an author is asking for a list of BOOKS, so answering with
+    top_authors_by(metric=downloads) — a table of AUTHORS — is a
+    mis-route (Stan, 2026-06-11: «самые популярные книги»).
+
+    A book-word that appears only inside the metric phrase «по числу/
+    количеству книг» does NOT make it a books query — «топ-10 по числу
+    книг» ranks authors BY book count. Strip the metric phrase first,
+    then probe. Any author-word anywhere keeps the authors path («топ-5
+    авторов по числу книг» mentions both and stays authors).
+    """
+    import re as _re
+    s = (raw_text or "").lower()
+    if not s:
+        return False  # programmatic entities without raw text → status quo
+    s = _re.sub(r"\b(по|by)\s+(числу|количеству|кол-ву|number\s+of|count\s+of)"
+                r"\s+(книг|books?)\w*", " ", s)
+    has_books = _re.search(r"\bкниг\w*|\bbooks?\b", s) is not None
+    has_authors = _re.search(
+        r"автор\w*|писател\w*|\bauthors?\b|\bwriters?\b", s) is not None
+    return has_books and not has_authors
+
+
 def _plan_top_authors(e: Entities) -> QueryPlan:
+    # Books-not-authors phrasing → the popularity-books plan. Delegate to
+    # `_plan_book_recommendation` (R6 — no copy-paste): it already emits
+    # top_books_by_downloads(top, lang) and W-9 honest disclosures for the
+    # filters that tool can't honor (country/year/level). Checked BEFORE
+    # the country branch so «самые популярные британские книги» returns
+    # books with a disclosed country limit, not a table of authors.
+    if _plan_top_authors_is_books_query((e.raw_misc or {}).get("raw_text", "")):
+        return _plan_book_recommendation(e)
     # Honor `top_metric` when user said «по скачиваниям» / «по токенам».
     # Default falls back to «books». Stan's 2026-05-18 demon caught this:
     # «топ-5 британских авторов по скачиваниям» used to silently sort by
