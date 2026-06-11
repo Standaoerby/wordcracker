@@ -30,7 +30,7 @@ from scripts.v2.planner import plan_spec as _spec_mod
 from scripts.v2.planner.invariants import apply_invariants
 from scripts.v2.planner.plan_spec import PlanSpec
 from scripts.v2.tool_registry import dispatch
-from scripts.v2._types import ToolResult
+from scripts.v2._types import ToolError, ToolResult, ToolWarning
 
 
 PlanOrSpec = Union[QueryPlan, PlanSpec]
@@ -63,17 +63,27 @@ class RouterResult:
 
 
 def _inject(args: dict, prior_results: list[ToolResult],
-            depends_on: list[int], inject_as: str | None) -> dict:
+            depends_on: list[int], inject_as: str | None) -> dict | None:
     """Thread output from a previous step into this step's args.
 
     Heuristic: when `inject_as == "pg_id"`, look up `data["first_id"]` on the
     most recent dependency. Extendable: add more named injections as we use
-    them in plan templates."""
+    them in plan templates.
+
+    R-28 B121 — rank-indexed injections (`pg_id@N` / `word@N`) return None
+    when the source row for rank N is unavailable (short source list,
+    failed source, missing value). None means «this step must NOT
+    dispatch» — callers skip it via `_skip_for_empty_injection` instead
+    of running the tool with planned-but-empty args. Non-rank injections
+    keep the old degrade (args returned unchanged; the tool surfaces its
+    own invalid_args downstream)."""
     if not depends_on or inject_as is None:
         return args
     src = prior_results[depends_on[-1]]
     out = dict(args)
     if not src.ok or src.data is None:
+        if "@" in inject_as:
+            return None  # B121 — rank source failed → skip, not dispatch {}
         return out  # router will detect & error out below
     if inject_as == "pg_id":
         first_id = src.data.get("first_id") if isinstance(src.data, dict) else None
@@ -82,9 +92,14 @@ def _inject(args: dict, prior_results: list[ToolResult],
     elif inject_as.startswith("pg_id@"):
         # R-27 WP1 learning_books — rank-indexed injection: pull row N
         # from the dependency's data["top"] list (top_books_by_downloads
-        # shape) and inject its pg_id. The consuming step is optional, so
-        # a short pool / failed pool step degrades to invalid_args on
-        # that single step instead of killing the plan.
+        # shape) and inject its pg_id.
+        # R-28 B120 — the row key is `id`: real v1 rows carry
+        # {id, title, author, downloads} (golden fixture
+        # scripts.rag_tools.top_books_by_downloads.json). The original
+        # read of `pg_id` was a phantom key — never present in prod
+        # rows — so this injection silently delivered {} to every
+        # dependent step since 2.7.6 (B118's «Не указано в данных»
+        # rows were this bug, not render variance).
         try:
             rank = int(inject_as.split("@", 1)[1])
         except ValueError:
@@ -92,11 +107,11 @@ def _inject(args: dict, prior_results: list[ToolResult],
         rows = src.data.get("top") if isinstance(src.data, dict) else None
         if rank >= 0 and isinstance(rows, list) and rank < len(rows):
             row = rows[rank]
-            # `pg_id` is in V1TopBooksByDownloads.__row_keys__ — the
-            # contract guarantees it; no fallback-key chains (R3).
-            pg = row.get("pg_id") if isinstance(row, dict) else None
+            pg = row.get("id") if isinstance(row, dict) else None
             if pg:
                 out["pg_id"] = pg
+                return out
+        return None  # B121 — rank beyond source rows → skip
     elif inject_as.startswith("word@"):
         # R-27 WP1 Q20 — rank-indexed injection from learning_words
         # data["results"][N]["word"] for the enrich_word translate
@@ -112,6 +127,8 @@ def _inject(args: dict, prior_results: list[ToolResult],
             w = row.get("word") if isinstance(row, dict) else None
             if w:
                 out["word"] = w
+                return out
+        return None  # B121 — rank beyond source rows → skip
     elif inject_as == "scope":
         # use the resolved book id as a scope dict
         first_id = src.data.get("first_id") if isinstance(src.data, dict) else None
@@ -133,6 +150,58 @@ def _inject(args: dict, prior_results: list[ToolResult],
     elif inject_as in src.data if isinstance(src.data, dict) else False:
         out[inject_as] = src.data[inject_as]
     return out
+
+
+# B121 — rows-list key per rank-injection prefix. Mirrors the read in
+# `_inject`; one place to extend when a new rank injection appears.
+_RANK_SOURCE_KEYS = {"pg_id": "top", "word": "results"}
+
+
+def _skip_for_empty_injection(plan: QueryPlan, step: PlanStep,
+                              prior_results: list[ToolResult],
+                              ) -> tuple[ToolResult, str]:
+    """R-28 B121 — a step whose rank-indexed injection has no source row
+    is SKIPPED, not dispatched with empty args.
+
+    Returns (placeholder, reason). The placeholder keeps `results`
+    index-aligned with `plan.steps` (depends_on indexes into results)
+    and carries an `inject_shortfall` warning so the render payload
+    shows WHY the step didn't run. Also stamps ONE shortfall render
+    note onto the plan, reusing the WP3 (1e) count-honesty vocabulary
+    (top_requested / top_returned) so renderer rule 14 treats the
+    shortfall as the single source of truth instead of inventing the
+    missing rows."""
+    prefix = (step.inject_result_as or "").split("@", 1)[0]
+    planned = sum(
+        1 for s in plan.steps
+        if (s.inject_result_as or "").startswith(prefix + "@")
+        and s.depends_on == step.depends_on)
+    avail = 0
+    if step.depends_on:
+        src = prior_results[step.depends_on[-1]]
+        if src.ok and isinstance(src.data, dict):
+            rows = src.data.get(_RANK_SOURCE_KEYS.get(prefix, "top"))
+            avail = len(rows) if isinstance(rows, list) else 0
+    reason = (f"injection {step.inject_result_as} unavailable — source "
+              f"returned {avail} rows, plan requested {planned}")
+    marker = "SHORTFALL ИСТОЧНИКА"
+    if not any(marker in n for n in (plan.render_notes or [])):
+        plan.render_notes = list(plan.render_notes or []) + [
+            f"{marker}: план запрашивал {planned} шагов {step.tool} по "
+            f"строкам источника (top_requested={planned}), но источник "
+            f"вернул только {avail} строк (top_returned={avail}) — "
+            f"исполнено {avail}. В ответе честно скажи, что показано "
+            f"{avail} из {planned}; НЕ выдумывай недостающие строки."
+        ]
+    placeholder = ToolResult(
+        ok=False, tool=step.tool, query=dict(step.args),
+        error=ToolError(type="invalid_args", message=reason),
+        warnings=[ToolWarning(
+            code="inject_shortfall", message=reason,
+            details={"inject_result_as": step.inject_result_as,
+                     "available": avail, "planned": planned})],
+    )
+    return placeholder, reason
 
 
 def execute(plan_or_spec: PlanOrSpec, *, budget=None) -> RouterResult:
@@ -200,6 +269,16 @@ def _execute_query_plan(plan: QueryPlan, *, budget=None) -> RouterResult:
                                 results=results, events=events,
                                 budget_exceeded=True)
         args = _inject(step.args, results, step.depends_on, step.inject_result_as)
+        if args is None:
+            # B121 — rank-indexed injection has no source row: skip the
+            # step (no dispatch), keep results index-aligned, surface
+            # the shortfall to the renderer via plan.render_notes.
+            placeholder, reason = _skip_for_empty_injection(
+                plan, step, results)
+            results.append(placeholder)
+            events.append(StepEvent(kind="step_skip", step_idx=idx,
+                                    tool=step.tool, reason=reason))
+            continue
         events.append(StepEvent(kind="step_start", step_idx=idx,
                                 tool=step.tool, args=args))
         # Phase 5 chokepoint: budget идёт ВНУТРЬ dispatch, где effective
@@ -419,6 +498,16 @@ def _execute_query_plan_stream(plan: QueryPlan, *, budget=None) -> Iterator[dict
     results: list[ToolResult] = []
     for idx, step in enumerate(plan.steps):
         args = _inject(step.args, results, step.depends_on, step.inject_result_as)
+        if args is None:
+            # B121 — same skip semantics as the blocking executor.
+            # Unknown event kinds are ignored by both SSE clients
+            # (chat_server JS switch default / api_loop trace catch-all).
+            placeholder, reason = _skip_for_empty_injection(
+                plan, step, results)
+            results.append(placeholder)
+            yield {"event": "tool_skip", "name": step.tool,
+                   "reason": reason, "step_idx": idx}
+            continue
         yield {"event": "tool_call", "name": step.tool, "args": args, "step_idx": idx}
         tr = dispatch(step.tool, args, budget=budget)
         results.append(tr)

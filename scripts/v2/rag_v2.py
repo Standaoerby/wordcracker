@@ -2017,6 +2017,16 @@ def ask_stream(
             # use the same injector logic the non-streaming router uses
             args = router_mod._inject(step.args, results, step.depends_on,
                                       step.inject_result_as)
+            if args is None:
+                # R-28 B121 — rank-indexed injection has no source row:
+                # skip the step (no dispatch), mirror router.execute.
+                # Both SSE clients ignore unknown event kinds.
+                placeholder, reason = router_mod._skip_for_empty_injection(
+                    plan, step, results)
+                results.append(placeholder)
+                yield {"event": "tool_skip", "name": step.tool,
+                       "reason": reason}
+                continue
             if cancel_event.is_set():
                 return
             yield {"event": "tool_call", "name": step.tool, "args": args}
