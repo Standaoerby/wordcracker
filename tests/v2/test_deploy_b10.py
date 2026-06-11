@@ -75,14 +75,27 @@ def test_rerecord_timeout_escalates_with_kill_after():
     R2 negative: the pre-S-B10 gate used a bare ``timeout 900`` — if the
     target ignores/slow-handles SIGTERM, ``timeout`` never escalates and
     the deploy hangs past the budget (the R-25 symptom).
+
+    R-28 #1: the recorder now runs DETACHED and the budget-bounded client
+    is ``docker wait`` (the attached compose client was itself a hang
+    class — it wedged in attach teardown AFTER the container exited, so
+    the gate sat out the full budget on every deploy). The pin therefore
+    targets the ``docker wait`` line, which must still be wrapped in
+    ``timeout --kill-after``.
     """
     code = _strip_bash_comments(DEPLOY_SH.read_text(encoding="utf-8"))
-    idx = code.find("scripts.v2.contracts.record_fixtures")
-    assert idx != -1, "deploy.sh must invoke the recorder"
-    block = code[max(0, idx - 500): idx + 200]
+    rec = code.find("scripts.v2.contracts.record_fixtures")
+    assert rec != -1, "deploy.sh must invoke the recorder"
+    wait_idx = code.find("docker wait", rec)
+    assert wait_idx != -1, (
+        "the re-record gate must run the recorder detached and `docker wait` "
+        "for it — the attached compose client is a known hang class (R-28 #1)"
+    )
+    block = code[max(0, wait_idx - 300): wait_idx + 200]
     assert "timeout --kill-after" in block, (
-        "re-record `timeout` must use --kill-after to escalate SIGTERM→SIGKILL "
-        "so a wedged client cannot hang the deploy past the budget (S-B10 #1)"
+        "the re-record `docker wait` must be wrapped in `timeout --kill-after` "
+        "to escalate SIGTERM→SIGKILL so a wedged client cannot hang the deploy "
+        "past the budget (S-B10 #1 / R-28 #1)"
     )
 
 
@@ -150,7 +163,10 @@ def test_rerecord_gate_has_status_clean_guard():
     on prod after deploy)."""
     code = _strip_bash_comments(DEPLOY_SH.read_text(encoding="utf-8"))
     idx = code.find("scripts.v2.contracts.record_fixtures")
-    block = code[idx: idx + 1800]
+    prune = code.find("docker image rm")
+    # Whole gate body (recorder → prune): R-28's detached-run plumbing sits
+    # between the invocation and the guard, so a fixed-width window under-runs.
+    block = code[idx:prune]
     assert "git status --porcelain" in block, (
         "re-record gate must assert a clean tree via `git status --porcelain` "
         "after restore (S-B10 #2)"

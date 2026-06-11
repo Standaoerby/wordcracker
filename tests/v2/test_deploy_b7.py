@@ -116,8 +116,14 @@ def test_rerecord_gate_uses_ephemeral_dev_overlay():
         (a host `git diff` can then see drift). Without it the recorder
         writes into the image's COPY'd /workspace/scripts and the host
         diff sees nothing.
-      * ``run --rm`` — ephemeral; does NOT recreate / touch the running
-        chat/admin/gutenberg-lab services.
+      * ``run -d`` — detached (R-28 #1; was ``run --rm``): the attached
+        compose client wedged in attach teardown after the container
+        exited, eating the full timeout budget on every deploy. ``run``
+        (vs ``up``) still does NOT recreate / touch the running
+        chat/admin/gutenberg-lab services. Ephemerality is now reap-based:
+        an explicit ``docker rm -f`` after the wait (plus the shared
+        cleanup trap) replaces ``--rm`` and removes the daemon-side
+        ``--rm``-vs-``docker wait`` race.
       * ``record_fixtures`` — the recorder module itself.
     """
     code = _strip_bash_comments(DEPLOY_SH.read_text(encoding="utf-8"))
@@ -129,9 +135,20 @@ def test_rerecord_gate_uses_ephemeral_dev_overlay():
         "re-record gate must layer the dev overlay (-f docker-compose.dev.yml) "
         "so the in-container fixture writes bind-mount back to the host repo (S-B7)"
     )
-    assert "run --rm" in block, (
-        "re-record gate must use `run --rm` (ephemeral container; must not "
-        "recreate the running services) (S-B7)"
+    assert "run -d" in block, (
+        "re-record gate must `run -d` (detached) — the attached compose client "
+        "is a known hang class in attach teardown (R-28 #1)"
+    )
+    assert "run --rm" not in block, (
+        "re-record gate must NOT use `--rm`: the explicit `docker rm -f` reap "
+        "owns container removal, avoiding the daemon-side --rm-vs-`docker wait` "
+        "race (R-28 #1)"
+    )
+    after = code[idx: idx + 1600]
+    assert "docker rm -f" in after, (
+        "with --rm gone, the gate must explicitly `docker rm -f` the named "
+        "container after the wait — ephemerality is reap-based (S-B10 #1 / "
+        "R-28 #1)"
     )
 
 
@@ -143,7 +160,9 @@ def test_rerecord_gate_is_timeout_aware():
       * ``--skip-heavy`` drops the HEAVY_BINDINGS full-corpus scans
         (word_contexts_global ~400s etc.).
       * ``timeout`` is a hard wall-clock backstop if a non-heavy tool
-        wedges.
+        wedges. R-28 #1: the recorder runs detached, so the backstop now
+        wraps the ``docker wait`` that blocks on it — same budget, same
+        rc=124 → WARN semantics.
     """
     code = _strip_bash_comments(DEPLOY_SH.read_text(encoding="utf-8"))
     idx = code.find("scripts.v2.contracts.record_fixtures")
@@ -152,9 +171,14 @@ def test_rerecord_gate_is_timeout_aware():
         "re-record gate must pass --skip-heavy so the multi-minute corpus "
         "scans don't hang the deploy (S-B7)"
     )
-    assert "timeout " in block, (
-        "re-record gate must wrap the recorder in `timeout` as a hard "
-        "wall-clock backstop (S-B7)"
+    wait_idx = code.find("docker wait", idx)
+    assert wait_idx != -1, (
+        "the detached re-record gate must block on `docker wait` (R-28 #1)"
+    )
+    wait_block = code[max(0, wait_idx - 300): wait_idx + 200]
+    assert "timeout " in wait_block, (
+        "re-record gate must wrap the `docker wait` in `timeout` as a hard "
+        "wall-clock backstop (S-B7 / R-28 #1)"
     )
 
 
@@ -228,7 +252,11 @@ def test_rerecord_gate_restores_tree_for_next_dirty_check():
     """
     code = _strip_bash_comments(DEPLOY_SH.read_text(encoding="utf-8"))
     idx = code.find("scripts.v2.contracts.record_fixtures")
-    block = code[idx: idx + 1400]
+    prune = code.find("docker image rm")
+    # Whole gate body (recorder → prune): R-28's detached-run plumbing sits
+    # between the invocation and the restores, so a fixed-width window
+    # under-runs.
+    block = code[idx:prune]
     restores = block.count("git checkout --")
     assert restores >= 3, (
         "re-record gate must `git checkout --` the fixtures dir on all "
