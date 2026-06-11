@@ -71,11 +71,16 @@ class IfYouLikeIntentRouting(unittest.TestCase):
         m = classify("что почитать после Crime and Punishment")
         self.assertEqual(m.label, "book_similar")
 
-    def test_cefr_level_unchanged(self):
-        """«что почитать на B2» still routes to book_recommendation."""
+    def test_cefr_level_routes_to_learning_books(self):
+        """R-27 WP1 Дополнение А (Q13): «что почитать на B2» теперь
+        перехватывается learning_books (pool + readability), а не
+        book_recommendation → top_books_by_downloads с дисклеймером
+        («доклад комиссии по убийству Кеннеди» как чтение для B2).
+        Исходный смысл этого гарда — similar_to не должен красть
+        CEFR-запрос — сохраняется: similar_to это по-прежнему не он."""
         from scripts.v2.planner.intent import classify
         m = classify("что почитать на B2 уровне")
-        self.assertEqual(m.label, "book_recommendation")
+        self.assertEqual(m.label, "learning_books")
 
 
 class EndToEndPlanForToldoyTaste(unittest.TestCase):

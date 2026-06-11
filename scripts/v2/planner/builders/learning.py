@@ -82,6 +82,52 @@ def _plan_learning(e: Entities) -> QueryPlan:
             "НЕ замалчивай это ограничение, НЕ говори «отфильтровал "
             "архаизмы»."
         )
+    # R-27 WP1 Дополнение Б (Q20, тест-ран) — first-session «дай N слов
+    # из книги X с переводами»: learning_words(book) + перевод списка
+    # ОДНИМ заходом. Раньше запрос не матчился ни одним правилом → v4
+    # LLM ~46s → 0 calls → ложное «упомяни книгу» (книга была названа).
+    # Перевод — enrich_word fan-out по строкам результата learning_words
+    # (router-injected word@<rank>, та же механика, что pg_id@<rank> в
+    # learning_books). Кап 10 слов — бюджетный расчёт translate_word_list
+    # (10 × ~1.5s Wiktionary + render < chat timeout); 1 + 10 = 11 ≤
+    # tool_calls_max=12. Followup-путь «переведи эти слова»
+    # (translate_word_list, _translate_to из history) не затронут —
+    # триггер только на явное «с перевод*» в тексте текущего запроса.
+    raw_text = (e.raw_misc or {}).get("raw_text", "") or ""
+    wants_translation = bool(re.search(
+        r"\bс\s+перевод\w*|\bwith\s+translations?\b", raw_text,
+        re.IGNORECASE))
+    if wants_translation:
+        trans_top = min(eff_top, 10)
+        args["top"] = trans_top
+        if requested > trans_top:
+            args["_capped_from"] = requested
+        steps = [PlanStep(tool="learning_words", args=args)]
+        for rank in range(trans_top):
+            steps.append(PlanStep(
+                tool="enrich_word",
+                args={"target_lang": "ru"},
+                depends_on=[0], inject_result_as=f"word@{rank}",
+                optional=True,   # один Wiktionary-промах не валит план
+            ))
+        notes.append(
+            "ПЕРЕВОДЫ: пользователь просил слова С ПЕРЕВОДАМИ. Сведи "
+            "learning_words + enrich_word в ОДНУ таблицу «слово | "
+            "перевод | определение» в порядке списка learning_words. "
+            "Если enrich_word для какого-то слова упал — оставь ячейку "
+            "перевода пустой и честно скажи об этом, НЕ выдумывай "
+            "перевод."
+        )
+        return QueryPlan(
+            intent="learning", entities=e,
+            steps=steps,
+            expected_cost="heavy",
+            explain=(f"learning_words({scope}, top={trans_top}"
+                     f"{f' [capped from {requested}]' if requested > trans_top else ''}) "
+                     f"+ enrich_word × {trans_top} (word@rank, "
+                     f"target_lang=ru) — слова с переводами одним заходом"),
+            render_notes=notes,
+        )
     return QueryPlan(
         intent="learning", entities=e,
         steps=[PlanStep(tool="learning_words", args=args)],

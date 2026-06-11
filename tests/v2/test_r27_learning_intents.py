@@ -164,6 +164,125 @@ class LearningBooksPlan(unittest.TestCase):
         self.assertIn("learning_books", INTENT_BUDGETS_S)
 
 
+class InterceptPopularityRoute(unittest.TestCase):
+    """Дополнение А (Q13, тест-ран на 2.7.3+): learning-формулировки с
+    уровнем перехватываются у book_recommendation (top_books_by_downloads
+    с дисклеймером), а популярность БЕЗ learning-контекста не угоняется."""
+
+    def test_q13_chto_pochitat_na_b2(self):
+        m = int_mod.classify("что почитать на B2")
+        self.assertEqual(m.label, "learning_books", m.matched_pattern)
+
+    def test_chto_pochitat_dlya_urovnya_b2(self):
+        m = int_mod.classify("что почитать для уровня B2")
+        self.assertEqual(m.label, "learning_books", m.matched_pattern)
+
+    def test_knigi_dlya_b2(self):
+        m = int_mod.classify("книги для B2")
+        self.assertEqual(m.label, "learning_books", m.matched_pattern)
+
+    # ---- негативы: популярность без learning-контекста ----
+
+    def test_popular_books_not_hijacked(self):
+        """«самые популярные книги» — popularity-путь без readability
+        fan-out. (Сегодня фраза классифицируется в top_authors_books →
+        top_authors_by — это существовавший ДО WP1 маршрут; WP1
+        гарантирует лишь, что learning_books её не угоняет.)"""
+        q = "самые популярные книги"
+        m = int_mod.classify(q)
+        self.assertNotEqual(m.label, "learning_books", m.matched_pattern)
+        p = plan_mod.build(m.label, _e(q))
+        tools = [s.tool for s in p.steps]
+        self.assertNotIn("book_readability", tools)
+        self.assertTrue(
+            set(tools) <= {"top_books_by_downloads", "top_authors_by"},
+            tools)
+
+    def test_samaya_populyarnaya_kniga_still_top_books(self):
+        """Singular-superlative остаётся на top_books_by_downloads."""
+        q = "Какая самая популярная книга?"
+        m = int_mod.classify(q)
+        self.assertEqual(m.label, "book_extremum", m.matched_pattern)
+        p = plan_mod.build(m.label, _e(q))
+        self.assertEqual(p.steps[0].tool, "top_books_by_downloads")
+
+    def test_pochitat_posle_x_still_book_similar(self):
+        m = int_mod.classify("что почитать после Crime and Punishment")
+        self.assertEqual(m.label, "book_similar", m.matched_pattern)
+
+
+class TranslateComposition(unittest.TestCase):
+    """Дополнение Б (Q20): «дай N слов из книги X с переводами» — было
+    46s → 0 calls → ложное «упомяни книгу». Теперь: learning_words(book)
+    + enrich_word fan-out (word@rank) одним заходом."""
+
+    def test_q20_intent(self):
+        m = int_mod.classify("дай 10 слов из Дракулы с переводами")
+        self.assertEqual(m.label, "learning", m.matched_pattern)
+
+    def test_q20_intent_without_translations(self):
+        m = int_mod.classify("дай 10 слов из Дракулы")
+        self.assertEqual(m.label, "learning", m.matched_pattern)
+
+    def test_q20_plan_shape(self):
+        p = _plan_learning(
+            _e("дай 10 слов из Дракулы с переводами",
+               book_id="PG345", top_n=10))
+        self.assertEqual(p.intent, "learning")
+        self.assertEqual(len(p.steps), 1 + 10)
+        self.assertEqual(p.steps[0].tool, "learning_words")
+        self.assertEqual(p.steps[0].args["scope"], {"book": "PG345"})
+        self.assertEqual(p.steps[0].args["top"], 10)
+        for rank, step in enumerate(p.steps[1:]):
+            self.assertEqual(step.tool, "enrich_word")
+            self.assertEqual(step.args["target_lang"], "ru")
+            self.assertEqual(step.depends_on, [0])
+            self.assertEqual(step.inject_result_as, f"word@{rank}")
+            self.assertTrue(step.optional)
+        self.assertIn("ПЕРЕВОД", " ".join(p.render_notes))
+        # бюджет: 11 calls ≤ tool_calls_max
+        self.assertLessEqual(len(p.steps), RequestBudget().tool_calls_max)
+
+    def test_no_translation_no_enrich(self):
+        """Негатив Б: просьба без переводов не тащит translate-этап."""
+        p = _plan_learning(
+            _e("дай 10 слов из Дракулы", book_id="PG345", top_n=10))
+        tools = [s.tool for s in p.steps]
+        self.assertEqual(tools, ["learning_words"])
+
+    def test_translation_cap_10(self):
+        """30 слов с переводами — кап 10 + честный _capped_from."""
+        p = _plan_learning(
+            _e("дай 30 слов из Дракулы с переводами",
+               book_id="PG345", top_n=30))
+        self.assertEqual(p.steps[0].args["top"], 10)
+        self.assertEqual(p.steps[0].args["_capped_from"], 30)
+        self.assertEqual(
+            sum(1 for s in p.steps if s.tool == "enrich_word"), 10)
+
+
+class WordRankInjection(unittest.TestCase):
+    """router._inject «word@N» — инжекция слова из learning_words
+    data["results"] в enrich_word."""
+
+    @staticmethod
+    def _words(n=3):
+        return ToolResult.success(
+            tool="learning_words",
+            data={"results": [{"word": f"w{i}", "scope_count": 5,
+                               "corpus_count": 100} for i in range(n)]},
+        )
+
+    def test_injects_word(self):
+        out = _inject({"target_lang": "ru"}, [self._words()], [0], "word@1")
+        self.assertEqual(out.get("word"), "w1")
+        self.assertEqual(out["target_lang"], "ru")
+
+    def test_rank_out_of_range_no_key(self):
+        out = _inject({}, [self._words(2)], [0], "word@7")
+        self.assertNotIn("word", out)
+
+
 class RankInjection(unittest.TestCase):
     """router._inject «pg_id@N» — rank-indexed injection из data["top"]."""
 

@@ -97,6 +97,21 @@ def _inject(args: dict, prior_results: list[ToolResult],
             pg = row.get("pg_id") if isinstance(row, dict) else None
             if pg:
                 out["pg_id"] = pg
+    elif inject_as.startswith("word@"):
+        # R-27 WP1 Q20 — rank-indexed injection from learning_words
+        # data["results"][N]["word"] for the enrich_word translate
+        # fan-out («дай N слов из книги X с переводами»). Same shape as
+        # pg_id@N above; `word` is in V1LearningWords.__row_keys__.
+        try:
+            rank = int(inject_as.split("@", 1)[1])
+        except ValueError:
+            rank = -1
+        rows = src.data.get("results") if isinstance(src.data, dict) else None
+        if rank >= 0 and isinstance(rows, list) and rank < len(rows):
+            row = rows[rank]
+            w = row.get("word") if isinstance(row, dict) else None
+            if w:
+                out["word"] = w
     elif inject_as == "scope":
         # use the resolved book id as a scope dict
         first_id = src.data.get("first_id") if isinstance(src.data, dict) else None

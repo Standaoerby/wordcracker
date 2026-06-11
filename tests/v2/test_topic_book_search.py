@@ -50,9 +50,13 @@ class TopicBookSearchIntent(unittest.TestCase):
         self.assertNotEqual(m.label, "topic_book_search")
 
     def test_doesnt_steal_b2_recommendation(self):
-        """Pure level-based recommendation stays in book_recommendation."""
+        """Исходный смысл: topic_book_search не крадёт level-запрос.
+        R-27 WP1 Дополнение А (Q13): целевой маршрут level-запроса
+        теперь learning_books (вместо book_recommendation →
+        top_books_by_downloads с дисклеймером)."""
         m = int_mod.classify("Что почитать на уровне B2?")
-        self.assertEqual(m.label, "book_recommendation")
+        self.assertNotEqual(m.label, "topic_book_search")
+        self.assertEqual(m.label, "learning_books")
 
 
 class TopicBookSearchPlan(unittest.TestCase):
