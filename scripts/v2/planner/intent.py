@@ -835,6 +835,12 @@ RULES: list[tuple[Pattern[str], str, float]] = [
          r"\?|$)"), "book_lookup", 0.78),
 
     # ===== top_authors_books =====
+    # NB (2026-06-11): this label covers BOTH «топ авторов» and plural
+    # «самые популярные книги / топ книг» (plural must not leak into the
+    # singular book_extremum, see W-11 note above). The books-vs-authors
+    # split happens in the BUILDER: _plan_top_authors delegates
+    # books-not-authors raw text to the top_books_by_downloads path
+    # (builders/author.py::_plan_top_authors_is_books_query).
     (_re(r"\b(топ[- ]?\d*|top\s*\d*)\s.{0,40}(автор\w*|writer)"),
      "top_authors_books", 0.85),
     (_re(r"(самые\s+попул\w*|самые\s+скачив\w*|most popular|most downloaded)"
