@@ -427,3 +427,126 @@ def suppress_operation_claims(answer: str,
              "такая фильтрация — она пока не поддерживается; в списке "
              "могут встречаться имена собственные."]
     return "\n".join(lines)
+
+
+# =====================================================================
+# R-27 WP3 (2026-06-11) — claimed-vs-shown name-filter guard.
+#
+# Q7/Q8 live repro (prod 2.7.3): the answer said «после фильтрации имён
+# собственных … осталось 24» while the visible table carried hélène,
+# sergius, petrovna, hippolyte, nicholas. The WP2b guard above could not
+# catch it: the claim WAS backed by a data disclosure (word_dict drops),
+# so per rule 21 it survived — «правда, что фильтровали — ложь, что
+# отфильтровали». This pass closes that nuance deterministically: when
+# the answer CLAIMS a name/proper-noun filter, run the SAME pure name
+# detector the tools use (scripts.v2.tools.authors._propn_gazetteer)
+# over the words actually shown in the answer's markdown tables. Any
+# hit → the assertive claim is excised (WP2b suppression mechanics) and
+# an honest «фильтр имён частичный» disclosure is appended. No LLM —
+# pure function, unit-testable.
+# =====================================================================
+
+# Sentence-level escape hatch: a claim that ALREADY discloses partiality
+# («применён частичный фильтр…», «могли остаться имена») is honest and
+# must not be excised.
+_PARTIAL_DISCLOSURE_RE = re.compile(
+    r"частичн|могли\s+остаться|могут\s+(?:встречаться|оставаться)|partial",
+    re.IGNORECASE | re.UNICODE,
+)
+
+# Markdown table plumbing — same line-shape detection numeric_audit uses.
+_MD_TABLE_LINE_RE = re.compile(r"^\s*\|.*\|\s*$", re.MULTILINE)
+_MD_TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?[-=]{2,}\s*[:|]?")
+# A cell token that can be a "word" in our word lists: letters (latin or
+# cyrillic, accents allowed), apostrophe/hyphen, 2+ chars.
+_WORD_CELL_RE = re.compile(r"^[A-Za-zÀ-ÿЀ-ӿ][A-Za-zÀ-ÿЀ-ӿ'’-]+$")
+
+
+@dataclass
+class ClaimedVsShownReport:
+    """Name-filter claims contradicted by names visible in the answer."""
+    claims: list[str]
+    shown_names: list[str]
+
+    def has_issues(self) -> bool:
+        return bool(self.claims and self.shown_names)
+
+
+def _visible_table_words(answer: str) -> list[str]:
+    """Word-like tokens from the answer's markdown table cells.
+
+    Strips markdown emphasis/backticks per cell; keeps only single
+    word-shaped tokens (the shape affinity/learning lists render).
+    Numeric cells, headers like «Слово»/«rank» and multi-word prose
+    cells fall out naturally via the shape check + detector."""
+    words: list[str] = []
+    seen: set[str] = set()
+    for line in _MD_TABLE_LINE_RE.findall(answer):
+        if _MD_TABLE_SEP_RE.match(line):
+            continue
+        for cell in line.strip().strip("|").split("|"):
+            token = cell.strip().strip("*_`").strip()
+            if not token or token in seen:
+                continue
+            if _WORD_CELL_RE.match(token):
+                seen.add(token)
+                words.append(token)
+    return words
+
+
+def audit_claimed_vs_shown(answer: str) -> ClaimedVsShownReport:
+    """Deterministic «заявлено vs показано»: name-filter claim in the
+    text + name detector over the visible table rows. Pure function."""
+    rep = ClaimedVsShownReport(claims=[], shown_names=[])
+    if not answer or not answer.strip():
+        return rep
+    matches = list(_OP_CLAIM_NAME_FILTER_RE.finditer(answer))
+    if not matches:
+        return rep
+    from scripts.v2.tools.authors._propn_gazetteer import find_proper_names
+    shown = find_proper_names(_visible_table_words(answer))
+    if not shown:
+        return rep
+    for m in matches[:3]:
+        # Locate the claim's sentence; an already-partial disclosure is
+        # honest — skip it.
+        start = answer.rfind("\n", 0, m.start())
+        for brk in ".!?…":
+            cut = answer.rfind(brk, 0, m.start())
+            if cut > start:
+                start = cut
+        end_candidates = [answer.find(brk, m.end()) for brk in ".!?…\n"]
+        end_candidates = [e for e in end_candidates if e != -1]
+        end = min(end_candidates) if end_candidates else len(answer)
+        sentence = answer[start + 1:end]
+        if _PARTIAL_DISCLOSURE_RE.search(sentence):
+            continue
+        rep.claims.append(m.group(0).strip())
+    if rep.claims:
+        rep.shown_names = shown[:10]
+    return rep
+
+
+def suppress_partial_filter_claims(answer: str,
+                                   report: ClaimedVsShownReport) -> str:
+    """Excise assertive name-filter claims contradicted by the visible
+    rows; append the honest partial-filter disclosure (WP2b mechanics)."""
+    if not report.has_issues():
+        return answer
+    from scripts.v2.numeric_audit import _excise_sentence
+    repaired = answer
+    removed = 0
+    for claim in report.claims:
+        cut, ok = _excise_sentence(repaired, claim)
+        if ok:
+            repaired = cut
+            removed += 1
+    if not removed:
+        return answer
+    sample = ", ".join(report.shown_names[:5])
+    lines = [repaired.rstrip(), "", "---", "",
+             "🔧 **Honesty guard** — из ответа удалено утверждение о "
+             "полной фильтрации имён: в показанном списке остались имена "
+             f"({sample}). Фильтр имён частичный — в списке могли "
+             "остаться имена."]
+    return "\n".join(lines)

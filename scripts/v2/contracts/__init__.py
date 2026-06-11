@@ -127,6 +127,9 @@ INTERNAL_V2_KEYS = frozenset({
     "_render_note", "_render_columns", "_threshold_auto_lowered",
     "_word_for_filter",
     "top_requested", "top_returned",
+    # R-27 WP3 — honest-filtering flag + leftover names stamped by
+    # affinity_by_author / learning_words (post-filter detector scan)
+    "clean", "_propn_leftover",
     "min_corpus_count_used", "min_corpus_count_requested",
     "empty_sides", "cosine_is_structural_zero", "shared_top_words_count",
     "metric_explanations", "proper_noun_filter",

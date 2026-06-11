@@ -306,6 +306,33 @@ def collect_data_numbers(tool_records: Iterable[dict]) -> set[float]:
     return out
 
 
+def collect_answer_table_numbers(answer: str) -> set[float]:
+    """B116 (R-27 WP3, 2026-06-11) — numbers visible in the answer's own
+    markdown tables, parsed with the SAME normalization as prose
+    extraction (thousand suffixes 159k/159 тыс., separators
+    159,075 / 159 075).
+
+    Table cells are deterministically formatted from tool data — the B13
+    rationale that already EXEMPTS them from auditing. B116 showed the
+    missing half: they were never added to the TRUSTED side, so an honest
+    prose restatement of a table value («~159k слов» over a «159 075»
+    cell whose exact total lived only in the rendered view) was flagged
+    as fabrication and excised by the WP2b repair. Trusting the visible
+    table closes the class: the prose claim is checked against what the
+    user can see right below it, with the regular ±tol rounding allowance
+    («~», «около» round-offs land within tolerance).
+    """
+    out: set[float] = set()
+    if not answer or "|" not in answer:
+        return out
+    for line in _TABLE_LINE_RE.findall(answer):
+        if _TABLE_SEPARATOR_RE.match(line):
+            continue
+        for v, _formatted, _ctx in _extract_numbers(line):
+            out.add(v)
+    return out
+
+
 def _walk_list_lengths(obj: Any, out: set[float], *, depth: int) -> None:
     if depth > 6 or obj is None:
         return
@@ -409,6 +436,9 @@ def audit_numbers(
         return AuditReport.trust("(no tool records)")
 
     data_numbers = collect_data_numbers(records)
+    # B116 (R-27 WP3) — the answer's own markdown-table cells are
+    # trusted references too: see collect_answer_table_numbers.
+    data_numbers |= collect_answer_table_numbers(answer)
 
     # Sprint 20 — count-honesty pass. Affinity tools and learning_words
     # now surface `top_requested` + `top_returned` when filtering shrinks
