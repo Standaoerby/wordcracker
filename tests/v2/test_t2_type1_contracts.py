@@ -97,10 +97,15 @@ class TestLearningWordsRowKey(unittest.TestCase):
 
 
 class TestEnrichWordEtymologyKey(unittest.TestCase):
-    """T1-3 — V1EnrichWord canonical etymology key is `family_chain`.
-    `etymology_chain` was a phantom alias — dropped in T2."""
+    """T1-3 → R-28 B114 — enrich_word этимологию больше НЕ поставляет.
 
-    def test_view_reads_family_chain_only(self):
+    Исторически тест закреплял чтение `family_chain` из enrich_word raw.
+    R-28 B114 («честный учебный контент»): family_chain/primary_family/
+    etymology в enrich_word — LLM-генерация без tool-опоры (Q4: ajar/
+    garlic «от греческого krokos») и стираются на враппере. Слот
+    etymology в бандле заполняет только word_etymology."""
+
+    def test_llm_etymology_is_stripped(self):
         from scripts.v2.tools.learning.enrich import enrich_word
 
         v1_real_shape = {
@@ -109,7 +114,6 @@ class TestEnrichWordEtymologyKey(unittest.TestCase):
             "definition_en": "fossilized tree resin",
             "pos": "noun",
             "primary_family": "arabic",
-            # Canonical chain — used by view.
             "family_chain": ["middle_english", "old_french", "arabic"],
         }
         with mock.patch("scripts.learning_tools.enrich_word",
@@ -117,11 +121,15 @@ class TestEnrichWordEtymologyKey(unittest.TestCase):
             r = enrich_word(word="amber")
         self.assertTrue(r.ok)
         self.assertIsNotNone(r.view)
-        # Etymology bundle should be present in payload — wrapper read
-        # `family_chain` directly (no fallback chain).
-        etym = (r.view.payload or {}).get("etymology") or {}
-        self.assertEqual(etym.get("family_chain"),
-                         ["middle_english", "old_french", "arabic"])
+        # LLM-этимология стёрта из raw и не попадает в view.
+        self.assertIsNone((r.view.payload or {}).get("etymology"))
+        self.assertEqual(r.data.get("family_chain"), [])
+        self.assertEqual(r.data.get("primary_family"), "")
+        # Render note направляет рендерер на word_etymology + честный
+        # текст отсутствия.
+        note = r.data.get("_render_note") or ""
+        self.assertIn("word_etymology", note)
+        self.assertIn("Этимологии этого слова в данных корпуса нет", note)
 
 
 class TestLexicalDiversityScopePolymorphism(unittest.TestCase):

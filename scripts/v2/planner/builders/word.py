@@ -79,26 +79,39 @@ def _plan_word_contexts(e: Entities) -> QueryPlan:
     # etymology slot when enrich_word leaves it empty. Both tools
     # share the Wiktionary cache so the second call is ~ms; total
     # wall-clock impact is bounded.
+    # R-28 B114 — «честный учебный контент»: учебный факт без tool-опоры
+    # не публикуется. Этимология — ТОЛЬКО из word_etymology (enrich_word
+    # её больше не поставляет — его LLM-поле стёрто на враппере);
+    # перевод — с кэвиатом «сгенерирован моделью»; примеры — только
+    # корпусные сниппеты. Критик enforce'ит suppress-пассами
+    # (audit_etymology_claims / audit_example_quotes).
     notes = [
         "Это запрос о слове («что значит X» / «meaning of X» style). "
         "Бандл объединяет: hybrid_search (корпус-сниппеты с title для "
-        "каждого) + enrich_word (translation_ru, ipa, pos, definition_en, "
-        "family_chain) + word_etymology (family_chain fallback). "
+        "каждого) + enrich_word (translation_ru, ipa, pos, definition_en) "
+        "+ word_etymology (family_chain — ЕДИНСТВЕННЫЙ источник "
+        "этимологии). "
         "В финальном ответе ОБЯЗАТЕЛЬНО покажи все доступные фасеты в "
         "одном связном блоке: \n"
-        "  • перевод (translation_ru)\n"
+        "  • перевод (translation_ru) — с видимым кэвиатом «(перевод "
+        "    сгенерирован моделью, не словарём)»; если в данных "
+        "    enrich_word стоит propn_gate — вместо перевода пиши ровно: "
+        "    «имя собственное (вероятно топоним/персонаж)».\n"
         "  • IPA / транскрипция (ipa)\n"
         "  • часть речи (pos)\n"
         "  • определение (definition_en)\n"
         "  • 2-3 корпус-сниппета с НАЗВАНИЯМИ КНИГ (matches[].title) — "
-        "    book title рядом с цитатой обязателен.\n"
-        "  • этимология (family_chain ИЛИ primary_family из ЛЮБОГО "
-        "    из двух tool'ов: enrich_word / word_etymology — берём то, "
-        "    которое не пустое).\n"
-        "Если конкретный фасет реально пуст в данных — пиши «IPA: "
-        "не указано» / «этимология не извлеклась» одной строкой, "
-        "не повторяй disclaimer'ом, и НЕ опускай молча. Остальные "
-        "фасеты при этом остаются — мягкая деградация, не all-or-nothing.",
+        "    book title рядом с цитатой обязателен. Примеры употребления "
+        "    бери ТОЛЬКО из этих корпусных данных — сочинять "
+        "    примеры-предложения ЗАПРЕЩЕНО.\n"
+        "  • этимология — ТОЛЬКО family_chain / primary_family из "
+        "word_etymology. Брать этимологию из enrich_word или сочинять "
+        "самому ЗАПРЕЩЕНО. Если word_etymology пуст или failed — пиши "
+        "ровно: «Этимологии этого слова в данных корпуса нет».\n"
+        "Если другой фасет (IPA/перевод) реально пуст в данных — пиши "
+        "«IPA: не указано» одной строкой, не повторяй disclaimer'ом, и "
+        "НЕ опускай молча. Остальные фасеты при этом остаются — мягкая "
+        "деградация, не all-or-nothing.",
     ]
     return QueryPlan(
         intent="word_contexts", entities=e,
@@ -389,19 +402,27 @@ def _plan_word_etymology(e: Entities) -> QueryPlan:
         # results that DID land. Add explicit render_notes telling the
         # LLM to weave ALL facets into one paragraph + corpus snippets
         # with book titles, instead of «etymology only».
+        # R-28 B114 — этимология ТОЛЬКО из word_etymology; см. коммент
+        # в _plan_word_contexts.
         notes = [
             "Это запрос об этимологии слова, но ответ должен быть "
             "БАНДЛОМ, а не только цепочкой families. Объедини в одном "
             "связном блоке все доступные фасеты:\n"
-            "  • этимология — family_chain / primary_family из "
-            "    word_etymology ИЛИ enrich_word (то, что не пустое).\n"
-            "  • перевод (translation_ru)\n"
+            "  • этимология — family_chain / primary_family ТОЛЬКО из "
+            "word_etymology (enrich_word этимологию НЕ поставляет; "
+            "сочинять ЗАПРЕЩЕНО). Если word_etymology пуст или failed — "
+            "пиши ровно: «Этимологии этого слова в данных корпуса нет», "
+            "остальные фасеты покажи.\n"
+            "  • перевод (translation_ru) — с видимым кэвиатом "
+            "    «(перевод сгенерирован моделью, не словарём)»; при "
+            "    propn_gate в данных enrich_word — вместо перевода "
+            "    ровно: «имя собственное (вероятно топоним/персонаж)».\n"
             "  • IPA / транскрипция (ipa)\n"
             "  • часть речи (pos)\n"
             "  • определение (definition_en)\n"
             "  • 2-3 корпус-сниппета с НАЗВАНИЯМИ КНИГ "
             "    (matches[].title — title book обязателен рядом с "
-            "    цитатой).\n"
+            "    цитатой). Примеры — ТОЛЬКО из корпусных данных.\n"
             "Если конкретный фасет действительно пуст в данных — "
             "пиши «не указано» одной строкой, остальные фасеты ПОКАЖИ. "
             "Не all-or-nothing: мягкая деградация одного слота не "

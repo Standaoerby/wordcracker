@@ -605,6 +605,14 @@ def learning_words(
 
 
 # ============================ TOOL: enrich_word ============================
+# R-28 B114 (2026-06-11) — поле "etymology" из промпта УДАЛЕНО: «short
+# etymology hint (ok if approximate)» систематически порождало фантазии
+# (Q4: ajar/garlic «от греческого krokos»). Этимология в чате — только из
+# word_etymology (Wiktionary-backed); v2-враппер дополнительно стирает
+# поле из старых записей дискового кэша word_dictionary.json.
+# example_sentence ОСТАВЛЕН: его потребляет offline-экспорт Anki-карточек
+# (export_word_list, строки ~905/934/948); в чат-бандл его не пускает
+# v2-враппер.
 ENRICH_PROMPT = """You are a literary vocabulary tutor. The user is reading
 English literature and needs to learn a mid-frequency word.
 
@@ -621,7 +629,6 @@ Return JSON ONLY, no other text. Keys:
 - "translation_{target_lang}": short translation (1-3 words)
 - "definition_en": one-sentence simple English definition (10-15 words)
 - "example_sentence": one short example sentence using the word
-- "etymology": short etymology hint (1 sentence, ok if approximate)
 - "cefr_estimate": "A2"/"B1"/"B2"/"C1"/"C2"
 - "archaic": true if the word is archaic / obsolete / no longer in everyday
     modern English (Victorian-era or earlier register only). False if still

@@ -88,10 +88,10 @@ RENDER_PROMPT = """Тебя зовут {name}. Ты — литературный
     - Запрещено: «Рекомендую PG2554, PG345, PG1342» как основной текст списка — это unreadable.
     - Если title в data отсутствует (rare lexical_search edge case) — формулируй «книга PG{{id}} (название не извлеклось из метаданных)» и предложи user'у sequence find_book → target tool.
 
-17. **Слова — расширенный ответ (translation + примеры + этимология).** Когда план запустил `enrich_word` ИЛИ `word_contexts` для конкретного слова, и в payload есть данные по нескольким facet'ам (translation_ru, definition_en, etymology, contexts/samples) — surface их ВМЕСТЕ, даже если intent был узкий. Stan B101: «отдавать перевод слова, примеры в контексте и этимологию».
-    - Формат: краткое сводное описание сверху (перевод + IPA + POS + определение) → блок «Примеры из корпуса» с 2-3 snippets (если word_contexts отработал) → строка «Этимология» (если etymology в data).
+17. **Слова — расширенный ответ (translation + примеры + этимология).** Когда план запустил `enrich_word` ИЛИ `word_contexts` для конкретного слова, и в payload есть данные по нескольким facet'ам (translation_ru, definition_en, contexts/samples) — surface их ВМЕСТЕ, даже если intent был узкий. Stan B101: «отдавать перевод слова, примеры в контексте и этимологию».
+    - Формат: краткое сводное описание сверху (перевод + IPA + POS + определение) → блок «Примеры из корпуса» с 2-3 snippets (если word_contexts отработал) → строка «Этимология» (только из данных word_etymology).
+    - R-28 B114 «честный учебный контент»: перевод носит видимый кэвиат «(перевод сгенерирован моделью, не словарём)»; при `propn_gate` в данных enrich_word вместо перевода — ровно «имя собственное (вероятно топоним/персонаж)». Этимология — ТОЛЬКО из family_chain/primary_family инструмента word_etymology; сочинять или брать из enrich_word ЗАПРЕЩЕНО; если word_etymology пуст — пиши ровно «Этимологии этого слова в данных корпуса нет». Примеры употребления — только корпусные snippets из tool data, сочинённые примеры ЗАПРЕЩЕНЫ.
     - НЕ повторяй полный enrich-payload как dump — только полезные поля.
-    - Если какой-то facet отсутствует (например etymology=None) — мягко упомяни «этимология не извлеклась» один раз, не висни.
 
 18. **Tabular data — ОБЯЗАТЕЛЬНО markdown table.** Если в `data` есть массив с >2 объектами одинаковой shape (top/top_words/matches/samples/top_unique_a/affinity rows) — ОБЯЗАН вывести markdown pipe-table. Stan Round 13 Q13: запрос «сколько книг у Marlowe» в R12 показал 12 произведений таблицей, в R13 — «количество не указано напрямую» прозой. Это **потеря данных** из-за renderer non-determinism.
     - Правило: array of similar dicts → table.
@@ -1572,6 +1572,17 @@ def ask(
     # — ложь, что отфильтровали»). Pure detector pass, no LLM.
     cvs_report = critic_mod.audit_claimed_vs_shown(answer)
     answer = critic_mod.suppress_partial_filter_claims(answer, cvs_report)
+    # R-28 B114 — «честный учебный контент»: этимология без
+    # word_etymology-опоры и сочинённые примеры-цитаты вырезаются ДО
+    # LLM-критика (suppress, не warn). enrich_word — FIXTURE_EXEMPT
+    # LLM-генерация; фабрикация входила через ДАННЫЕ инструмента, и
+    # evidence-модель WP2b её пропускала.
+    etym_report = critic_mod.audit_etymology_claims(
+        answer, critic_summary_records)
+    answer = critic_mod.suppress_etymology_claims(answer, etym_report)
+    quote_report = critic_mod.audit_example_quotes(
+        answer, critic_summary_records)
+    answer = critic_mod.suppress_unsupported_quotes(answer, quote_report)
 
     verdict = critic_mod.review(
         answer, critic_summary_records, intent=intent.label,
@@ -2158,6 +2169,12 @@ def ask_stream(
     # R-27 WP3 — claimed-vs-shown guard, mirrors ask().
     cvs_report = critic_mod.audit_claimed_vs_shown(answer)
     answer = critic_mod.suppress_partial_filter_claims(answer, cvs_report)
+    # R-28 B114 — honest-learning guards, mirror ask(): этимология без
+    # word_etymology-опоры + сочинённые примеры-цитаты → suppress.
+    etym_report = critic_mod.audit_etymology_claims(answer, critic_records)
+    answer = critic_mod.suppress_etymology_claims(answer, etym_report)
+    quote_report = critic_mod.audit_example_quotes(answer, critic_records)
+    answer = critic_mod.suppress_unsupported_quotes(answer, quote_report)
 
     verdict = critic_mod.review(answer, critic_records,
                                 intent=intent.label, ollama_host=ollama_host)

@@ -18,8 +18,9 @@ from scripts.v2.contracts.schemas import V1EnrichWord, V1ExportWordList
     name="enrich_word",
     category="learning",
     description=(
-        "LLM-обогащение одного слова: translation, definition, POS, CEFR, etymology, "
-        "proper_noun verdict. Кешируется на диске в word_dictionary.json."
+        "LLM-обогащение одного слова: translation, definition, POS, CEFR, "
+        "proper_noun verdict. Кешируется на диске в word_dictionary.json. "
+        "Этимологию НЕ поставляет (R-28 B114) — её даёт word_etymology."
     ),
     input_schema={
         "type": "object",
@@ -36,7 +37,14 @@ from scripts.v2.contracts.schemas import V1EnrichWord, V1ExportWordList
     requires=["word"],
     cost="medium",   # LLM round-trip
     cacheable=False,  # has its own on-disk word_dictionary cache
-    wrapper_version="v2-phase2-contract",
+    # R-28 B114 (2026-06-11) — «честный учебный контент»: учебный факт
+    # без tool-опоры не публикуется (D-R28-1). Враппер стирает
+    # LLM-сгенерированные etymology/family_chain/primary_family (Q4:
+    # ajar/garlic «от греческого krokos») и example_sentence (примеры —
+    # только корпусные hits), гейтит перевод имён собственных (S4:
+    # galatz→«стеклянный сосуд» — топоним из «Дракулы») и помечает
+    # выживший перевод кэвиатом «сгенерирован моделью, не словарём».
+    wrapper_version="v3-r28-honest-learning",
 )
 @v1_contract(v1_fn="scripts.learning_tools.enrich_word",
              schema=V1EnrichWord)
@@ -82,6 +90,68 @@ def enrich_word(word: str, contexts=None, lemma_hint: str = "",
                          f"{'…' if len(dropped) > 5 else ''}")
                 prev = raw.get("_render_note", "")
                 raw["_render_note"] = (prev + " | " + note if prev else note)
+    # R-28 B114 — «честный учебный контент»: учебный факт без tool-опоры
+    # не публикуется (D-R28-1). Стирание полей сохраняет V1EnrichWord-
+    # форму (пустые значения из __defaults__), контракт не нарушается.
+    honesty_notes: list[str] = []
+    propn_gate_reason: str | None = None
+    if isinstance(raw, dict):
+        # 1. Этимология enrich_word — LLM-фантазия (Q4: ajar/garlic «от
+        #    греческого krokos»). Канонический источник — word_etymology
+        #    (Wiktionary-backed, параллельный шаг бандла W-10). Старые
+        #    записи дискового кэша word_dictionary.json ещё несут поле —
+        #    стираем на враппере, не полагаясь на чистку кэша.
+        if (raw.get("etymology") or raw.get("family_chain")
+                or raw.get("primary_family")):
+            raw["etymology"] = ""
+            raw["family_chain"] = []
+            raw["primary_family"] = ""
+            honesty_notes.append(
+                "этимология из enrich_word УДАЛЕНА (LLM-генерация без "
+                "tool-опоры) — этимологию бери ТОЛЬКО из word_etymology; "
+                "если word_etymology пуст, пиши ровно: «Этимологии этого "
+                "слова в данных корпуса нет»")
+        # 2. Примеры — только корпусные hits (hybrid_search /
+        #    word_contexts). LLM-сочинённый example_sentence не публикуется.
+        if raw.get("example_sentence"):
+            raw["example_sentence"] = ""
+            honesty_notes.append(
+                "example_sentence УДАЛЁН (LLM-сочинённый) — примеры "
+                "употребления бери только из корпусных сниппетов "
+                "(hybrid_search / word_contexts)")
+        # 3. propn-гейт перевода (S4: galatz — город Галац из «Дракулы» —
+        #    получил перевод «стеклянный сосуд»). Детектор WP3 (gazetteer/
+        #    patronymic/surname) + кураторские топонимы + собственный
+        #    LLM-вердикт proper_noun. Имя собственное не переводится.
+        from scripts.v2.tools.authors._propn_gazetteer import (
+            is_proper_name_token,
+        )
+        from scripts.v2.tools.authors._toponym_filter import is_toponym
+        if is_proper_name_token(word):
+            propn_gate_reason = "детектор имён (gazetteer/patronymic/surname)"
+        elif is_toponym(word):
+            propn_gate_reason = "кураторский топоним"
+        elif raw.get("proper_noun") is True:
+            propn_gate_reason = "LLM-вердикт proper_noun"
+        if propn_gate_reason:
+            for k in ("translation_ru", "translation", "translation_en"):
+                if raw.get(k):
+                    raw[k] = ""
+            raw["propn_gate"] = propn_gate_reason
+            honesty_notes.append(
+                f"«{word}» — имя собственное ({propn_gate_reason}): "
+                f"перевод НЕ публикуется; вместо перевода пиши ровно: "
+                f"«имя собственное (вероятно топоним/персонаж)»")
+        elif raw.get("translation_ru") or raw.get("translation"):
+            # 3a. Словаря EN→RU в стеке нет (Phase 0b R-28) — перевод
+            # остаётся LLM-генерацией и обязан носить видимый кэвиат.
+            honesty_notes.append(
+                "перевод сгенерирован моделью, не словарём — покажи этот "
+                "кэвиат видимой пометкой рядом с переводом")
+        if honesty_notes:
+            prev = raw.get("_render_note", "")
+            joined = " | ".join(honesty_notes)
+            raw["_render_note"] = (prev + " | " + joined if prev else joined)
     result = ToolResult.success(tool="enrich_word", data=raw, query=query)
 
     # v5 Phase 2.5 — ETYMOLOGY_BUNDLE view for the enriched word.
@@ -92,23 +162,20 @@ def enrich_word(word: str, contexts=None, lemma_hint: str = "",
         from scripts.v2.view_types import DataValidity
         if not isinstance(raw, dict):
             return result
-        # V1EnrichWord canonical etymology key is `family_chain`
-        # (word_etymology composite path stamps it; rag_tools.py:2388).
-        # `etymology_chain` was a phantom alias — gone in T2. The LLM
-        # JSON-mode underneath enrich_word may emit `primary_family`
-        # without `family_chain`, so the presence test still admits
-        # both — but each is read exactly once into its own binding,
-        # not chained inline (T2 R3 / Phase 2 gate).
-        family_chain = raw.get("family_chain") or []
-        primary_family = raw.get("primary_family")
-        etym = None
-        if family_chain or primary_family:
-            etym = {
-                "primary_family": primary_family,
-                "family_chain": family_chain,
-            }
+        # R-28 B114 — enrich_word этимологию больше НЕ поставляет: его
+        # family_chain/primary_family были LLM-генерацией и стёрты выше.
+        # Слот etymology в бандле заполняет ТОЛЬКО word_etymology
+        # (его собственный ETYMOLOGY_BUNDLE; Wiktionary-backed).
         # V1EnrichWord canonical: translation_ru / translation_<lang>, ipa,
         # pos, definition_en.
+        view_caveats: list[str] = []
+        if propn_gate_reason:
+            view_caveats.append(
+                f"«{word}» — имя собственное (вероятно топоним/персонаж); "
+                f"перевод не публикуется")
+        elif raw.get("translation_ru") or raw.get("translation"):
+            view_caveats.append(
+                "перевод сгенерирован моделью, не словарём")
         view = vb.build_etymology_bundle(
             word=word,
             translation_ru=(raw.get("translation_ru")
@@ -117,7 +184,8 @@ def enrich_word(word: str, contexts=None, lemma_hint: str = "",
             ipa=raw.get("ipa"),
             pos=raw.get("pos"),
             definition_en=raw.get("definition_en"),
-            etymology=etym,
+            etymology=None,
+            caveats=view_caveats,
             language="ru",
         )
         vb.attach_view(result, view, data_validity=DataValidity.OK)

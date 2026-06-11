@@ -366,6 +366,9 @@ class LearningAndCorpusViews(unittest.TestCase):
     def test_enrich_word(self):
         # Phase 2 — V1EnrichWord canonical: word, translation_ru, ipa, pos,
         # definition_en (not `definition`), primary_family.
+        # R-28 B114 — primary_family из enrich_word — LLM-генерация без
+        # tool-опоры; враппер её стирает, слот etymology пуст (его
+        # заполняет только word_etymology).
         fake = {"word": "ajar", "translation_ru": "приоткрытый",
                 "ipa": "əˈdʒɑːr", "pos": "ADJ",
                 "definition_en": "slightly open",
@@ -376,7 +379,7 @@ class LearningAndCorpusViews(unittest.TestCase):
             r = enrich_word("ajar")
         _assert_view(self, r, ViewType.ETYMOLOGY_BUNDLE)
         self.assertTrue(r.view.payload["slots_available"]["translation"])
-        self.assertTrue(r.view.payload["slots_available"]["etymology"])
+        self.assertFalse(r.view.payload["slots_available"]["etymology"])
 
     def test_export_word_list(self):
         # Phase 2 — V1ExportWordList canonical: out_path, format, entries,
