@@ -81,28 +81,50 @@ RERECORD_KILL_AFTER="${WC_RERECORD_KILL_AFTER:-30s}"
 
 # --- single cleanup path (S-B10) ---
 # One trap drives every teardown so all exit paths (success, rollback,
-# exit 10/11/12, set -e abort) leave the host clean:
+# exit 10/11/12, set -e abort, operator SIGINT/SIGTERM — bash runs the
+# EXIT trap on fatal signals too) leave the host clean:
 #   * CHAT_LOG_PID  — the background `docker compose logs -f chat` writer
 #                     (S-B10 #3a); killed so it never lingers past deploy.
+#   * RR_LOGS_PID   — the background `docker logs -f` streamer of the
+#                     re-record container (R-28 #1); same lifecycle.
 #   * RR_CONTAINER  — the ephemeral re-record container (S-B10 #1); the
 #                     re-record `timeout` only signals the compose CLIENT,
 #                     not the daemon-side container, so a timed-out run
 #                     orphans it (<defunct>, observed R-25). An explicit
 #                     `docker rm -f` is the real process-tree kill.
+#   * RR_FIXTURES_STARTED — (R-28 #2) the recorder writes fixtures onto the
+#                     host repo via the dev-overlay bind-mount; the inline
+#                     restore (checkout/clean) is plain code AFTER the run,
+#                     so a script death mid-record left a dirty tree and a
+#                     red dirty-check on the NEXT deploy (observed twice,
+#                     2026-06-11). Set just before the container starts;
+#                     re-running the restore on an already-clean tree is a
+#                     no-op, so the normal-exit double-restore is harmless.
 #   * TMP_ENV       — the atomic .env staging file.
 # Every command is `|| true` and the trap never calls `exit`, so cleanup
 # cannot mask the script's real exit code.
 CHAT_LOG_PID=""
 RR_CONTAINER=""
+RR_LOGS_PID=""
+RR_FIXTURES_STARTED=""
 TMP_ENV=""
 cleanup() {
     if [[ -n "$CHAT_LOG_PID" ]]; then
         kill "$CHAT_LOG_PID" 2>/dev/null || true
         CHAT_LOG_PID=""
     fi
+    if [[ -n "$RR_LOGS_PID" ]]; then
+        kill "$RR_LOGS_PID" 2>/dev/null || true
+        RR_LOGS_PID=""
+    fi
     if [[ -n "$RR_CONTAINER" ]]; then
         docker rm -f "$RR_CONTAINER" >/dev/null 2>&1 || true
         RR_CONTAINER=""
+    fi
+    if [[ -n "$RR_FIXTURES_STARTED" && -n "${RERECORD_FIXTURES_DIR:-}" ]]; then
+        git checkout -- "${RERECORD_FIXTURES_DIR}" 2>/dev/null || true
+        git clean -fdq -- "${RERECORD_FIXTURES_DIR}" 2>/dev/null || true
+        RR_FIXTURES_STARTED=""
     fi
     if [[ -n "$TMP_ENV" && -f "$TMP_ENV" ]]; then
         rm -f "$TMP_ENV" || true
@@ -442,7 +464,7 @@ fi
 # host-side `git diff` sees them. The container also inherits the prod
 # /data/* corpus + chroma bind-mounts from the base file, so v1 runs
 # against real corpus. WC_IMAGE_TAG=$SHA pins the overlay to the image
-# we just shipped. `run --rm` does NOT touch the running gutenberg-lab /
+# we just shipped. `compose run` does NOT touch the running gutenberg-lab /
 # chat / admin services.
 #
 # --skip-heavy drops the HEAVY_BINDINGS full-corpus scans (recorder
@@ -466,25 +488,54 @@ fi
 RERECORD_FIXTURES_DIR="scripts/v2/contracts/fixtures"
 if [[ "$MODE" == "deploy" ]]; then
     echo "[deploy] fixture re-record gate (advisory): record_fixtures --skip-heavy (budget ${RERECORD_BUDGET_SECS}s)"
-    # S-B10 #1: bound the run AND kill its process tree on timeout.
-    #   * `timeout --kill-after` escalates SIGTERM -> SIGKILL so a
-    #     TERM-swallowing client still dies inside the budget.
-    #   * `--name` pins the container so the shared `cleanup` trap (and the
-    #     explicit reap below) can `docker rm -f` it. `timeout` only signals
-    #     the compose CLIENT — the recorder runs in a daemon-managed
-    #     container that survives as <defunct> otherwise (the R-25 hang).
+    # R-28 #1: DETACHED run + `docker wait` instead of attached `compose run`.
+    # The attached compose client is a known hang class: it can wedge in
+    # attach-stream teardown AFTER the container exits, so the gate sat out
+    # the full budget on every deploy and the operator's manual kill
+    # sometimes took deploy.sh down with it (observed twice, 2026-06-11).
+    # With `run -d` + `docker wait` there is no attach socket to wedge:
+    #   * `docker wait` prints the container's real exit code on stdout, so
+    #     the rc contract with the WARN/DRIFT/OK branches below is kept.
+    #   * `timeout --kill-after` still bounds the wait (124 -> WARN branch);
+    #     it now signals only the trivially-killable wait client.
+    #   * the live recorder log is kept via a background `docker logs -f`,
+    #     reaped here and by the shared `cleanup` trap.
+    #   * `--rm` is gone: the explicit `docker rm -f` below (and the trap)
+    #     does the reaping, which also removes any daemon-side `--rm`-vs-
+    #     `docker wait` race.
     # SHA may carry a `-dirty` suffix; sanitise to a legal container name.
     RR_CONTAINER="wc-rerecord-${SHA//[^A-Za-z0-9_.-]/_}"
     docker rm -f "$RR_CONTAINER" >/dev/null 2>&1 || true
     rerecord_rc=0
-    WC_IMAGE_TAG="${SHA}" timeout --kill-after="${RERECORD_KILL_AFTER}" "${RERECORD_BUDGET_SECS}" \
-        docker compose -f docker-compose.yml -f docker-compose.dev.yml \
-        run --rm -T --name "${RR_CONTAINER}" -w /workspace gutenberg-lab \
+    # R-28 #2: arm the trap-side fixture restore BEFORE the recorder can
+    # write through the bind-mount, so a script death anywhere past this
+    # point still leaves a clean tree for the next deploy's dirty-check.
+    RR_FIXTURES_STARTED=1
+    WC_IMAGE_TAG="${SHA}" docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+        run -d --name "${RR_CONTAINER}" -w /workspace gutenberg-lab \
         "${PYTHON}" -m scripts.v2.contracts.record_fixtures --skip-heavy \
-        || rerecord_rc=$?
-    # Reap the (possibly orphaned) container NOW — before the diff/restore —
-    # so a timed-out recorder still writing fixtures can't re-dirty the tree
-    # after we restore it (the R-25 race). No-op on a clean `--rm` exit.
+        >/dev/null || rerecord_rc=$?
+    if [[ "${rerecord_rc}" -eq 0 ]]; then
+        docker logs -f "${RR_CONTAINER}" 2>&1 &
+        RR_LOGS_PID=$!
+        rr_wait_rc="$(timeout --kill-after="${RERECORD_KILL_AFTER}" "${RERECORD_BUDGET_SECS}" \
+            docker wait "${RR_CONTAINER}" 2>/dev/null)" || rr_wait_rc=124
+        kill "${RR_LOGS_PID}" 2>/dev/null || true
+        wait "${RR_LOGS_PID}" 2>/dev/null || true
+        RR_LOGS_PID=""
+        # `docker wait` answers with the container's exit code; guard the
+        # numeric contract so an empty/garbled answer (daemon error)
+        # degrades into the WARN branch, never into a false "0".
+        if [[ "${rr_wait_rc}" =~ ^[0-9]+$ ]]; then
+            rerecord_rc="${rr_wait_rc}"
+        else
+            rerecord_rc=125
+        fi
+    fi
+    # Reap the (possibly still-running) container NOW — before the
+    # diff/restore — so a timed-out recorder still writing fixtures can't
+    # re-dirty the tree after we restore it (the R-25 race). With `--rm`
+    # gone this is also the primary reaper on a clean exit.
     docker rm -f "$RR_CONTAINER" >/dev/null 2>&1 || true
     RR_CONTAINER=""
     if [[ "$rerecord_rc" -ne 0 ]]; then
