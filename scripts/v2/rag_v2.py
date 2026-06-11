@@ -699,6 +699,14 @@ _LOW_TEMP_INTENTS: frozenset[str] = frozenset({
     "lexical_wealth",
     "vocab_passport",
     "learning",
+    # B118 (R-28) — learning_books появился в R-27 WP1 (2.7.6) ПОСЛЕ
+    # alpha6 и в этот set не попал. Рендер шёл на temp 0.3 и на
+    # join-heavy payload (top_books + 10 × book_readability) бимодально
+    # терял join: smoke 2.7.8 S3 «что почитать на B2» — CEFR «Не указано
+    # в данных» по всем 10 строкам при исполненных тулах, S1 с теми же
+    # закэшированными данными отрисовался корректно. Это ровно Q13-класс
+    # variance, ради которого set и заведён.
+    "learning_books",
     "corpus_extremum",
     "book_extremum",
     "translate_word_list",
