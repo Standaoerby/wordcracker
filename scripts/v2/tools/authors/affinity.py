@@ -17,6 +17,11 @@ from scripts.v2.tools.authors._surname_filter import filter_surnames
 from scripts.v2.tools.authors._corpus_artifacts import filter_corpus_artifacts
 from scripts.v2.tools.authors._toponym_filter import filter_toponyms
 from scripts.v2.tools.authors._propn_dominance import filter_propn_dominance
+from scripts.v2.tools.authors._propn_gazetteer import (
+    filter_proper_names,
+    filter_by_cap_ratio,
+    find_proper_names,
+)
 from scripts.v2.contracts import v1_contract
 from scripts.v2.contracts.schemas import V1AffinityByAuthor, V1CompareAuthors
 
@@ -96,6 +101,21 @@ def _normalize_compare_shape(raw):
     return raw
 
 
+def _author_token_files(author_regex: str) -> list:
+    """SPGC tokens files for the author's books — the case-preserving
+    source the cap-ratio name layer scans (R-27 WP3). Sorted for
+    determinism. Returns [] when the corpus isn't mounted (local dev /
+    CI) — the cap-ratio layer then reports verified=False and `clean`
+    stays False instead of claiming a complete name filter."""
+    try:
+        from scripts.rag_tools import _select_books, _tokens_path
+        sel = _select_books(author_regex)
+        ids = sorted(str(b) for b in sel["id"].tolist())
+    except Exception:
+        return []
+    return [_tokens_path(b) for b in ids]
+
+
 def _drop_author_self_name(author_regex: str, words: list[dict]) -> list[dict]:
     """Stan round 2 Q3: «фирменные слова Уайльда» returned **wilde** as a
     signature word. An author's own name shouldn't be in their signature
@@ -155,7 +175,16 @@ def _drop_author_self_name(author_regex: str, words: list[dict]) -> list[dict]:
     # so the production blocklist enrichment kicks in without per-call
     # paths. Bumping wrapper_version invalidates cached rows from
     # before the heuristic landed.
-    wrapper_version="v4-w4-propn-dominance",
+    # R-27 WP3 (2026-06-11) — Q7 live repro: hélène/sergius/petrovna/
+    # hippolyte/nicholas survived every prior layer (lowercase given
+    # names + accents fold past spaCy POS, word_dict and the surname
+    # blocklists). Added the accent-folded given-name gazetteer +
+    # patronymic suffixes + corpus capitalization-ratio layer, and the
+    # `clean` flag (True only when the post-filter detector scan over
+    # the FINAL rows finds zero names AND the cap-ratio verification
+    # actually ran). Bump invalidates cached rows recorded by the leaky
+    # chain.
+    wrapper_version="v5-r27-propn-gazetteer",
 )
 @v1_contract(v1_fn="scripts.rag_tools.affinity_by_author",
              schema=V1AffinityByAuthor)
@@ -222,20 +251,49 @@ def affinity_by_author(author_regex: str, top: int = 50,
         # matches a character / minor-place name. Runs LAST so curated
         # filters get the first pass and the heuristic only sees survivors.
         rows, propn_dom_dropped = filter_propn_dominance(rows)
+        # R-27 WP3 — given-name gazetteer + patronymics (hélène, sergius,
+        # petrovna, hippolyte, nicholas — the Q7 leak class). Accent-folded
+        # exact match, so iceberg/bergamot survive while «berg» drops.
+        rows, gazetteer_dropped = filter_proper_names(rows)
+        # R-27 WP3 — corpus capitalization-ratio: SPGC tokens preserve
+        # case, a token predominantly Capitalized in the author's texts
+        # is a name even when the counts pipeline saw it lowercased.
+        # verified=False (no tokens files — local dev/CI) keeps `clean`
+        # False below: we may NOT claim a complete name filter then.
+        rows, cap_dropped, cap_verified = filter_by_cap_ratio(
+            rows, _author_token_files(author_regex))
         if (lit_dropped or surname_dropped or artifact_dropped
-                or toponym_dropped or propn_dom_dropped):
+                or toponym_dropped or propn_dom_dropped
+                or gazetteer_dropped or cap_dropped):
             note = (raw.get("proper_noun_filter") or "") if isinstance(raw, dict) else ""
             extra = (f"; v2 literary blacklist dropped {lit_dropped}, "
                       f"v2 surname blocklist dropped {surname_dropped}, "
                       f"v2 corpus-artifact filter dropped {artifact_dropped}, "
                       f"v2 toponym filter dropped {toponym_dropped}, "
-                      f"v2 propn-dominance heuristic dropped {propn_dom_dropped}")
+                      f"v2 propn-dominance heuristic dropped {propn_dom_dropped}, "
+                      f"v2 name gazetteer dropped {gazetteer_dropped}, "
+                      f"v2 capitalization-ratio dropped {cap_dropped}")
             if isinstance(raw, dict):
                 raw["proper_noun_filter"] = (note + extra).lstrip("; ")
         # Propagate the filtered list back so the LLM renders only
         # the clean list, not the raw one. v1 canonical key is `top`.
         if isinstance(raw, dict):
             raw["top"] = rows
+    else:
+        cap_verified = False
+
+    # R-27 WP3 (1d) — `clean` semantics: True ONLY when the post-filter
+    # detector pass over the FINAL rows finds zero proper names AND the
+    # cap-ratio verification actually ran (corpus mounted). Anything
+    # else is a PARTIAL name filter and the renderer must not claim a
+    # complete one (RENDER_PROMPT rule 21 addendum + critic
+    # claimed-vs-shown back-stop both key off this flag).
+    if isinstance(raw, dict):
+        leftover = find_proper_names(
+            [(r.get("word") or "") for r in rows]) if rows else []
+        raw["clean"] = bool(not leftover and (cap_verified or not rows))
+        if leftover:
+            raw["_propn_leftover"] = leftover[:10]
 
     # Phase 0 — `$s2.words[N]` P0 bind. The LLM planner sometimes emits
     # plans that reference this step's rows as `$s2.words[N]` (instead
@@ -259,14 +317,30 @@ def affinity_by_author(author_regex: str, top: int = 50,
         if actual < top:
             # Always say the actual number, never the requested one,
             # when there's a delta — even by 1 word.
+            # R-27 WP3 (task 3) — the suggested phrasing depends on
+            # `clean`: an assertive «после фильтра имён…» is allowed
+            # ONLY when the post-filter detector scan came back clean;
+            # otherwise the honest wording is «применён частичный
+            # фильтр — в списке могли остаться имена».
             existing = raw.get("_render_note") or ""
+            if raw.get("clean"):
+                phrasing = (
+                    f"«запросил {top}, после фильтра имён собственных и "
+                    f"редких токенов осталось {actual}»."
+                )
+            else:
+                phrasing = (
+                    f"«запросил {top}, осталось {actual}; применён "
+                    f"ЧАСТИЧНЫЙ фильтр имён — в списке могли остаться "
+                    f"имена». clean=false: ЗАПРЕЩЕНА утвердительная "
+                    f"формулировка «после фильтрации имён собственных»."
+                )
             count_note = (
                 f"ACTUAL COUNT: tool returned {actual} words after "
                 f"PROPN / surname / corpus-diff filtering — NOT the {top} "
                 f"requested. Use {actual} in the answer. If you need to "
                 f"mention the requested number, phrase it explicitly: "
-                f"«запросил {top}, после фильтра имён собственных и "
-                f"редких токенов осталось {actual}»."
+                + phrasing
             )
             raw["_render_note"] = (
                 (existing + " | " if existing else "") + count_note
@@ -348,6 +422,12 @@ def affinity_by_author(author_regex: str, top: int = 50,
         pn_note = raw.get("proper_noun_filter")
         if pn_note:
             view_caveats.append(pn_note)
+        # R-27 WP3 — partial-filter honesty on the template render path
+        # too: clean=False means the name filter is best-effort, the
+        # caveat says so instead of letting the table imply otherwise.
+        if not raw.get("clean", False):
+            view_caveats.append(
+                "Фильтр имён частичный — в списке могли остаться имена.")
 
         view = vb.build_top_n_table(
             rows=view_rows,

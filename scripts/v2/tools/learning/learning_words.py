@@ -13,6 +13,11 @@ from scripts.v2._types import Coverage, ToolResult, ToolWarning
 from scripts.v2.tools.authors._surname_filter import filter_surnames
 from scripts.v2.tools.authors._corpus_artifacts import filter_corpus_artifacts
 from scripts.v2.tools.authors._toponym_filter import filter_toponyms
+from scripts.v2.tools.authors._propn_gazetteer import (
+    filter_proper_names,
+    filter_by_cap_ratio,
+    find_proper_names,
+)
 from scripts.v2.contracts import v1_contract
 from scripts.v2.contracts.schemas import V1LearningWords
 
@@ -135,7 +140,12 @@ _LITERARY_LOCATION_BLACKLIST = frozenset({
     # B-LW-corpus (2026-06-09) — v1 now forwards country/year + skips the
     # ratio guard on whole-corpus scope. Bump busts cached empty results from
     # `author:".*"` / all_corpus queries.
-    wrapper_version="v6-corpus-scope-fix",
+    # R-27 WP3 (2026-06-11) — given-name gazetteer + patronymics +
+    # capitalization-ratio layer (shared with affinity_by_author) + the
+    # `clean` flag (post-filter detector scan over final rows; partial
+    # filter ⇒ clean=False and the renderer must not claim a complete
+    # one). Bump busts cached rows recorded by the leaky chain.
+    wrapper_version="v7-r27-propn-gazetteer",
 )
 @v1_contract(v1_fn="scripts.learning_tools.learning_words",
              schema=V1LearningWords)
@@ -210,9 +220,26 @@ def learning_words(scope, level: str = "intermediate", top: int = 30,
         rows, toponym_dropped = filter_toponyms(
             rows, word_key="_word_for_filter",
         )
+        # R-27 WP3 — given-name gazetteer + patronymics (the Q7/Q8 leak
+        # class: hélène/sergius/petrovna/hippolyte/nicholas survived the
+        # surname blocklist because they're GIVEN names, often accented).
+        for r in rows:
+            if "_word_for_filter" not in r:
+                r["_word_for_filter"] = r.get("word") or ""
+        rows, gazetteer_dropped = filter_proper_names(
+            rows, word_key="_word_for_filter",
+        )
+        # R-27 WP3 — corpus capitalization-ratio over the scope's tokens
+        # files (case-preserving). verified=False when the corpus isn't
+        # mounted or scope=all_corpus (scanning every book is not viable)
+        # — `clean` stays False then.
+        rows, cap_dropped, cap_verified = filter_by_cap_ratio(
+            rows, _scope_token_files(scope), word_key="_word_for_filter",
+        )
         for r in rows:
             r.pop("_word_for_filter", None)
-        if (surname_dropped or artifact_dropped or toponym_dropped) and isinstance(raw, dict):
+        if (surname_dropped or artifact_dropped or toponym_dropped
+                or gazetteer_dropped or cap_dropped) and isinstance(raw, dict):
             raw["results"] = rows
             prev = raw.get("_render_note", "")
             notes = []
@@ -226,7 +253,29 @@ def learning_words(scope, level: str = "intermediate", top: int = 30,
             if toponym_dropped:
                 notes.append(f"v2 toponym filter dropped {toponym_dropped} "
                               f"GPE/LOC place names (cities, regions)")
+            if gazetteer_dropped:
+                notes.append(f"v2 name gazetteer dropped {gazetteer_dropped} "
+                              f"given names / patronymics")
+            if cap_dropped:
+                notes.append(f"v2 capitalization-ratio dropped {cap_dropped} "
+                              f"predominantly-capitalized tokens (names)")
             raw["_render_note"] = (prev + " " + "; ".join(notes)).strip()
+    else:
+        cap_verified = False
+
+    # R-27 WP3 (1d) — `clean` semantics, same contract as
+    # affinity_by_author: True ONLY when the post-filter detector pass
+    # over the FINAL rows finds zero proper names AND the cap-ratio
+    # verification actually ran. Partial filter ⇒ clean=False ⇒ the
+    # renderer must say «применён частичный фильтр — могли остаться
+    # имена» (rule 21 addendum), enforced by the critic's
+    # claimed-vs-shown back-stop.
+    if isinstance(raw, dict):
+        leftover = find_proper_names(
+            [(r.get("word") or "") for r in rows]) if rows else []
+        raw["clean"] = bool(not leftover and (cap_verified or not rows))
+        if leftover:
+            raw["_propn_leftover"] = leftover[:10]
     # Sprint 22+ Round 12 post-deploy: stamp count-honesty fields just
     # like affinity_by_author / affinity_by_book do. Stan prod 2026-05-20:
     # renderer hallucinated «возвращено 0 слов» footer over a 30-row
@@ -244,6 +293,16 @@ def learning_words(scope, level: str = "intermediate", top: int = 30,
                 f"after filtering — NOT the {top} requested. Use "
                 f"{actual} in the answer."
             )
+            # R-27 WP3 (task 3) — clean=False forbids the assertive
+            # «после фильтрации имён» wording; only the partial-filter
+            # phrasing is allowed.
+            if not raw.get("clean"):
+                count_note += (
+                    " clean=false: фильтр имён ЧАСТИЧНЫЙ — формулируй "
+                    "«применён частичный фильтр; в списке могли остаться "
+                    "имена», утвердительное «после фильтрации имён» "
+                    "ЗАПРЕЩЕНО."
+                )
             raw["_render_note"] = (
                 (existing + " | " if existing else "") + count_note
             )
@@ -386,6 +445,29 @@ def learning_words(scope, level: str = "intermediate", top: int = 30,
         )
 
     return result
+
+
+def _scope_token_files(scope) -> list:
+    """SPGC tokens files for the scope (R-27 WP3 cap-ratio layer).
+
+    book scope → that book's tokens file; author scope → the author's
+    books (sorted, capped downstream); all_corpus / unknown → [] (the
+    cap-ratio layer then reports verified=False and `clean` stays False
+    — scanning the whole corpus per request is not viable)."""
+    try:
+        from scripts.rag_tools import _select_books, _tokens_path
+        from scripts.v2.tools._normalize import scope_book_id
+        if isinstance(scope, dict):
+            book = scope_book_id(scope)
+            if book:
+                return [_tokens_path(str(book))]
+            if scope.get("author"):
+                sel = _select_books(scope["author"])
+                ids = sorted(str(b) for b in sel["id"].tolist())
+                return [_tokens_path(b) for b in ids]
+    except Exception:
+        return []
+    return []
 
 
 def _scope_label(scope) -> str:

@@ -29,6 +29,7 @@ import requests
 from scripts.v2 import critic as critic_mod
 from scripts.v2 import numeric_audit as audit_mod
 from scripts.v2 import observability as obs_mod
+from scripts.v2 import render_sanitizer as sanitizer_mod
 from scripts.v2.planner import entities as ent_mod
 from scripts.v2.planner import history as history_mod
 from scripts.v2.planner import intent as int_mod
@@ -132,6 +133,7 @@ RENDER_PROMPT = """Тебя зовут {name}. Ты — литературный
     - Запрещено: «после фильтрации имён собственных и русских фамилий» — когда в query только pos_filter и в data нет proper_noun_filter. Stan prod af384edfae2d (2026-06-10): affinity_by_author вызван только с pos_filter, рендерер заявил фильтрацию имён и фамилий, которой не было.
     - Запрещено: «исключены редкие слова» — когда min_corpus_count отсутствует в query.
     Заявленная-но-не-выполненная операция = фабрикация уровня rule 20: critic и operation-claims guard вырезают такие фразы из финального ответа.
+    **Частичный фильтр ≠ полный (WP3, R-27, 2026-06-11).** Data-дисклоз ЧАСТИЧНОГО фильтра не даёт права заявлять полный. Если в `data` есть `clean: false` — утвердительная формулировка «после фильтрации имён собственных…» ЗАПРЕЩЕНА; единственная допустимая форма: «применён частичный фильтр имён; в списке могли остаться имена». Утвердительное «после фильтрации имён» допустимо ТОЛЬКО при `clean: true`. Q7 prod 2026-06-10: ответ заявил фильтрацию имён, а в таблице остались hélène/sergius/petrovna — «правда, что фильтровали — ложь, что отфильтровали». Critic сверяет заявление с фактически показанными строками и вырезает ложное утверждение.
 
 Tool trace тебе передан как JSON. Каждая запись — {{tool, query, data, warnings, coverage}}. Возьми оттуда factual content. **Ничего вне этих данных.** Помни: «не указано в данных» — это **полноценный честный ответ**, а не пробел, который надо заполнить из своих знаний."""
 
@@ -1544,6 +1546,11 @@ def ask(
         }
         for r in rr.results
     ]
+    # B115 (R-27 WP3) — deterministic scrub of render-service
+    # instructions the LLM may have parroted («requested top=30 …
+    # renderer must say 27», «ACTUAL COUNT…»). Runs BEFORE the guards
+    # so they audit the user-visible body.
+    answer = sanitizer_mod.strip_service_lines(answer)
     # WP2b (R-27, 2026-06-10) — claimed-operation guard BEFORE the LLM
     # critic: a filter claim no tool performed (af384edfae2d: «после
     # фильтрации имён собственных…» when only pos_filter was passed) is
@@ -1551,6 +1558,12 @@ def ask(
     op_report = critic_mod.audit_operation_claims(
         answer, critic_summary_records)
     answer = critic_mod.suppress_operation_claims(answer, op_report)
+    # R-27 WP3 — claimed-vs-shown: a name-filter claim that survived the
+    # evidence check above may still be contradicted by the names
+    # actually visible in the answer's tables («правда, что фильтровали
+    # — ложь, что отфильтровали»). Pure detector pass, no LLM.
+    cvs_report = critic_mod.audit_claimed_vs_shown(answer)
+    answer = critic_mod.suppress_partial_filter_claims(answer, cvs_report)
 
     verdict = critic_mod.review(
         answer, critic_summary_records, intent=intent.label,
@@ -1592,6 +1605,9 @@ def ask(
         # WP2b (R-27) — how many claimed-but-not-performed operation
         # claims were suppressed from this answer.
         "operation_claims_suppressed": len(op_report.claims),
+        # R-27 WP3 — assertive name-filter claims demoted to the honest
+        # partial-filter disclosure (claimed-vs-shown guard).
+        "filter_claims_demoted": len(cvs_report.claims),
         # Sprint 17 — Ollama-side token counts (renderer + critic).
         # Lets the admin dashboard answer «do we need more num_ctx».
         "renderer_prompt_tokens": render_meta.get("prompt_tokens"),
@@ -2041,6 +2057,12 @@ def ask_stream(
                 import queue as _queue
                 _dq: "_queue.Queue[str | None]" = _queue.Queue()
                 box: dict = {}
+                # B115 (R-27 WP3) — line-buffered scrub of streamed render
+                # deltas: a parroted service instruction («requested
+                # top=30… renderer must say 27») must not reach the
+                # client even transiently. The final answer is scrubbed
+                # again below; this covers the live token stream.
+                _scrub = sanitizer_mod.StreamLineScrubber(_dq.put)
 
                 def _render_worker():
                     try:
@@ -2049,11 +2071,15 @@ def ask_stream(
                             model=model, ollama_host=ollama_host,
                             history=history,
                             cancel_event=cancel_event,
-                            on_delta=_dq.put,
+                            on_delta=_scrub.feed,
                         )
                     except BaseException as e:  # re-raised on main thread
                         box["err"] = e
                     finally:
+                        try:
+                            _scrub.flush()
+                        except Exception:
+                            log.exception("B115 stream scrubber flush failed")
                         _dq.put(None)
 
                 _rt = threading.Thread(target=_render_worker, daemon=True,
@@ -2099,17 +2125,31 @@ def ask_stream(
     # text lands.
     critic_records = [
         {"tool": r.tool, "ok": r.ok, "data": r.data,
+         # B116 (R-27 WP3) — parity with ask(): the stream path never
+         # passed `query` + `_view_filter_values`, so numbers the
+         # renderer echoed from request args / view filters (E17 class)
+         # were «not in data» ONLY on the web-UI path — a stream-only
+         # false-positive source for the numeric repair.
+         "query": r.query,
          "coverage": {"books_matched": r.coverage.books_matched,
                       "books_total": r.coverage.books_total},
-         "warnings": [{"code": w.code, "message": w.message} for w in r.warnings]}
+         "warnings": [{"code": w.code, "message": w.message} for w in r.warnings],
+         "_view_filter_values": _harvest_view_filter_values(r.view),
+        }
         for r in results
     ]
+    # B115 (R-27 WP3) — scrub parroted render-service instructions from
+    # the final body (the streamed deltas were scrubbed in flight above).
+    answer = sanitizer_mod.strip_service_lines(answer)
     # WP2b (R-27) — claimed-operation guard, mirrors ask(). The final
     # `answer` event replaces the streamed tokens client-side (done is
     # the source of truth per docs/webapp.md), so suppression here is
     # consistent with the existing critic/audit annotate behaviour.
     op_report = critic_mod.audit_operation_claims(answer, critic_records)
     answer = critic_mod.suppress_operation_claims(answer, op_report)
+    # R-27 WP3 — claimed-vs-shown guard, mirrors ask().
+    cvs_report = critic_mod.audit_claimed_vs_shown(answer)
+    answer = critic_mod.suppress_partial_filter_claims(answer, cvs_report)
 
     verdict = critic_mod.review(answer, critic_records,
                                 intent=intent.label, ollama_host=ollama_host)
@@ -2141,6 +2181,8 @@ def ask_stream(
         "numeric_audit_mismatches": len(audit_report.mismatches),
         # WP2b (R-27) — suppressed claimed-operation count (stream path).
         "operation_claims_suppressed": len(op_report.claims),
+        # R-27 WP3 — demoted name-filter claims (stream path).
+        "filter_claims_demoted": len(cvs_report.claims),
         # Sprint 17 — Ollama token counts (renderer + critic).
         "renderer_prompt_tokens": render_meta.get("prompt_tokens"),
         "renderer_eval_tokens":   render_meta.get("eval_tokens"),
