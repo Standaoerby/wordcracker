@@ -278,9 +278,11 @@ class WordRankInjection(unittest.TestCase):
         self.assertEqual(out.get("word"), "w1")
         self.assertEqual(out["target_lang"], "ru")
 
-    def test_rank_out_of_range_no_key(self):
+    def test_rank_out_of_range_skips(self):
+        # R-28 B121 — недоступный rank теперь сигнал skip (None), а не
+        # тихий диспатч с пустыми args.
         out = _inject({}, [self._words(2)], [0], "word@7")
-        self.assertNotIn("word", out)
+        self.assertIsNone(out)
 
 
 class RankInjection(unittest.TestCase):
@@ -288,9 +290,12 @@ class RankInjection(unittest.TestCase):
 
     @staticmethod
     def _pool(n=3):
+        # R-28 B120 (R4) — мок зеркалит РЕАЛЬНЫЕ строки v1: ключ `id`,
+        # БЕЗ `pg_id` (golden fixture top_books_by_downloads). Прежний
+        # мок нёс оба ключа — и прятал то, что _inject читал фантомный.
         return ToolResult.success(
             tool="top_books_by_downloads",
-            data={"top": [{"pg_id": f"PG{i}", "id": f"PG{i}",
+            data={"top": [{"id": f"PG{i}",
                            "title": f"T{i}", "author": "A",
                            "downloads": 100 - i} for i in range(n)]},
         )
@@ -303,15 +308,16 @@ class RankInjection(unittest.TestCase):
         out = _inject({}, [self._pool()], [0], "pg_id@0")
         self.assertEqual(out.get("pg_id"), "PG0")
 
-    def test_rank_out_of_range_no_key(self):
+    def test_rank_out_of_range_skips(self):
+        # R-28 B121 — rank за пределами источника → skip-сигнал.
         out = _inject({}, [self._pool(2)], [0], "pg_id@5")
-        self.assertNotIn("pg_id", out)
+        self.assertIsNone(out)
 
-    def test_failed_pool_no_key(self):
+    def test_failed_pool_skips(self):
         bad = ToolResult.fail(tool="top_books_by_downloads",
                               err_type="not_found", message="x")
         out = _inject({}, [bad], [0], "pg_id@0")
-        self.assertNotIn("pg_id", out)
+        self.assertIsNone(out)
 
 
 class FailFastClarify(unittest.TestCase):

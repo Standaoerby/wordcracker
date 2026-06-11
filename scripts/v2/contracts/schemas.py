@@ -563,8 +563,12 @@ class V1TopBooksByDownloads(V1Schema):
 
 
 V1TopBooksByDownloads.__required__ = frozenset({"top"})
+# R-28 B120 — `pg_id` removed: a phantom row key. Real v1 rows carry
+# `id` only (golden fixture); declaring pg_id here let router._inject
+# read it «по контракту» and silently deliver {} to every dependent
+# book_readability step since 2.7.6.
 V1TopBooksByDownloads.__row_keys__ = frozenset({
-    "id", "title", "author", "downloads", "pg_id",
+    "id", "title", "author", "downloads",
 })
 V1TopBooksByDownloads.__defaults__ = {
     "top_n": 20, "lang": "en", "author_regex": None, "top": [],
@@ -582,9 +586,10 @@ class V1TopBooksByRecency(V1Schema):
 
 
 V1TopBooksByRecency.__required__ = frozenset({"top"})
+# R-28 B120 — `pg_id` removed: phantom row key, same as Downloads above
+# (fixture rows: id, title, author, author_birth, pub_year, downloads).
 V1TopBooksByRecency.__row_keys__ = frozenset({
     "id", "title", "author", "author_birth", "pub_year", "downloads",
-    "pg_id",
 })
 V1TopBooksByRecency.__defaults__ = {
     "top_n": 20, "lang": "en", "author_regex": None,
