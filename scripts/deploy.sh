@@ -192,7 +192,7 @@ else
     # Parse COPY sources from Dockerfile (line-based; no continuations).
     # `COPY [--flag=...] src1 [src2 ...] dest` → emit src1, src2, ...
     mapfile -t COPY_SOURCES < <(awk '
-        /^COPY[[:space:]]/ {
+        /^COPY[[:space:]]/ && !/--from=/ {
             for (i = 2; i < NF; i++) {
                 if ($i ~ /^--/) continue
                 print $i
