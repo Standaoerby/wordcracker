@@ -689,3 +689,228 @@ def suppress_partial_filter_claims(answer: str,
              f"({sample}). Фильтр имён частичный — в списке могли "
              "остаться имена."]
     return "\n".join(lines)
+
+
+# =====================================================================
+# R-28 B114 (2026-06-11) — учебный факт без tool-опоры не публикуется.
+#
+# Тест-ран Q4 + смоук S4: в учебных word-бандлах LLM выдумывал
+# этимологию (ajar/garlic «от греческого krokos») и переводы
+# (galatz→«стеклянный сосуд»). Источник — enrich_word (FIXTURE_EXEMPT,
+# контент генерится LLM): фабрикация входила в ответ через ДАННЫЕ
+# инструмента, поэтому evidence-модель WP2b её не ловила («данные
+# подтверждают» клейм). Два детерминированных пасса ниже закрывают это
+# на уровне ответа (suppress, не warn — механика WP2b):
+#
+#   * audit_etymology_claims — этимологическое утверждение в ответе
+#     поддержано ТОЛЬКО выходом word_etymology/find_words_by_etymology
+#     (Wiktionary-backed family_chain/raw_codes/primary_family).
+#     enrich_word-поля этимологии стираются на враппере и опорой не
+#     считаются. Честная констатация отсутствия («Этимологии этого
+#     слова в данных корпуса нет») не вырезается.
+#   * audit_example_quotes — blockquote-цитаты (примеры употребления)
+#     должны иметь корпусную опору в данных инструментов; сочинённый
+#     LLM пример вырезается построчно.
+#
+# R5 — оба класса регексов имеют позитивные И негативные кейсы в
+# tests/v2/test_r28_honest_learning.py.
+# =====================================================================
+
+# Claim shapes: «Этимология: …», «происходит от греческого/латинского…»,
+# «восходит к прагерманскому корню», «заимствовано из…», EN variants.
+# Verb-anchored: голое «from Greek» / «происходит от лица рассказчика»
+# (повествовательный смысл) совпадать НЕ должно — негативные кейсы в R5.
+_ETYM_CLAIM_RE = re.compile(
+    r"(?:этимолог\w*|"
+    r"происходит\s+от\s+(?:греч|лат|древн|стар[оа]|франц|герман|англ"
+    r"|прото|санскрит|слова|корня)\w*|"
+    r"восходит\s+к\s+(?:греч|лат|древн|стар[оа]|франц|герман|англ"
+    r"|прото|санскрит|корн|слов)\w*|"
+    r"заимствован\w*\s+(?:из|от)\s|"
+    r"etymolog\w*|"
+    r"(?:derive[sd]?|originate[sd]?|comes?|borrowed)\s+from\s+"
+    r"(?:the\s+)?(?:ancient\s+)?(?:greek|latin|old|middle|proto|sanskrit"
+    r"|french|german|norse))",
+    re.IGNORECASE | re.UNICODE,
+)
+
+# Честная констатация отсутствия — не клейм, не вырезается. Канонический
+# текст рендера: «Этимологии этого слова в данных корпуса нет».
+_ETYM_ABSENCE_RE = re.compile(
+    r"(?:в\s+данных\s+корпуса\s+нет|не\s+извлек|не\s+указан|недоступн"
+    r"|отсутству|нет\s+данных|no\s+etymology|not\s+(?:available|found))",
+    re.IGNORECASE | re.UNICODE,
+)
+
+# Tool-опора этимологии: только Wiktionary-backed инструменты.
+# enrich_word сюда НЕ входит — его этимология была LLM-генерацией и
+# стирается на враппере (scripts/v2/tools/learning/enrich.py).
+_ETYM_EVIDENCE_TOOLS = frozenset({"word_etymology", "find_words_by_etymology"})
+# Непустой family_chain/raw_codes (списки) или primary_family (строка)
+# в сериализованных data.
+_ETYM_EVIDENCE_RE = re.compile(
+    r"\"(?:family_chain|raw_codes)\":\s*\[\s*\"|\"primary_family\":\s*\"\w")
+
+
+@dataclass
+class EtymologyClaimReport:
+    """Etymology claims in the answer with no word_etymology backing."""
+    claims: list[str]
+
+    def has_issues(self) -> bool:
+        return bool(self.claims)
+
+
+def _records_carry_etymology_evidence(tool_records) -> bool:
+    for rec in tool_records or []:
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("tool") not in _ETYM_EVIDENCE_TOOLS:
+            continue
+        if rec.get("ok") is False:
+            continue
+        try:
+            blob = json.dumps(rec.get("data"), ensure_ascii=False,
+                              default=str)
+        except Exception:
+            blob = str(rec.get("data"))
+        if blob and _ETYM_EVIDENCE_RE.search(blob):
+            return True
+    return False
+
+
+def _sentence_around(answer: str, start: int, end: int) -> str:
+    """The sentence (or markdown line) containing answer[start:end]."""
+    s = answer.rfind("\n", 0, start)
+    for brk in ".!?…":
+        cut = answer.rfind(brk, 0, start)
+        if cut > s:
+            s = cut
+    end_candidates = [answer.find(brk, end) for brk in ".!?…\n"]
+    end_candidates = [e for e in end_candidates if e != -1]
+    e = min(end_candidates) if end_candidates else len(answer)
+    return answer[s + 1:e]
+
+
+def audit_etymology_claims(answer: str,
+                           tool_records: list[dict]) -> EtymologyClaimReport:
+    """Deterministic: etymology claims without word_etymology backing.
+
+    Binary evidence model per answer (как WP2b): если в записях есть
+    word_etymology/find_words_by_etymology с непустым family_chain —
+    этимологические клеймы считаются опёртыми и не трогаются. Иначе
+    каждый клеймовый sentence (кроме честных absence-констатаций)
+    попадает в report. Pure function, no LLM."""
+    rep = EtymologyClaimReport(claims=[])
+    if not answer or not answer.strip():
+        return rep
+    matches = list(_ETYM_CLAIM_RE.finditer(answer))
+    if not matches:
+        return rep
+    if _records_carry_etymology_evidence(tool_records):
+        return rep
+    for m in matches[:5]:
+        sentence = _sentence_around(answer, m.start(), m.end())
+        if _ETYM_ABSENCE_RE.search(sentence):
+            continue  # честная констатация отсутствия
+        rep.claims.append(m.group(0).strip())
+    return rep
+
+
+def suppress_etymology_claims(answer: str,
+                              report: EtymologyClaimReport) -> str:
+    """Excise unsupported etymology sentences; append the honest
+    canonical absence text (WP2b suppression mechanics)."""
+    if not report.has_issues():
+        return answer
+    from scripts.v2.numeric_audit import _excise_sentence
+    repaired = answer
+    removed = 0
+    for claim in report.claims:
+        cut, ok = _excise_sentence(repaired, claim)
+        if ok:
+            repaired = cut
+            removed += 1
+    if not removed:
+        return answer
+    lines = [repaired.rstrip(), "", "---", "",
+             "🔧 **Honesty guard** — из ответа удалено этимологическое "
+             "утверждение без опоры в данных инструментов. Этимологии "
+             "этого слова в данных корпуса нет."]
+    return "\n".join(lines)
+
+
+# Blockquote line = пример/цитата. Латинские токены ≥3 символов; цитата
+# короче 4 токенов не проверяется (заголовки, русские пояснения,
+# шаблонные подсказки выпадают сами).
+_BLOCKQUOTE_LINE_RE = re.compile(r"^[ \t]*>\s?(.+)$", re.MULTILINE)
+_QUOTE_TOKEN_RE = re.compile(r"[A-Za-zÀ-ÿ]{3,}")
+_QUOTE_SUPPORT_THRESHOLD = 0.7
+
+
+@dataclass
+class ExampleQuoteReport:
+    """Blockquote example lines with no support in tool data."""
+    lines: list[str]
+
+    def has_issues(self) -> bool:
+        return bool(self.lines)
+
+
+def _tool_data_blob(tool_records) -> str:
+    parts: list[str] = []
+    for rec in tool_records or []:
+        if not isinstance(rec, dict):
+            continue
+        try:
+            parts.append(json.dumps(rec.get("data"), ensure_ascii=False,
+                                    default=str))
+        except Exception:
+            parts.append(str(rec.get("data")))
+    return "\n".join(parts).lower()
+
+
+def audit_example_quotes(answer: str,
+                         tool_records: list[dict]) -> ExampleQuoteReport:
+    """Deterministic: blockquote examples must be corpus-backed.
+
+    Цитата поддержана, когда ≥70% её латинских токенов (≥3 символов)
+    присутствуют в сериализованных data инструментов. Усечения «…» и
+    атрибуция (— Author, *Title*) проходят: их токены тоже из data.
+    enrich_word.example_sentence стёрт на враппере, поэтому сочинённый
+    пример опоры не имеет. Pure function, no LLM."""
+    rep = ExampleQuoteReport(lines=[])
+    if not answer or not answer.strip():
+        return rep
+    matches = list(_BLOCKQUOTE_LINE_RE.finditer(answer))
+    if not matches:
+        return rep
+    blob = _tool_data_blob(tool_records)
+    for m in matches:
+        tokens = [t.lower() for t in _QUOTE_TOKEN_RE.findall(m.group(1))]
+        if len(tokens) < 4:
+            continue
+        present = sum(1 for t in tokens if t in blob)
+        if present / len(tokens) < _QUOTE_SUPPORT_THRESHOLD:
+            rep.lines.append(m.group(0))
+    return rep
+
+
+def suppress_unsupported_quotes(answer: str,
+                                report: ExampleQuoteReport) -> str:
+    """Remove fabricated blockquote example lines; append the honest
+    disclosure (WP2b mechanics, построчное удаление)."""
+    if not report.has_issues():
+        return answer
+    bad = set(report.lines)
+    kept = [ln for ln in answer.splitlines() if ln not in bad]
+    removed = len(answer.splitlines()) - len(kept)
+    if not removed:
+        return answer
+    repaired = "\n".join(kept)
+    lines = [repaired.rstrip(), "", "---", "",
+             "🔧 **Honesty guard** — из ответа удалены примеры-цитаты, "
+             "отсутствующие в корпусных данных инструментов. Примеры "
+             "публикуются только из корпуса (hybrid_search / "
+             "word_contexts)."]
+    return "\n".join(lines)

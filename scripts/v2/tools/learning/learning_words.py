@@ -145,7 +145,11 @@ _LITERARY_LOCATION_BLACKLIST = frozenset({
     # `clean` flag (post-filter detector scan over final rows; partial
     # filter ⇒ clean=False and the renderer must not claim a complete
     # one). Bump busts cached rows recorded by the leaky chain.
-    wrapper_version="v7-r27-propn-gazetteer",
+    # R-28 B114 (2026-06-11) — toponym curated list extended with the
+    # Dracula / Eastern-Europe set (galatz leaked into the PG345 study
+    # list, smoke S4). Bump busts cached rows recorded before the
+    # extension.
+    wrapper_version="v8-r28-dracula-toponyms",
 )
 @v1_contract(v1_fn="scripts.learning_tools.learning_words",
              schema=V1LearningWords)

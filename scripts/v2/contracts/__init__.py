@@ -130,6 +130,10 @@ INTERNAL_V2_KEYS = frozenset({
     # R-27 WP3 — honest-filtering flag + leftover names stamped by
     # affinity_by_author / learning_words (post-filter detector scan)
     "clean", "_propn_leftover",
+    # R-28 B114 — proper-noun translation gate stamped by enrich_word
+    # (имя собственное не переводится; рендерер пишет «имя собственное
+    # (вероятно топоним/персонаж)» вместо перевода)
+    "propn_gate",
     "min_corpus_count_used", "min_corpus_count_requested",
     "empty_sides", "cosine_is_structural_zero", "shared_top_words_count",
     "metric_explanations", "proper_noun_filter",

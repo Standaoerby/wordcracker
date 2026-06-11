@@ -92,6 +92,17 @@ _CURATED_TOPONYMS: frozenset[str] = frozenset({
     "baskerville", "grimpen", "dartmoor",
     "reigate", "ross", "salisbury",
 
+    # Dracula / Eastern Europe (Stoker). R-28 B114: смоук S4 — «galatz»
+    # (город Галац) прошёл в учебный список learning_words(book:PG345)
+    # и получил LLM-перевод «стеклянный сосуд». Кураторские списки не
+    # знали восточноевропейских топонимов Дракулы (в
+    # _LITERARY_LOCATION_BLACKLIST только transylvania/carfax/whitby),
+    # а cap-ratio слой требует tokens-файл + ≥10 вхождений ≥70%
+    # капитализированных. Кураторское покрытие — основной фикс.
+    "galatz", "varna", "bistritz", "borgo", "bukovina",
+    "klausenburgh", "klausenburg", "bukarest", "bucharest",
+    "carpathians", "munich",
+
     # Russia / Russian Empire (Tolstoy, Dostoevsky, Pushkin translated +
     # English authors writing about Russia)
     "petersburg", "moscow", "tsarskoye", "kazan", "siberia",
