@@ -83,11 +83,14 @@ class PayloadBuilder(unittest.TestCase):
             # If it stayed as dict, it must serialize to <= 600 chars
             self.assertLessEqual(len(json.dumps(v, default=str)), 600)
 
-    def test_caps_tool_results_at_8(self):
+    def test_caps_tool_results_at_tool_calls_max(self):
+        """B119 (R-28): cap 8 → 12 (= RequestBudget.tool_calls_max) —
+        старый [:8] молча выкидывал хвост 11-шагового learning_books
+        плана из trusted set критика."""
         many = [{"tool": f"t{i}", "ok": True, "data": {},
                  "coverage": {}, "warnings": []} for i in range(20)]
         out = _build_payload_for_critic("a", many, intent="x")
-        self.assertEqual(len(out["tool_results"]), 8)
+        self.assertEqual(len(out["tool_results"]), 12)
 
     def test_truncates_long_answer(self):
         very_long = "x" * 10000

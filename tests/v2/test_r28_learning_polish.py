@@ -126,5 +126,221 @@ class B118RendererDeterminism(unittest.TestCase):
                 self.assertIn("Не указано в данных", notes)
 
 
-if __name__ == '__main__':
+# ---------------------------------------------------------------------------
+# B119 — критик-«волки-волки»
+# ---------------------------------------------------------------------------
+
+_PNP_TITLE = "Pride and Prejudice"
+
+
+def _learning_books_records() -> list[dict]:
+    """11 записей плана learning_books: пул top_books (P&P на rank 5,
+    как в smoke S1–S3) + 10 book_readability. Строки пула нарочно
+    «прод-толстые» (subjects и пр.), чтобы слепой 600-char shrink
+    гарантированно обрубал таблицу ДО rank 5 — как на проде."""
+    titles = [
+        "Frankenstein; Or, The Modern Prometheus",
+        "Moby Dick; Or, The Whale",
+        "Romeo and Juliet",
+        "Alice's Adventures in Wonderland",
+        _PNP_TITLE,                      # rank 5 — герой бага
+        "The Great Gatsby",
+        "Dracula",
+        "The Adventures of Sherlock Holmes",
+        "A Tale of Two Cities",
+        "Great Expectations",
+    ]
+    rows = []
+    for i, title in enumerate(titles):
+        rows.append({
+            "rank": i + 1,
+            "pg_id": f"PG{1342 if title == _PNP_TITLE else 9000 + i}",
+            "title": title,
+            "author": f"Author Authorson the {i + 1}th of His Name",
+            "downloads": 90000 - i * 1000,
+            "lang": "en",
+            "subjects": ("Fiction; Classic literature; England — "
+                         "Social life and customs — 19th century"),
+        })
+    records = [{
+        "tool": "top_books_by_downloads", "ok": True,
+        "data": {"top": rows, "metric": "downloads"},
+        "query": {"top": 10, "lang": "en"},
+        "coverage": {"books_matched": 10, "books_total": 47000},
+        "warnings": [],
+    }]
+    for row in rows:
+        records.append({
+            "tool": "book_readability", "ok": True,
+            "data": {"pg_id": row["pg_id"], "title": row["title"],
+                     "flesch_reading_ease": 72.5,
+                     "flesch_kincaid_grade": 7.1,
+                     "cefr_heuristic": "B1-B2", "words": 34427},
+            "query": {"pg_id": row["pg_id"], "sample_chars": 200000},
+            "coverage": {"books_matched": 1, "books_total": 1},
+            "warnings": [],
+        })
+    return records
+
+
+class B119CriticPayload(unittest.TestCase):
+    """Trusted set критика обязан включать ВСЕ записи плана и все
+    тайтлы таблицы. R2: оба теста падают на до-фиксовом коде
+    ([:8]-cap и слепой 600-char shrink)."""
+
+    def test_payload_includes_all_plan_records(self):
+        records = _learning_books_records()
+        self.assertEqual(len(records), 11)  # прекондиция: полный план
+        payload = critic_mod._build_payload_for_critic(
+            "ответ", records, intent="learning_books")
+        self.assertEqual(len(payload["tool_results"]), len(records))
+
+    def test_rank5_title_survives_shrink(self):
+        """Слепой _shrink(600) обрубал JSON пула на ~3-й строке —
+        rank-5 P&P отсутствовала в payload, критик флаговал реальную
+        книгу. Table-aware shrink сохраняет КАЖДУЮ строку."""
+        payload = critic_mod._build_payload_for_critic(
+            "ответ", _learning_books_records(), intent="learning_books")
+        blob = json.dumps(payload, ensure_ascii=False)
+        self.assertIn(_PNP_TITLE, blob)
+        self.assertIn("PG1342", blob)
+
+    def test_render_note_dropped_from_critic_payload(self):
+        """_render_note — инструкция рендереру, не свидетельство."""
+        out = critic_mod._shrink_table_aware(
+            {"top": [{"rank": 1, "title": "T", "pg_id": "PG1"}],
+             "_render_note": "renderer must..."},
+            max_chars=600)
+        self.assertNotIn("_render_note", json.dumps(out))
+
+    def test_non_table_data_still_char_capped(self):
+        """Не-табличные данные — прежний жёсткий char-cap (бюджет
+        критика не раздуваем)."""
+        out = critic_mod._shrink_table_aware(
+            {"blob": "x" * 5000}, max_chars=600)
+        s = json.dumps(out, ensure_ascii=False, default=str)
+        self.assertLess(len(s), 1000)
+        self.assertIn("truncated", s)
+
+
+class B119ClaimEntityRegexes(unittest.TestCase):
+    """R5 — позитивы и негативы трёх claim-регексов."""
+
+    def test_quoted_span_extracted(self):
+        cands = critic_mod._claim_entity_candidates(
+            "Книга «Pride and Prejudice» не присутствует в tool_results")
+        self.assertIn("Pride and Prejudice", cands)
+
+    def test_pg_id_extracted(self):
+        cands = critic_mod._claim_entity_candidates(
+            "PG1342 нет ни в одном tool_result")
+        self.assertIn("PG1342", cands)
+
+    def test_titlecase_run_extracted_without_quotes(self):
+        """Одиночная заглавная «A» в артикль не входит ([A-Z][a-z]+ —
+        анти-шум), но усечённый кандидат остаётся подстрокой полного
+        тайтла в данных — suppress срабатывает."""
+        cands = critic_mod._claim_entity_candidates(
+            "ответ упоминает A Tale of Two Cities без опоры на данные")
+        self.assertIn("Tale of Two Cities", cands)
+        kept, suppressed = critic_mod.filter_claims_with_data_evidence(
+            ["ответ упоминает A Tale of Two Cities без опоры на данные"],
+            _learning_books_records())
+        self.assertEqual(kept, [])
+        self.assertEqual(len(suppressed), 1)
+
+    # ---- негативы ----
+
+    def test_single_capitalized_word_not_extracted(self):
+        """Одиночные Capitalized-слова (Flesch, CEFR, Анна) — шум, не
+        кандидаты."""
+        cands = critic_mod._claim_entity_candidates(
+            "значение Flesch не совпадает с данными")
+        self.assertEqual(cands, [])
+
+    def test_numbers_only_claim_no_candidates(self):
+        cands = critic_mod._claim_entity_candidates(
+            "в ответе 250 книг, в данных 47")
+        self.assertEqual(cands, [])
+
+
+class B119EvidenceFilter(unittest.TestCase):
+    """Детерминированный evidence-фильтр против ПОЛНЫХ записей."""
+
+    def test_claim_with_real_title_suppressed(self):
+        kept, suppressed = critic_mod.filter_claims_with_data_evidence(
+            ["Книга «Pride and Prejudice» не присутствует в tool_results"],
+            _learning_books_records())
+        self.assertEqual(kept, [])
+        self.assertEqual(len(suppressed), 1)
+
+    def test_claim_with_real_pg_id_suppressed(self):
+        kept, suppressed = critic_mod.filter_claims_with_data_evidence(
+            ["PG1342 выдуман"], _learning_books_records())
+        self.assertEqual(kept, [])
+        self.assertEqual(len(suppressed), 1)
+
+    def test_fabricated_title_kept(self):
+        """R2-негатив: реально выдуманный тайтл проходит фильтр и
+        остаётся флагом."""
+        kept, suppressed = critic_mod.filter_claims_with_data_evidence(
+            ["Книга «Necronomicon of Steel» не присутствует в данных"],
+            _learning_books_records())
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(suppressed, [])
+
+    def test_numbers_only_claim_stays_llm_call(self):
+        """Клейм без распознаваемых сущностей фильтр не трогает."""
+        kept, _ = critic_mod.filter_claims_with_data_evidence(
+            ["в ответе 250 книг, в данных 47"],
+            _learning_books_records())
+        self.assertEqual(len(kept), 1)
+
+
+class _FakeResp:
+    def __init__(self, verdict: dict):
+        self._verdict = verdict
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return {"message": {"content": json.dumps(self._verdict,
+                                                  ensure_ascii=False)},
+                "prompt_eval_count": 100, "eval_count": 50}
+
+
+class B119ReviewIntegration(unittest.TestCase):
+    """review() end-to-end с замоканным Ollama: фильтр стоит МЕЖДУ
+    LLM-вердиктом и юзером."""
+
+    def _review(self, claims: list[str]) -> critic_mod.CriticVerdict:
+        fake = _FakeResp({"verified": False, "unsupported_claims": claims,
+                          "missing_caveats": [], "summary": "s"})
+        with mock.patch.object(critic_mod.requests, "post",
+                               return_value=fake):
+            with mock.patch.object(critic_mod, "CRITIC_ENABLED", True):
+                return critic_mod.review(
+                    "ответ с таблицей", _learning_books_records(),
+                    intent="learning_books",
+                    ollama_host="http://mocked:11434")
+
+    def test_pnp_flag_suppressed_and_verified_restored(self):
+        """Smoke S1–S3: флаг нёсся ТОЛЬКО клеймом про P&P → после
+        suppress остаток пуст, красный бейдж не шьётся."""
+        v = self._review(
+            ["Книга «Pride and Prejudice» не присутствует в tool_results"])
+        self.assertEqual(v.unsupported_claims, [])
+        self.assertTrue(v.verified)
+
+    def test_fabricated_title_still_flagged(self):
+        """R2-негатив: критик НЕ ослеп — выдуманный тайтл по-прежнему
+        флагуется, verified остаётся False."""
+        v = self._review(
+            ["Книга «Necronomicon of Steel» не присутствует в данных"])
+        self.assertEqual(len(v.unsupported_claims), 1)
+        self.assertFalse(v.verified)
+
+
+if __name__ == "__main__":
     unittest.main()

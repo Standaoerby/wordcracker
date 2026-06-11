@@ -98,13 +98,19 @@ class CriticVerdict:
 def _build_payload_for_critic(answer: str, tool_results_summary: list[dict],
                               intent: str) -> dict:
     """Compact context window for the critic — keep it small so we don't
-    burn 4k tokens just on prior tool dumps."""
+    burn 4k tokens just on prior tool dumps.
+
+    B119 (R-28) — cap raised 8 → 12 (= RequestBudget.tool_calls_max).
+    The learning_books plan is 11 results (top_books pool + 10 ×
+    book_readability); the old [:8] silently dropped the readability of
+    ranks 7-9, so the critic reviewed against a partial trusted set.
+    """
     compact_results = []
-    for r in tool_results_summary[:8]:
+    for r in tool_results_summary[:12]:
         compact_results.append({
             "tool": r.get("tool"),
             "ok": r.get("ok", True),
-            "data": _shrink(r.get("data"), max_chars=600),
+            "data": _shrink_table_aware(r.get("data"), max_chars=600),
             "coverage": r.get("coverage"),
             "warnings": [w.get("message") for w in (r.get("warnings") or [])
                          if isinstance(w, dict)][:3],
@@ -125,6 +131,122 @@ def _shrink(value, *, max_chars: int) -> object:
     if len(s) <= max_chars:
         return value
     return s[:max_chars] + "...(truncated)"
+
+
+# B119 (R-28) — row fields the critic verifies entity claims against.
+# Keep names (title/author/word) and the headline metrics; drop verbose
+# stats so a 10-row table fits where the blind 600-char cut used to
+# chop the JSON string mid-table (rank 5 «Pride and Prejudice» fell off
+# the end → critic flagged a REAL book as fabricated in smoke 2.7.8
+# S1–S3).
+_CRITIC_ROW_KEYS = ("rank", "pg_id", "id", "title", "author", "word",
+                    "lemma", "downloads", "cefr_heuristic",
+                    "flesch_reading_ease")
+_CRITIC_TABLE_KEYS = ("top", "results", "matches", "rows")
+
+
+def _shrink_table_aware(value, *, max_chars: int) -> object:
+    """Table-aware variant of `_shrink` for critic payloads.
+
+    For dict data carrying a list-of-dicts table (top / results /
+    matches / rows) keep EVERY row but only its name-bearing +
+    headline-metric fields, so the critic always sees the full set of
+    titles/authors/words the renderer echoed. Non-table data falls back
+    to the plain char-cap (`_render_note` is dropped first — it's a
+    renderer instruction, not evidence).
+    """
+    if isinstance(value, dict):
+        value = {k: v for k, v in value.items() if k != "_render_note"}
+        for key in _CRITIC_TABLE_KEYS:
+            rows = value.get(key)
+            if (isinstance(rows, list) and rows
+                    and all(isinstance(r, dict) for r in rows[:3])):
+                compact_rows = [
+                    {k: _shrink(r.get(k), max_chars=80)
+                     for k in _CRITIC_ROW_KEYS if r.get(k) is not None}
+                    for r in rows[:20] if isinstance(r, dict)
+                ]
+                scalars = {
+                    k: _shrink(v, max_chars=120)
+                    for k, v in value.items()
+                    if k not in _CRITIC_TABLE_KEYS
+                    and not isinstance(v, (list, dict))
+                }
+                return {**scalars, key: compact_rows}
+    return _shrink(value, max_chars=max_chars)
+
+
+# B119 (R-28) — deterministic trusted-set enforcement. The LLM critic
+# kept flagging «Pride and Prejudice» as fabricated while the title sat
+# in tool data (rank 5 of top_books + its own book_readability result).
+# Before a claim ships to the user, extract the entities it names and
+# check them against the FULL (unshrunken) tool records: an entity that
+# IS in tool data cannot support an «unsupported claim» — drop it.
+# Claims naming entities absent from the data (real fabrications) pass
+# through unchanged.
+#
+# R5 — both regexes have positive + negative cases in
+# tests/v2/test_r28_learning_polish.py.
+_CLAIM_QUOTED_RE = re.compile(r"[«\"“]([^«»\"“”]{3,80})[»\"”]")
+_CLAIM_PG_ID_RE = re.compile(r"\bPG\d{1,7}\b", re.IGNORECASE)
+# ≥2-word Latin TitleCase run (connectors allowed): «Pride and
+# Prejudice», «A Tale of Two Cities». Single capitalized words are NOT
+# extracted — too noisy (Flesch, CEFR, Anna…); single-word titles are
+# still caught when the claim quotes them.
+_CLAIM_TITLECASE_RE = re.compile(
+    r"\b[A-Z][a-z]+(?:['’][a-z]+)?"
+    r"(?:\s+(?:of|the|and|a|an|in|on|to|"
+    r"[A-Z][a-z]+(?:['’][a-z]+)?)){1,7}\b")
+
+
+def _claim_entity_candidates(claim: str) -> list[str]:
+    """Entity-ish substrings a claim names: quoted spans, PG ids,
+    multi-word Latin TitleCase runs. Deduped, order preserved."""
+    cands: list[str] = []
+    cands += [m.group(1).strip() for m in _CLAIM_QUOTED_RE.finditer(claim)]
+    cands += _CLAIM_PG_ID_RE.findall(claim)
+    cands += [m.group(0).strip() for m in _CLAIM_TITLECASE_RE.finditer(claim)]
+    seen: set[str] = set()
+    out: list[str] = []
+    for c in cands:
+        cl = c.lower()
+        if cl and cl not in seen:
+            seen.add(cl)
+            out.append(c)
+    return out
+
+
+def filter_claims_with_data_evidence(
+    claims: list, tool_records: list[dict],
+) -> tuple[list, list]:
+    """Split critic claims into (kept, suppressed_by_evidence).
+
+    A claim is suppressed when ANY entity it names occurs (case-
+    insensitive substring) in the serialized data/query of ANY tool
+    record — the full records, not the shrunken critic payload.
+    Claims naming nothing recognizable are kept (numbers-only claims
+    stay the LLM's call)."""
+    blob_parts: list[str] = []
+    for rec in tool_records or []:
+        if not isinstance(rec, dict):
+            continue
+        for key in ("data", "query"):
+            try:
+                blob_parts.append(
+                    json.dumps(rec.get(key), ensure_ascii=False,
+                               default=str))
+            except Exception:
+                blob_parts.append(str(rec.get(key)))
+    blob = " ".join(blob_parts).lower()
+    kept: list = []
+    suppressed: list = []
+    for c in claims:
+        cands = _claim_entity_candidates(str(c))
+        if cands and any(cand.lower() in blob for cand in cands):
+            suppressed.append(c)
+        else:
+            kept.append(c)
+    return kept, suppressed
 
 
 # Sprint 11.1 + Sprint 17 extension: skip critic entirely for intents
@@ -262,6 +384,17 @@ def review(answer: str, tool_results_summary: list[dict], *,
 
     unsupported = list(parsed.get("unsupported_claims") or [])
     caveats = list(parsed.get("missing_caveats") or [])
+    # B119 (R-28) — deterministic evidence check against the FULL
+    # records before any flag reaches the user: a claim naming an
+    # entity that IS in tool data is a critic false-positive («волки-
+    # волки» on Pride and Prejudice, smoke 2.7.8 S1–S3), not a catch.
+    unsupported, evidence_suppressed = filter_claims_with_data_evidence(
+        unsupported, tool_results_summary)
+    if evidence_suppressed:
+        log.info("critic: %d claim(s) suppressed — named entities found "
+                 "in tool data: %r",
+                 len(evidence_suppressed),
+                 [str(c)[:120] for c in evidence_suppressed])
     # Sanity guard: when the critic flags >= MAX_FLAGS items, it's almost
     # certainly confused (the renderer just pulled rows from a table, every
     # number is "unsupported" from a strict perspective). Trust the answer
@@ -282,8 +415,14 @@ def review(answer: str, tool_results_summary: list[dict], *,
             prompt_tokens=critic_prompt_tokens,
             eval_tokens=critic_eval_tokens,
         )
+    verified = bool(parsed.get("verified", True))
+    if evidence_suppressed and not unsupported:
+        # B119 — the LLM's «false» was carried by claims that didn't
+        # survive the evidence check; don't ship a red badge with zero
+        # remaining claims.
+        verified = True
     return CriticVerdict(
-        verified=bool(parsed.get("verified", True)),
+        verified=verified,
         unsupported_claims=unsupported,
         missing_caveats=caveats,
         summary=str(parsed.get("summary") or "(no summary)"),
