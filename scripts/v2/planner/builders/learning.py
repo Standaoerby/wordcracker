@@ -1,11 +1,13 @@
 """Learning / lexical / translation / export plan builders.
 
-`learning`, `lexical_wealth`, `vocab_passport`, `translation_quality`,
-`translate_word_list`, `export_word_list`.
+`learning`, `learning_books`, `lexical_wealth`, `vocab_passport`,
+`translation_quality`, `translate_word_list`, `export_word_list`.
 
 Phase 4 / T4 (REMEDIATION_BRIEF) — extracted from plan.py.
 """
 from __future__ import annotations
+
+import re
 
 from scripts.v2.planner.entities import Entities
 from scripts.v2.planner.builders._common import (
@@ -22,14 +24,24 @@ from scripts.v2.planner.builders._common import (
 def _plan_learning(e: Entities) -> QueryPlan:
     scope = _scope_from(e)
     if scope == "all_corpus":
+        # R-27 WP1 fail-fast (B106) — этот clarify ОСОЗНАННЫЙ (unscoped
+        # word-list — низкоценный продуктовый ответ, нужен scope), а не
+        # «rules-path сдался». Без authoritative-флага rag_v2 уводил
+        # запрос в v4 LLM planner: 2 попытки × ~15s → canned «не
+        # получилось разобрать» за ~40s. Теперь ответ за секунды, с
+        # рабочими примерами. Книжные learning-запросы сюда больше не
+        # попадают — их забирает learning_books (выше по priority).
         return QueryPlan(
             intent="clarify", entities=e, steps=[],
             needs_clarify=True,
             clarify_question=(
                 "Для изучаемой лексики уточни: для какого автора или книги? "
-                "Пример: «B1 vocab из Pride and Prejudice», «слова для Wodehouse»."
+                "Пример: «B1 vocab из Pride and Prejudice», «слова для Wodehouse». "
+                "А если нужны КНИГИ под твой уровень — спроси «какие книги "
+                "почитать для уровня B2»."
             ),
-            explain="learning_words needs scope",
+            explain="learning_words needs scope (authoritative — no v4 rescue)",
+            authoritative_clarify=True,
         )
     # Cap top — anything over ~30 triggers per-word enrich loops that don't
     # finish under the 90s chat timeout. The renderer should offer the user
@@ -70,6 +82,52 @@ def _plan_learning(e: Entities) -> QueryPlan:
             "НЕ замалчивай это ограничение, НЕ говори «отфильтровал "
             "архаизмы»."
         )
+    # R-27 WP1 Дополнение Б (Q20, тест-ран) — first-session «дай N слов
+    # из книги X с переводами»: learning_words(book) + перевод списка
+    # ОДНИМ заходом. Раньше запрос не матчился ни одним правилом → v4
+    # LLM ~46s → 0 calls → ложное «упомяни книгу» (книга была названа).
+    # Перевод — enrich_word fan-out по строкам результата learning_words
+    # (router-injected word@<rank>, та же механика, что pg_id@<rank> в
+    # learning_books). Кап 10 слов — бюджетный расчёт translate_word_list
+    # (10 × ~1.5s Wiktionary + render < chat timeout); 1 + 10 = 11 ≤
+    # tool_calls_max=12. Followup-путь «переведи эти слова»
+    # (translate_word_list, _translate_to из history) не затронут —
+    # триггер только на явное «с перевод*» в тексте текущего запроса.
+    raw_text = (e.raw_misc or {}).get("raw_text", "") or ""
+    wants_translation = bool(re.search(
+        r"\bс\s+перевод\w*|\bwith\s+translations?\b", raw_text,
+        re.IGNORECASE))
+    if wants_translation:
+        trans_top = min(eff_top, 10)
+        args["top"] = trans_top
+        if requested > trans_top:
+            args["_capped_from"] = requested
+        steps = [PlanStep(tool="learning_words", args=args)]
+        for rank in range(trans_top):
+            steps.append(PlanStep(
+                tool="enrich_word",
+                args={"target_lang": "ru"},
+                depends_on=[0], inject_result_as=f"word@{rank}",
+                optional=True,   # один Wiktionary-промах не валит план
+            ))
+        notes.append(
+            "ПЕРЕВОДЫ: пользователь просил слова С ПЕРЕВОДАМИ. Сведи "
+            "learning_words + enrich_word в ОДНУ таблицу «слово | "
+            "перевод | определение» в порядке списка learning_words. "
+            "Если enrich_word для какого-то слова упал — оставь ячейку "
+            "перевода пустой и честно скажи об этом, НЕ выдумывай "
+            "перевод."
+        )
+        return QueryPlan(
+            intent="learning", entities=e,
+            steps=steps,
+            expected_cost="heavy",
+            explain=(f"learning_words({scope}, top={trans_top}"
+                     f"{f' [capped from {requested}]' if requested > trans_top else ''}) "
+                     f"+ enrich_word × {trans_top} (word@rank, "
+                     f"target_lang=ru) — слова с переводами одним заходом"),
+            render_notes=notes,
+        )
     return QueryPlan(
         intent="learning", entities=e,
         steps=[PlanStep(tool="learning_words", args=args)],
@@ -77,6 +135,99 @@ def _plan_learning(e: Entities) -> QueryPlan:
         explain=(f"learning_words({scope}, level={e.level or 'intermediate'}, "
                  f"top={eff_top}{f' [capped from {requested}]' if requested > 30 else ''}"
                  f"{' [exclude_archaic flagged → render disclose]' if e.exclude_archaic else ''})"),
+        render_notes=notes,
+    )
+
+
+# R-27 WP1 (B106) — размер пула кандидатов для learning_books. Жёстко
+# ограничен RequestBudget.tool_calls_max=12: 1 шаг пула + POOL шагов
+# book_readability = 11 ≤ 12. book_readability ~1-2s/книга (cacheable),
+# холодный прогон укладывается в 45s-бюджет интента с запасом на рендер.
+_LEARNING_BOOKS_POOL = 10
+
+# Какие банды cefr_heuristic (v1 book_readability: A2 / B1 / B1-B2 /
+# B2 / C1 / C2+) считаются подходящими для запрошенного уровня.
+_CEFR_BANDS = {
+    "A1": ("A2",),
+    "A2": ("A2", "B1"),
+    "B1": ("B1", "B1-B2"),
+    "B2": ("B1-B2", "B2"),
+    "C1": ("C1", "C2+"),
+    "C2": ("C1", "C2+"),
+}
+_LEVEL_BANDS = {  # e.level (словесный, без CEFR-буквы) → банды
+    "basic": ("A2", "B1"),
+    "intermediate": ("B1", "B1-B2", "B2"),
+    "advanced": ("C1", "C2+"),
+}
+
+
+def _plan_learning_books(e: Entities) -> QueryPlan:
+    """R-27 WP1 (B106) — «какие книги почитать, если у меня уровень B2»,
+    «я учу английский, с чего начать?».
+
+    Фаза 0: предрассчитанной читабельности по корпусу НЕТ — только
+    on-demand book_readability(pg_id) (~1-2s, cacheable). Поэтому план —
+    композиция существующих тулов на ОГРАНИЧЕННОМ пуле кандидатов, без
+    новых fingerprinted-врапперов и без скана 47К книг:
+
+      s0: top_books_by_downloads(top=10) — пул кандидатов (cheap);
+      s1..s10: book_readability per кандидат — pg_id роутер инжектит из
+               строки rank пула (inject_result_as="pg_id@<rank>",
+               optional — одна упавшая оценка не валит план);
+      рендер: одна таблица, фильтр по CEFR-банду, top-5..7 рекомендаций.
+
+    Дефолт без уровня = минимальный порог вхождения (max Flesch).
+    """
+    raw = (e.raw_misc or {}).get("raw_text", "") or ""
+    m = re.search(r"\b([abc][12])\b", raw, re.IGNORECASE)
+    cefr = m.group(1).upper() if m else None
+    lang = e.lang_hint or "en"
+
+    steps = [PlanStep(tool="top_books_by_downloads",
+                      args={"top": _LEARNING_BOOKS_POOL, "lang": lang})]
+    for rank in range(_LEARNING_BOOKS_POOL):
+        steps.append(PlanStep(
+            tool="book_readability", args={},
+            depends_on=[0], inject_result_as=f"pg_id@{rank}",
+            optional=True,
+        ))
+
+    if cefr and cefr in _CEFR_BANDS:
+        target = (f"уровень {cefr}: подходящими считай книги с "
+                  f"cefr_heuristic из {{{', '.join(_CEFR_BANDS[cefr])}}}")
+    elif e.level in _LEVEL_BANDS:
+        target = (f"уровень «{e.level}»: подходящими считай книги с "
+                  f"cefr_heuristic из {{{', '.join(_LEVEL_BANDS[e.level])}}}")
+    else:
+        target = ("уровень не указан — дефолт «минимальный порог "
+                  "вхождения»: рекомендуй книги с НАИБОЛЬШИМ "
+                  "flesch_reading_ease (самые простые для старта)")
+
+    notes = [
+        "LEARNING_BOOKS: пользователь просит КНИГИ для изучения "
+        f"английского. Целевой {target}.\n"
+        "Сведи результаты book_readability в ОДНУ таблицу (title, "
+        "author, cefr_heuristic, flesch_reading_ease, downloads), "
+        "отсортируй от простых к сложным (flesch_reading_ease по "
+        "убыванию) и порекомендуй 5-7 книг под целевой уровень — по "
+        "одной строке обоснования (уровень + длина/популярность). Если "
+        "в целевом банде книг мало — честно скажи это и покажи "
+        "ближайшие по уровню.\n"
+        "ЧЕСТНОСТЬ метода (упомяни обязательно): уровень — эвристика "
+        "Flesch reading ease по сэмплу текста, НЕ экзаменационная "
+        "CEFR-калибровка; кандидаты — топ-10 самых скачиваемых книг "
+        "корпуса, а не все 47К. НЕ рекомендуй книги, которых нет в "
+        "результатах тулов.",
+    ]
+    return QueryPlan(
+        intent="learning_books", entities=e,
+        steps=steps,
+        expected_cost="heavy",
+        explain=(f"learning_books: top_books_by_downloads(top="
+                 f"{_LEARNING_BOOKS_POOL}, lang={lang}) → book_readability "
+                 f"× {_LEARNING_BOOKS_POOL} (pg_id@rank) → CEFR-фильтр на "
+                 f"рендере ({cefr or e.level or 'min-порог'})"),
         render_notes=notes,
     )
 

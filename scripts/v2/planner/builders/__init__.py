@@ -100,6 +100,7 @@ from scripts.v2.planner.builders.corpus import (
 from scripts.v2.planner.builders.learning import (
     _plan_export_word_list,
     _plan_learning,
+    _plan_learning_books,
     _plan_lexical_wealth,
     _plan_translate_word_list,
     _plan_translation_quality,
@@ -186,6 +187,7 @@ __all__ = [
     # learning / lexical / translation
     "_plan_export_word_list",
     "_plan_learning",
+    "_plan_learning_books",
     "_plan_lexical_wealth",
     "_plan_translate_word_list",
     "_plan_translation_quality",

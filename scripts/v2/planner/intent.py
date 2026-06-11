@@ -46,6 +46,10 @@ INTENTS = frozenset({
     "word_dialogue",
     "word_movement",
     "learning",
+    # R-27 WP1 (B106) — КНИГИ для изучающих язык («книги почитать для
+    # уровня B2», «я учу английский, с чего начать»). Отдельно от
+    # `learning` (тот — про СЛОВА по CEFR-банду, learning_words).
+    "learning_books",
     "top_authors_books",
     "book_lookup",
     "country_compare",
@@ -136,6 +140,12 @@ PRIORITY = {
     "genre_compare": 130,
     "word_etymology": 125,
     "word_pos": 125,
+    # R-27 WP1 (B106) — above book_lookup (122) so «есть ли у тебя книги
+    # для изучающих английский» becomes a learner recommendation, and
+    # above book_recommendation (118) so learner-context phrasings win
+    # over the generic «подойдут/посоветуй» rules. Below similar_to
+    # (130): «книги в стиле X» stays a similarity query.
+    "learning_books": 124,
     "word_timeline": 120,
     "word_emotion": 120,
     "word_collocates": 118,
@@ -510,6 +520,16 @@ RULES: list[tuple[Pattern[str], str, float]] = [
     (_re(r"\bкто\s+(самый|самая)\s+"
          r"(плодовит|популярн|читаем|известн)\w*\s+автор"),
      "corpus_extremum", 0.9),
+    # R-27 WP1 meta (§10 scope) — обратный порядок: «какой автор самый
+    # популярный?» / «какая книга самая длинная?» (существительное ДО
+    # «самый»). Старые правила требовали «самый … автор/книга» и эти
+    # формулировки падали в clarify → v4 LLM ~40s.
+    (_re(r"\bкакой\s+автор\s+сам(?:ый|ая)\s+"
+         r"(плодовит|популярн|читаем|скачиваем|известн)"),
+     "corpus_extremum", 0.92),
+    (_re(r"\bкакая\s+книга\s+(?:в\s+корпусе\s+)?сам(?:ая|ый)\s+"
+         r"(длинн|больш|коротк|маленьк|популярн|скачиваем|сложн|прост|древн)"),
+     "book_extremum", 0.92),
 
     # ===== Sprint 16 Phase F — topic_book_search =====
     # «найди книгу про X», «посоветуй роман о Y», «book about Z». Routes
@@ -795,6 +815,15 @@ RULES: list[tuple[Pattern[str], str, float]] = [
      "book_lookup", 0.9),
     (_re(r"\bкнига\s+.{2,60}\s+есть\s+у\s+тебя"),
      "book_lookup", 0.9),
+    # R-27 WP1 meta (§10 scope) — bare presence probe: «Шекспир есть?»,
+    # «есть Диккенс?». Proper-noun guard (capital first letter) +
+    # wh-word stop-list so «что есть?» / «кто есть?» don't fire.
+    # _plan_book_lookup disambiguates at plan time: resolved AUTHOR →
+    # author_metadata (да/нет + счётчики), resolved book → find_book.
+    (_re(r"^\s*(?!(?:что|кто|где|как|какие|сколько)\b)"
+         r"(?-i:[А-ЯЁA-Z])[\w.'-]{2,}\s+(?:есть|имеется)\s*\?|"
+         r"^\s*есть\s+(?:ли\s+)?(?-i:[А-ЯЁA-Z])[\w.'-]{2,}\s*\?"),
+     "book_lookup", 0.8),
     # Round 2 R8/R11: «найди-ка X», «есть ли у тебя X» where X is the book
     # title directly (no «книгу» word in between). Particle «-ка» is
     # informal Russian, doesn't change intent.
@@ -1362,6 +1391,61 @@ RULES: list[tuple[Pattern[str], str, float]] = [
          r".{0,40}свободн"), "learning", 0.95),
     (_re(r"вызывают\s+сложности\b.{0,30}\b(b1|b2|c1|c2|уровн\w*|level)"),
      "learning", 0.92),
+    # R-27 WP1 Дополнение Б (Q20, тест-ран): «дай 10 слов из Дракулы с
+    # переводами» не матчилось НИЧЕМ (правило Q7 выше требует «уровня»)
+    # → clarify → v4 LLM ~46s → 0 calls → ложное «упомяни книгу», хотя
+    # книга названа. «N слов из X» — это learning_words по book-scope;
+    # «с переводами» добавляет enrich_word fan-out в билдере.
+    (_re(r"\b\d+\s+слов\w*\s+из\b"), "learning", 0.9),
+    (_re(r"\bслов\w*\b.{0,50}\bс\s+перевод\w*"), "learning", 0.92),
+
+    # ===== learning_books (R-27 WP1 / B106) =====
+    # Прод /feedback 01.06 + 10.06 (уже на 2.6.47): «какие книги
+    # почитать, если у меня уровень B2» падало в learning 0.7 (голое
+    # `(b1|b2|c1|c2)` правило) → _plan_learning unscoped clarify →
+    # v4 LLM planner ~40s → canned «не получилось разобрать». Книги
+    # по уровню не имели интента вовсе — только слова (learning_words).
+    #
+    # Якоря: «книг» + читать/для-изучающих/уровень. Голое «какие книги
+    # почитать» (без learning-контекста) НЕ матчится — остаётся на
+    # обычном book-поиске (негативный тест в
+    # tests/v2/test_r27_learning_intents.py). «слова уровня B2 из
+    # книги X» тоже не матчится (нет «книг* читать» / «книг* для»).
+    (_re(r"\bкниг\w*\s+(?:по)?читать\b.{0,80}"
+         r"\b(?:уров(?:ень|ня|не)\b|(?:уч[уи]\w*|изуча\w+)\s+(?:английск|язык))|"
+         r"\bуров(?:ень|ня|не)\s+[abc][12]\b.{0,60}\bкниг\w*\s+(?:по)?читать"),
+     "learning_books", 0.95),
+    # «книги для уровня B2» / «книги для B2» / «книги для изучающих
+    # английский» / «лёгкие книги для начинающих»
+    (_re(r"\bкниг\w*\s+для\s+(?:уровн\w+|изуча\w+|начинающ\w+|новичк\w+|"
+         r"[abc][12]\b)"),
+     "learning_books", 0.92),
+    # Дополнение А (Q13, тест-ран на 2.7.3+): «что почитать на B2»
+    # уходило в book_recommendation → top_books_by_downloads с
+    # дисклеймером («доклад комиссии по убийству Кеннеди» как чтение
+    # для B2). Learning-формулировка с уровнем — перехват в
+    # learning_books. Plain «что почитать» (без уровня) остаётся на
+    # book_recommendation; «что почитать после X» (book_similar 146) и
+    # «если нравится X» (similar_to 130) защищены приоритетами выше
+    # learning_books (124). Старый гард test_e44::test_cefr_level_
+    # unchanged обновлён под новый маршрут.
+    (_re(r"\b(?:что|чего)\s+(?:по)?читать\b.{0,50}"
+         r"\b(?:[abc][12]\b|уровн\w+|новичк\w+|начинающ\w+)"),
+     "learning_books", 0.93),
+    # «я учу английский, с чего начать?» (нота юзера: «надо советовать
+    # книгу с минимальным порогом вхождения») / «с чего начать изучать
+    # английский» / «учу английский — что почитать»
+    (_re(r"\b(?:уч[уи]\w*|изуча\w+|выучить)\s+(?:английск\w*|язык\w*)"
+         r".{0,60}\b(?:с\s+чего\s+начать|что\s+(?:по)?читать|какие\s+книг)|"
+         r"\bс\s+чего\s+начать\s+(?:учить|изучать)\s+(?:английск\w*|язык)"),
+     "learning_books", 0.93),
+    # EN: «books to read at B2 level», «easy books for (English)
+    # learners», «where do I start learning English»
+    (_re(r"\bbooks?\s+(?:to\s+read\s+)?(?:for|at)\s+(?:level\s+)?[abc][12]\b|"
+         r"\b(?:easy|simple|beginner)\s+books?\s+for\s+(?:english\s+)?learners|"
+         r"\bbooks?\s+for\s+(?:english\s+)?learners\b|"
+         r"\bwhere\s+(?:do\s+i|to)\s+start\s+(?:learning|reading)\s+english"),
+     "learning_books", 0.92),
 
     # ===== composite_compare (Q40-style extreme cross-section) =====
     # Q40 routes here instead of country_compare because the query asks for a

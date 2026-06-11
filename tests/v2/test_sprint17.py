@@ -388,10 +388,13 @@ class ChtoPochitatPosle(unittest.TestCase):
         self.assertEqual(e.book_id, "PG1399")
 
     def test_level_recommendation_not_stolen(self):
-        """«что почитать на уровне B2» must STAY book_recommendation —
-        level queries are not similarity queries."""
+        """Исходный смысл гарда: level-запрос — НЕ similarity-запрос
+        (book_similar не должен красть). R-27 WP1 Дополнение А (Q13):
+        целевой маршрут теперь learning_books (pool + readability), а
+        не book_recommendation → top_books_by_downloads с дисклеймером."""
         m = int_mod.classify("что почитать на уровне B2")
-        self.assertEqual(m.label, "book_recommendation")
+        self.assertNotEqual(m.label, "book_similar")
+        self.assertEqual(m.label, "learning_books")
 
 
 class TokenObservability(unittest.TestCase):
