@@ -95,6 +95,7 @@ from scripts.v2.planner.builders.corpus import (
 from scripts.v2.planner.builders.learning import (
     _plan_export_word_list,
     _plan_learning,
+    _plan_learning_books,
     _plan_lexical_wealth,
     _plan_translate_word_list,
     _plan_translation_quality,
@@ -145,6 +146,8 @@ PLAN_BUILDERS = {
     "word_etymology":       _plan_word_etymology,
     "word_emotion":         _plan_word_emotion,
     "learning":             _plan_learning,
+    # R-27 WP1 (B106) — книги для изучающих язык
+    "learning_books":       _plan_learning_books,
     "top_authors_books":    _plan_top_authors,
     "book_lookup":          _plan_book_lookup,
     "country_compare":      _plan_country_compare,

@@ -140,6 +140,9 @@ INTENT_BUDGETS_S: dict[str, float] = {
 
     # Learning — medium
     "learning": 30.0,
+    # R-27 WP1 (B106) — пул top_books_by_downloads + 10 × book_readability
+    # (~1-2s each, cacheable) + render. 11 tool calls ≤ tool_calls_max=12.
+    "learning_books": 45.0,
     "export_word_list": 10.0,
 
     # Multi-author / composite from R14 (set tight to force downsize)

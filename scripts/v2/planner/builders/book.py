@@ -47,6 +47,25 @@ def _plan_book_lookup(e: Entities) -> QueryPlan:
             expected_cost="cheap",
             explain=f"find_book({e.book_title}, top={top_n})",
         )
+    # R-27 WP1 meta (§10 scope) — «у вас есть Шекспир?» / «Шекспир
+    # есть?»: presence-вопрос разрезолвился в АВТОРА, не в книгу. Старый
+    # путь проваливался в _need_book → неавторитетный clarify → v4 LLM
+    # planner ~40s → canned-фейл. Делегируем в author_metadata
+    # (books_matched / sample_titles / total_downloads) — да/нет +
+    # счётчики за секунды. Guard e.word: «у вас есть слово ardour» —
+    # это про СЛОВО, авторский редирект не должен срабатывать.
+    if e.author_regex and not e.word:
+        from scripts.v2.planner.builders.author import _plan_author_metadata
+        plan = _plan_author_metadata(e)
+        if plan.steps:
+            plan.render_notes = list(plan.render_notes or []) + [
+                "PRESENCE-ВОПРОС: пользователь спрашивает, ЕСТЬ ли этот "
+                "автор в корпусе. Первой строкой ответь явно: "
+                "books_matched > 0 → «да, есть N книг» + 2-3 "
+                "sample_titles + total_downloads; books_matched == 0 → "
+                "честное «нет, в корпусе не нашёл».",
+            ]
+        return plan
     # User said «найди книгу» but didn't name one — extract the rest of
     # the sentence after the trigger as the title query.
     text = (e.raw_misc or {}).get("raw_text", "")
@@ -648,4 +667,10 @@ def _plan_book_extremum(e: Entities) -> QueryPlan:
             "\nНадо вычислить экстремум по другому полю? Скажи конкретнее."
         ),
         explain="book_extremum → clarify (no single-book extremum tool yet)",
+        # R-27 WP1 fail-fast (§10 «самая длинная книга») — корпус-wide
+        # length/rarity extremum требует derived-индекса (corpus_stats_
+        # by_author знает longest_book только per-author). Этот clarify
+        # с рабочими примерами — осознанный ответ; без флага он уходил
+        # в v4 LLM planner на ~40s с тем же исходом.
+        authoritative_clarify=True,
     )

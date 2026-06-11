@@ -1,0 +1,272 @@
+"""R-27 WP1 (B106 + P1.2) — first-session & learning intents.
+
+Прод-жалобы из /feedback (01.06 + 10.06, уже на 2.6.47):
+  · «какие книги почитать, если у меня уровень B2» → intent=learning
+    (0.7, голое CEFR-правило), tool_calls=[], ~40s → canned «не
+    получилось разобрать».
+  · «я учу английский, с чего начать?» — то же; нота юзера: «надо
+    советовать книгу с минимальным порогом вхождения».
+
+Фикс (композиция СУЩЕСТВУЮЩИХ тулов, новых fingerprinted-врапперов нет):
+  1. Интент learning_books → план top_books_by_downloads(top=10) +
+     book_readability × 10 (router-injected pg_id@rank) + CEFR-фильтр
+     на рендере.
+  2. Meta-pack §10: «у вас есть <автор>» → author_metadata-делегация в
+     _plan_book_lookup; обратный порядок «какой автор самый популярный»
+     / «какая книга самая длинная» → corpus_extremum / book_extremum.
+  3. Fail-fast: authoritative_clarify на осознанных clarify
+     (_plan_learning unscoped, _plan_book_extremum length-extremum) —
+     ответ за секунды вместо v4 LLM ~40s.
+
+R2: интент-позитивы падают на до-фиксовом коде (B106-фразы уходили в
+learning/clarify); негативы защищают learning_words, book_recommendation
+(Q30) и обычный book-поиск от угона.
+"""
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from scripts.v2._types import ToolResult
+from scripts.v2.budget import INTENT_BUDGETS_S, RequestBudget
+from scripts.v2.planner import intent as int_mod
+from scripts.v2.planner import plan as plan_mod
+from scripts.v2.planner.builders.book import (
+    _plan_book_extremum,
+    _plan_book_lookup,
+)
+from scripts.v2.planner.builders.learning import (
+    _LEARNING_BOOKS_POOL,
+    _plan_learning,
+    _plan_learning_books,
+)
+from scripts.v2.planner.entities import Entities
+from scripts.v2.planner.router import _inject
+
+
+def _e(text: str, **kw) -> Entities:
+    return Entities(raw_misc={"raw_text": text}, **kw)
+
+
+class LearningBooksIntent(unittest.TestCase):
+    """B106 позитивы — обе прод-формулировки + RU/EN варианты."""
+
+    def test_b106_books_for_b2(self):
+        m = int_mod.classify("какие книги почитать, если у меня уровень B2")
+        self.assertEqual(m.label, "learning_books", m.matched_pattern)
+
+    def test_b106_uchu_angliyskiy_s_chego_nachat(self):
+        m = int_mod.classify("я учу английский, с чего начать?")
+        self.assertEqual(m.label, "learning_books", m.matched_pattern)
+
+    def test_knigi_dlya_urovnya(self):
+        m = int_mod.classify("книги для уровня B2")
+        self.assertEqual(m.label, "learning_books", m.matched_pattern)
+
+    def test_legkie_knigi_dlya_izuchayushchih(self):
+        m = int_mod.classify("лёгкие книги для изучающих английский")
+        self.assertEqual(m.label, "learning_books", m.matched_pattern)
+
+    def test_knigi_pochitat_uchu_angliyskiy(self):
+        m = int_mod.classify("какие книги почитать, если я учу английский?")
+        self.assertEqual(m.label, "learning_books", m.matched_pattern)
+
+    def test_en_books_at_b2_level(self):
+        m = int_mod.classify("what books to read at B2 level?")
+        self.assertEqual(m.label, "learning_books", m.matched_pattern)
+
+    def test_en_easy_books_for_learners(self):
+        m = int_mod.classify("easy books for English learners")
+        self.assertEqual(m.label, "learning_books", m.matched_pattern)
+
+    # ---- негативы: не угонять чужие интенты ----
+
+    def test_plain_pochitat_not_learning_books(self):
+        """«какие книги почитать» БЕЗ learning-контекста — обычный
+        book-поиск / clarify, НЕ learning_books."""
+        m = int_mod.classify("какие книги почитать?")
+        self.assertNotEqual(m.label, "learning_books", m.matched_pattern)
+
+    def test_slova_urovnya_b2_still_learning(self):
+        """Intent-конфьюжн с learning_words: СЛОВА уровня — по-прежнему
+        learning."""
+        m = int_mod.classify("слова уровня B2")
+        self.assertEqual(m.label, "learning", m.matched_pattern)
+
+    def test_q7_words_from_book_still_learning(self):
+        m = int_mod.classify(
+            '20 слов уровня intermediate из "Pride and Prejudice"')
+        self.assertEqual(m.label, "learning", m.matched_pattern)
+
+    def test_slova_iz_knigi_still_learning(self):
+        """«слова … из книги» содержит токен «книги», но это запрос про
+        СЛОВА — learning_books угонять не должен. (Вариант с заглавным
+        титулом после «книги» уходит в author_lookup через E1b
+        bare-genitive ещё ДО этой правки — вне скоупа WP1.)"""
+        m = int_mod.classify("слова уровня B2 из книги")
+        self.assertEqual(m.label, "learning", m.matched_pattern)
+
+    def test_q30_recommendation_unbroken(self):
+        """Q30 остаётся на book_recommendation (регресс-гард)."""
+        m = int_mod.classify(
+            "Какие произведения подойдут для читателя уровня B2: "
+            "не слишком простые, но без плотного слоя архаизмов?"
+        )
+        self.assertEqual(m.label, "book_recommendation", m.matched_pattern)
+
+
+class LearningBooksPlan(unittest.TestCase):
+    """План = пул + book_readability fan-out, без новых тулов."""
+
+    def test_plan_shape(self):
+        p = _plan_learning_books(
+            _e("какие книги почитать, если у меня уровень B2",
+               level="intermediate"))
+        self.assertEqual(p.intent, "learning_books")
+        self.assertFalse(p.needs_clarify)
+        self.assertEqual(len(p.steps), 1 + _LEARNING_BOOKS_POOL)
+        self.assertEqual(p.steps[0].tool, "top_books_by_downloads")
+        self.assertEqual(p.steps[0].args["top"], _LEARNING_BOOKS_POOL)
+        for rank, step in enumerate(p.steps[1:]):
+            self.assertEqual(step.tool, "book_readability")
+            self.assertEqual(step.depends_on, [0])
+            self.assertEqual(step.inject_result_as, f"pg_id@{rank}")
+            self.assertTrue(step.optional)
+
+    def test_plan_registered(self):
+        self.assertIn("learning_books", plan_mod.PLAN_BUILDERS)
+        self.assertIn("learning_books", int_mod.INTENTS)
+
+    def test_b2_band_in_render_notes(self):
+        p = _plan_learning_books(
+            _e("какие книги почитать, если у меня уровень B2",
+               level="intermediate"))
+        notes = " ".join(p.render_notes)
+        self.assertIn("B2", notes)
+        self.assertIn("B1-B2", notes)
+
+    def test_default_is_min_entry_threshold(self):
+        """Без уровня — дефолт «минимальный порог вхождения» (нота
+        юзера из /feedback)."""
+        p = _plan_learning_books(_e("я учу английский, с чего начать?"))
+        notes = " ".join(p.render_notes)
+        self.assertIn("минимальный порог", notes)
+        self.assertIn("flesch_reading_ease", notes)
+
+    def test_fits_request_budget(self):
+        """1 пул + POOL readability ≤ tool_calls_max — иначе router
+        оборвёт план на полпути."""
+        p = _plan_learning_books(_e("книги для уровня B2"))
+        self.assertLessEqual(len(p.steps), RequestBudget().tool_calls_max)
+        self.assertIn("learning_books", INTENT_BUDGETS_S)
+
+
+class RankInjection(unittest.TestCase):
+    """router._inject «pg_id@N» — rank-indexed injection из data["top"]."""
+
+    @staticmethod
+    def _pool(n=3):
+        return ToolResult.success(
+            tool="top_books_by_downloads",
+            data={"top": [{"pg_id": f"PG{i}", "id": f"PG{i}",
+                           "title": f"T{i}", "author": "A",
+                           "downloads": 100 - i} for i in range(n)]},
+        )
+
+    def test_injects_rank_row(self):
+        out = _inject({}, [self._pool()], [0], "pg_id@2")
+        self.assertEqual(out.get("pg_id"), "PG2")
+
+    def test_rank_zero(self):
+        out = _inject({}, [self._pool()], [0], "pg_id@0")
+        self.assertEqual(out.get("pg_id"), "PG0")
+
+    def test_rank_out_of_range_no_key(self):
+        out = _inject({}, [self._pool(2)], [0], "pg_id@5")
+        self.assertNotIn("pg_id", out)
+
+    def test_failed_pool_no_key(self):
+        bad = ToolResult.fail(tool="top_books_by_downloads",
+                              err_type="not_found", message="x")
+        out = _inject({}, [bad], [0], "pg_id@0")
+        self.assertNotIn("pg_id", out)
+
+
+class FailFastClarify(unittest.TestCase):
+    """Task 3 — распознанный интент без плана отвечает сразу
+    (authoritative_clarify), а не через v4 LLM ~40s."""
+
+    def test_unscoped_learning_authoritative(self):
+        p = _plan_learning(_e("дай слова уровня B2", level="intermediate"))
+        self.assertTrue(p.needs_clarify)
+        self.assertTrue(p.authoritative_clarify)
+        # рабочие примеры, а не те, что сами не работают
+        self.assertIn("Pride and Prejudice", p.clarify_question)
+        self.assertIn("книги", p.clarify_question)  # подсказка на learning_books
+
+    def test_longest_book_authoritative(self):
+        m = int_mod.classify("какая самая длинная книга?")
+        self.assertEqual(m.label, "book_extremum", m.matched_pattern)
+        p = _plan_book_extremum(_e("какая самая длинная книга?"))
+        self.assertTrue(p.needs_clarify)
+        self.assertTrue(p.authoritative_clarify)
+        self.assertEqual(p.steps, [])
+
+
+class MetaQueryPack(unittest.TestCase):
+    """P1.2 §10 — только то, что собирается из существующих тулов."""
+
+    # ---- «у вас есть <автор>?» → author_metadata ----
+
+    def test_u_vas_est_author_intent(self):
+        m = int_mod.classify("у вас есть Шекспир?")
+        self.assertEqual(m.label, "book_lookup", m.matched_pattern)
+
+    def test_bare_presence_intent(self):
+        m = int_mod.classify("Шекспир есть?")
+        self.assertEqual(m.label, "book_lookup", m.matched_pattern)
+
+    def test_bare_presence_wh_guard(self):
+        """«Что есть?» — wh-слово, presence-правило молчит."""
+        m = int_mod.classify("Что есть?")
+        self.assertNotEqual(m.label, "book_lookup", m.matched_pattern)
+
+    def test_author_presence_delegates_to_author_metadata(self):
+        p = _plan_book_lookup(
+            _e("у вас есть Шекспир?", author_regex="^Shakespeare,"))
+        self.assertEqual(len(p.steps), 1)
+        self.assertEqual(p.steps[0].tool, "author_metadata")
+        self.assertIn("PRESENCE", " ".join(p.render_notes))
+
+    def test_resolved_book_beats_author_redirect(self):
+        """Если разрезолвилась КНИГА — find_book, как раньше."""
+        p = _plan_book_lookup(
+            _e("у вас есть Гордость и предубеждение?",
+               book_title="Pride and Prejudice"))
+        self.assertEqual(p.steps[0].tool, "find_book")
+
+    def test_word_query_not_author_presence(self):
+        """«у вас есть слово ardour» не должно матчить author-presence,
+        даже если экстрактор зацепил автора заодно."""
+        p = _plan_book_lookup(
+            _e("у вас есть слово ardour?",
+               author_regex="^Shakespeare,", word="ardour"))
+        tools = [s.tool for s in p.steps]
+        self.assertNotIn("author_metadata", tools)
+
+    # ---- обратный порядок superlative-фраз (§10) ----
+
+    def test_kakoy_avtor_samyi_populyarnyi(self):
+        m = int_mod.classify("какой автор самый популярный?")
+        self.assertEqual(m.label, "corpus_extremum", m.matched_pattern)
+
+    def test_kakaya_kniga_samaya_dlinnaya(self):
+        m = int_mod.classify("какая книга самая длинная?")
+        self.assertEqual(m.label, "book_extremum", m.matched_pattern)
+
+
+if __name__ == "__main__":
+    unittest.main()

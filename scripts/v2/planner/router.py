@@ -79,6 +79,24 @@ def _inject(args: dict, prior_results: list[ToolResult],
         first_id = src.data.get("first_id") if isinstance(src.data, dict) else None
         if first_id:
             out["pg_id"] = first_id
+    elif inject_as.startswith("pg_id@"):
+        # R-27 WP1 learning_books — rank-indexed injection: pull row N
+        # from the dependency's data["top"] list (top_books_by_downloads
+        # shape) and inject its pg_id. The consuming step is optional, so
+        # a short pool / failed pool step degrades to invalid_args on
+        # that single step instead of killing the plan.
+        try:
+            rank = int(inject_as.split("@", 1)[1])
+        except ValueError:
+            rank = -1
+        rows = src.data.get("top") if isinstance(src.data, dict) else None
+        if rank >= 0 and isinstance(rows, list) and rank < len(rows):
+            row = rows[rank]
+            # `pg_id` is in V1TopBooksByDownloads.__row_keys__ — the
+            # contract guarantees it; no fallback-key chains (R3).
+            pg = row.get("pg_id") if isinstance(row, dict) else None
+            if pg:
+                out["pg_id"] = pg
     elif inject_as == "scope":
         # use the resolved book id as a scope dict
         first_id = src.data.get("first_id") if isinstance(src.data, dict) else None
