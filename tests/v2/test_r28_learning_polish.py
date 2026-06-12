@@ -47,7 +47,8 @@ from scripts.v2.planner.builders.learning import _LEARNING_BOOKS_POOL
 
 # Формулировки смоука 2.7.8: S1 — базовое правило («книги … уровень»),
 # S3 — intercept-правило аддендума A («что почитать … B2»), плюс
-# P12-проба («без архаизмов» — builder её осознанно игнорирует).
+# P12-проба («без архаизмов» — с 2.7.13 builder её УВАЖАЕТ:
+# entity-driven нота exclude_archaic, см. R-28 P12 rollback-фикс).
 _S1_PHRASING = "какие книги почитать, если у меня уровень B2"
 _S3_PHRASING = "что почитать на B2"
 _ALL_PHRASINGS = (
@@ -86,14 +87,25 @@ class B118PlanEquivalence(unittest.TestCase):
 
     def test_intercept_and_base_plans_identical(self):
         """План S3 (intercept) == план S1 (база): шаги, инжекции,
-        render_notes — байт-в-байт."""
+        render_notes — байт-в-байт. Для «без архаизмов» (R-28 P12,
+        2.7.13) шаги/инжекции те же, а notes = базовые + ровно одна
+        entity-driven нота exclude_archaic — это НЕ развод входов по
+        веткам сборки (точка сборки одна), а осознанная реакция на
+        заявленный фильтр (R-2: applied or disclosed, never silent)."""
         base = _build_for(_S1_PHRASING)
         for q in _ALL_PHRASINGS[1:]:
             with self.subTest(q=q):
                 p = _build_for(q)
                 self.assertEqual(p.intent, base.intent)
                 self.assertEqual(_step_shape(p), _step_shape(base))
-                self.assertEqual(p.render_notes, base.render_notes)
+                if "без архаизмов" in q:
+                    self.assertEqual(p.render_notes[:len(base.render_notes)],
+                                     base.render_notes)
+                    extra = p.render_notes[len(base.render_notes):]
+                    self.assertEqual(len(extra), 1, extra)
+                    self.assertIn("архаизм", extra[0])
+                else:
+                    self.assertEqual(p.render_notes, base.render_notes)
 
     def test_intercept_keeps_rank_injection(self):
         """S3-вход НЕ теряет pg_id@rank: пул + POOL инжектированных
