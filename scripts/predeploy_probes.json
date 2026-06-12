@@ -145,13 +145,14 @@
       "question": "что почитать на B2 без архаизмов",
       "repeat": 3,
       "pass_when": [
-        {"kind": "intent_not_in", "values": ["clarify"]}
+        {"kind": "intent_not_in", "values": ["clarify"]},
+        {"kind": "contains", "field": "answer", "value": "архаизм", "reason": "R-28 P12 (2.7.13, TIGHTENING not relaxation): «без архаизмов» — заявленный фильтр обязан быть применён и продисклозен в КАЖДОМ прогоне (R-2 / Phase 5 W-9: declared filter is applied or disclosed, never silent). С 2.7.6 фраза роутится в learning_books, который ронял exclude_archaic молча — упоминание архаизмов оставалось на усмотрение рендера (temp 0.1) и флипало между прогонами, что и завалило деплой 2.7.12. С 2.7.13 _plan_learning_books ставит детерминированную render-ноту (C2+-банда исключена + честный дисклоз метода) — как book_recommendation на бейзлайне 2.6.45, где P12 стабильно проходил."}
       ],
       "pass_when_across_runs": [
         {"kind": "same_intent_across_runs", "reason": "intent must not flip between runs (e.g., export_to_markdown ↔ learning)"},
         {"kind": "same_contains_across_runs", "field": "answer", "value": "архаизм", "reason": "archaic-disclosure note must consistently appear (or consistently not appear) across 3 runs"}
       ],
-      "notes": "Source PASS: archaic-disclosure note и intent одинаковы во всех 3 прогонах. FAIL: note появляется/исчезает; intent плавает. repeat=3 — probe runs the same question three times, across-runs rules check consistency."
+      "notes": "Source PASS: archaic-disclosure note и intent одинаковы во всех 3 прогонах. FAIL: note появляется/исчезает; intent плавает. repeat=3 — probe runs the same question three times, across-runs rules check consistency. R-28 (2.7.12 rollback post-mortem): причина FAIL — same_contains_across_runs(«архаизм») флип после честной B120-инжекции (payload стал содержательным, learning_books игнорировал exclude_archaic). Латентность исключена статически: 10 × book_readability — 200K-сэмпл + регексы ~1-2s/колл (rag_tools.py), tool-фаза ~15-25s при 45s-бюджете интента, рендер+критик — суммарно сильно под 180s-капом."
     }
   ]
 }

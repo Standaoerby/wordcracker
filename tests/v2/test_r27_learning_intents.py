@@ -163,6 +163,45 @@ class LearningBooksPlan(unittest.TestCase):
         self.assertLessEqual(len(p.steps), RequestBudget().tool_calls_max)
         self.assertIn("learning_books", INTENT_BUDGETS_S)
 
+    # ---- R-28 P12 (деплой 2.7.12 → rollback): exclude_archaic ----
+    # До 2.7.6 «что почитать на B2 без архаизмов» шёл в
+    # book_recommendation с W-9 дисклоз-нотой («архаизм» в ответе в
+    # каждом прогоне → P12 same_contains держался). learning_books
+    # перехватил фразу и ронял e.exclude_archaic молча; с честной
+    # B120-инжекцией (2.7.12) упоминание архаизмов стало LLM-лотереей
+    # → P12 across-runs флип → авто-rollback. R2(b): позитив падает на
+    # до-фиксовом билдере (ноты не было вовсе).
+
+    def test_exclude_archaic_note_present(self):
+        p = _plan_learning_books(
+            _e("что почитать на B2 без архаизмов", exclude_archaic=True))
+        notes = " ".join(p.render_notes)
+        self.assertIn("архаизм", notes)
+        # Фильтр ПРИМЕНЁН, а не только продисклозен: C2+-банда исключается.
+        self.assertIn("C2+", notes)
+        self.assertIn("ИСКЛЮЧИ", notes)
+        # Дисклоз честный: запрещаем «отфильтровал все архаизмы».
+        self.assertIn("эвристическ", notes)
+        self.assertIn("exclude_archaic", p.explain)
+
+    def test_no_archaic_note_without_flag(self):
+        """Без «без архаизмов» нота не ставится — рендер не должен
+        рассуждать про архаизмы там, где юзер не просил."""
+        p = _plan_learning_books(_e("что почитать на B2"))
+        self.assertNotIn("архаизм", " ".join(p.render_notes))
+
+    def test_p12_phrase_sets_exclude_archaic(self):
+        """Экстрактор взводит exclude_archaic на дословной фразе пробы
+        P12 — иначе нота билдера недостижима на проде."""
+        from scripts.v2.planner.entities import _find_exclude_archaic
+        self.assertTrue(_find_exclude_archaic("что почитать на B2 без архаизмов"))
+
+    def test_p12_phrase_routes_to_learning_books(self):
+        """Дословная фраза пробы P12 → learning_books (Дополнение А),
+        пин маршрута, на котором живёт гейт."""
+        m = int_mod.classify("что почитать на B2 без архаизмов")
+        self.assertEqual(m.label, "learning_books", m.matched_pattern)
+
 
 class InterceptPopularityRoute(unittest.TestCase):
     """Дополнение А (Q13, тест-ран на 2.7.3+): learning-формулировки с

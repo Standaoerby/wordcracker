@@ -204,6 +204,40 @@ def _plan_learning_books(e: Entities) -> QueryPlan:
                   "вхождения»: рекомендуй книги с НАИБОЛЬШИМ "
                   "flesch_reading_ease (самые простые для старта)")
 
+    # R-28 P12 (E12 determinism probe; deploy 2.7.12 → rollback) — до
+    # 2.7.6 «что почитать на B2 без архаизмов» шёл в book_recommendation,
+    # чья W-9 нота стабильно дисклозила exclude_archaic → слово
+    # «архаизм» присутствовало в ответе в каждом прогоне и
+    # same_contains_across_runs у P12 держался. Дополнение А (Q13)
+    # перехватило фразу в learning_books, а этот билдер e.exclude_archaic
+    # молча ронял — нарушение R-2-инварианта Phase 5 W-9 («каждый
+    # заявленный фильтр либо реально применён, либо консистентно
+    # disclosed — никогда молча»). Пока B120 кормил book_readability
+    # пустыми args (born-broken 2.7.6..2.7.11), payload был
+    # вырожденно-стабилен и проба не ловила; с честной инжекцией
+    # (2.7.12) payload стал содержательным, упоминание архаизмов
+    # осталось на усмотрение рендера (temp 0.1) → присутствие
+    # «архаизм» флипает между 3 прогонами → P12 FAIL → авто-rollback.
+    # Фикс: фильтр ПРИМЕНЯЕТСЯ на данных, которые план уже тянет, —
+    # банда cefr_heuristic «C2+ (academic / archaic)» исключается из
+    # рекомендаций (book_archaic_words × 10 не влезает в
+    # tool_calls_max=12 при пуле 10; верхняя CEFR-ступень уже кодирует
+    # archaic-сигнал), и метод дисклозится детерминированной нотой —
+    # «архаизм» в ответе в каждом прогоне, как было у
+    # book_recommendation на бейзлайне 2.6.45.
+    archaic_note = None
+    if e.exclude_archaic:
+        archaic_note = (
+            "ПОЛЬЗОВАТЕЛЬ просил «без архаизмов». ПРИМЕНИ фильтр: книги "
+            "с cefr_heuristic «C2+ (academic / archaic)» ИСКЛЮЧИ из "
+            "рекомендаций (покажи их в таблице, но пометь как не "
+            "подходящие). ОБЯЗАТЕЛЬНО проговори в ответе — используя "
+            "слово «архаизмы» — что фильтр эвристический: банда C2+ по "
+            "Flesch reading ease отсекает академичные/архаичные тексты, "
+            "per-word проверки архаизмов на пуле нет. НЕ говори "
+            "«отфильтровал все архаизмы», НЕ замалчивай ограничение."
+        )
+
     notes = [
         "LEARNING_BOOKS: пользователь просит КНИГИ для изучения "
         f"английского. Целевой {target}.\n"
@@ -230,6 +264,8 @@ def _plan_learning_books(e: Entities) -> QueryPlan:
         "корпуса, а не все 47К. НЕ рекомендуй книги, которых нет в "
         "результатах тулов.",
     ]
+    if archaic_note:
+        notes.append(archaic_note)
     return QueryPlan(
         intent="learning_books", entities=e,
         steps=steps,
@@ -237,7 +273,8 @@ def _plan_learning_books(e: Entities) -> QueryPlan:
         explain=(f"learning_books: top_books_by_downloads(top="
                  f"{_LEARNING_BOOKS_POOL}, lang={lang}) → book_readability "
                  f"× {_LEARNING_BOOKS_POOL} (pg_id@rank) → CEFR-фильтр на "
-                 f"рендере ({cefr or e.level or 'min-порог'})"),
+                 f"рендере ({cefr or e.level or 'min-порог'})"
+                 f"{' [exclude_archaic → C2+ excluded + disclose]' if e.exclude_archaic else ''}"),
         render_notes=notes,
     )
 

@@ -441,6 +441,31 @@ class ShippedConfigShape(unittest.TestCase):
         across_kinds = {r["kind"] for r in p12.get("pass_when_across_runs", [])}
         self.assertIn("same_intent_across_runs", across_kinds)
 
+    def test_shipped_config_p12_requires_archaic_disclosure_per_run(self):
+        """R-28 (2.7.12 rollback): P12 «без архаизмов» must require the
+        archaic disclosure in EVERY run, not merely consistently. The
+        per-run `contains архаизм` rule is the gate-side half of the
+        2.7.13 fix (_plan_learning_books exclude_archaic render note);
+        across-runs `same_contains` stays as the E12 determinism check.
+        This is a TIGHTENING — removing the rule (silently relaxing the
+        gate back to LLM-whim consistency) fails this guard."""
+        repo_cfg = Path(__file__).resolve().parents[2] / "scripts" / "predeploy_probes.json"
+        cfg = load_config(repo_cfg)
+        p12 = next(p for p in cfg["probes"] if p["id"] == "P12")
+        contains_rules = [r for r in p12.get("pass_when", [])
+                          if r.get("kind") == "contains"
+                          and r.get("value") == "архаизм"]
+        self.assertEqual(len(contains_rules), 1,
+                         "P12 must carry exactly one per-run contains-архаизм rule")
+        self.assertTrue((contains_rules[0].get("reason") or "").strip(),
+                        "gate criteria changes must carry a justification")
+        # And the across-runs determinism rule must NOT have been dropped
+        # in exchange (that would be a net relaxation of the E12 class).
+        across = [r for r in p12.get("pass_when_across_runs", [])
+                  if r.get("kind") == "same_contains_across_runs"
+                  and r.get("value") == "архаизм"]
+        self.assertEqual(len(across), 1)
+
 
 # ---------------------------------------------------------------------------
 # S-R5-E11 — tool_called / tool_not_called rules must name a REGISTERED tool.
