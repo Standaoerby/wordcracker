@@ -55,10 +55,10 @@ def cat_A():
             d = json.loads(r.read())
             tools = d.get("tools", d) if isinstance(d, dict) else d
             n = len(tools)
-            # 27 rag_tools (26 + author_profile combo tool, Sprint 12)
-            # + 5 learning_tools = 32 total.
-            return n == 32, f"got {n} tools (want 32)"
-    _safe("A3 /api/tools = 32", a3)
+            # 28 rag_tools (26 + author_profile combo tool, Sprint 12
+            # + top_ngrams_by_book, R-29 S1) + 5 learning_tools = 33 total.
+            return n == 33, f"got {n} tools (want 33)"
+    _safe("A3 /api/tools = 33", a3)
 
 
 # ============================== B: tool unit ==============================

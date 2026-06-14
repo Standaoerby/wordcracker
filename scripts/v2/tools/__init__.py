@@ -1,7 +1,7 @@
 """v2 tools, grouped by category. Import this package to register all tools."""
 from scripts.v2.tools.corpus_meta import overview, stats_by_author  # noqa: F401
 from scripts.v2.tools.books import (  # noqa: F401
-    find_book, affinity_book, readability, top_books,
+    find_book, affinity_book, readability, top_books, top_ngrams_book,
 )
 from scripts.v2.tools.authors import (  # noqa: F401
     author_metadata, top_authors, affinity, author_profile, top_ngrams,

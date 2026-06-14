@@ -763,6 +763,101 @@ def top_ngrams_by_author(author_regex: str, n: int = 2, top: int = 20,
         return {"error": "top_ngrams_by_author failed", "details": str(e)}
 
 
+def top_ngrams_by_book(pg_id: str, n: int = 1, top: int = 20,
+                       pos_filter: list[str] | None = None) -> dict:
+    """Raw n-gram frequencies (n=1,2,3) for a SINGLE book's SPGC tokens.
+
+    R-29 S1 / bug A — the honest book-scoped counterpart to
+    `top_ngrams_by_author`. «самые частотные слова в "Dracula"» returns the
+    most frequent words/n-grams IN THAT BOOK by raw count — never an author
+    aggregate over ~10 books, and never affinity (use `affinity_by_book` for
+    corpus-relative signature words).
+
+    Reads the per-book token file directly (no aggregation, no model). The
+    stopword / clean-token filtering is IDENTICAL to `top_ngrams_by_author`
+    (shared STOPWORDS set + `_is_clean_token`), so a book's top-words and an
+    author's top-words are computed by the same rules — no divergent mislabel.
+
+    NOTE: this is kept as a SEPARATE function rather than refactoring
+    `top_ngrams_by_author`'s inner `_scan_one` out to module scope, so adding
+    it does NOT shift that tool's AST fingerprint / force a fixture re-record
+    — same rationale as `warm_period_tokens`. The ~12-line gram loop below is
+    a deliberate, documented duplicate; keep it in sync with `_scan_one`.
+
+    pos_filter (n=1): keep only unigrams whose spaCy POS is in the list
+    (e.g. ['ADJ']). For n=2/3 the filter applies to the first token.
+    """
+    t0 = time.perf_counter()
+    if n not in (1, 2, 3):
+        return {"error": "n must be 1, 2 or 3"}
+    try:
+        pg_id = pg_id.upper() if not pg_id.startswith("PG") else pg_id
+        if not pg_id.startswith("PG"):
+            pg_id = f"PG{pg_id}"
+        f = _tokens_path(pg_id)
+        if not f.exists():
+            return {"error": "tokens file not found for this PG id",
+                    "pg_id": pg_id}
+
+        # Best-effort title for the honest book-scope headline.
+        title = ""
+        try:
+            df = _metadata_df()
+            row = df[df["id"] == pg_id]
+            if len(row):
+                title = row.iloc[0]["title"]
+        except Exception as e:
+            _log(f"top_ngrams_by_book({pg_id}) title lookup failed: {e}")
+
+        with open(f, encoding="utf-8") as fh:
+            toks = [t.strip().lower() for t in fh if t.strip()]
+
+        # Per-book n-gram count — mirrors `_scan_one` in top_ngrams_by_author
+        # (same _is_clean_token + STOPWORDS rules → book/author parity).
+        counter: Counter = Counter()
+        total_ngrams = 0
+        if len(toks) >= n:
+            if n == 1:
+                grams = (t for t in toks)
+            elif n == 2:
+                grams = zip(toks, toks[1:])
+            else:
+                grams = zip(toks, toks[1:], toks[2:])
+            for g in grams:
+                pieces = (g,) if n == 1 else g
+                if not all(_is_clean_token(p) for p in pieces):
+                    continue
+                if all(p in STOPWORDS for p in pieces):
+                    continue
+                counter[" ".join(pieces)] += 1
+                total_ngrams += 1
+
+        if pos_filter:
+            pos_filter = [p.upper() for p in pos_filter]
+            pool = counter.most_common(top * 5)
+            heads = list({key.split(" ", 1)[0] for key, _ in pool})
+            tags = _spacy_pos_tags(heads)
+            top_pairs = [(k, c) for k, c in pool
+                         if tags.get(k.split(" ", 1)[0]) in pos_filter][:top]
+        else:
+            top_pairs = counter.most_common(top)
+
+        out = {
+            "pg_id":        pg_id,
+            "title":        title,
+            "n":            n,
+            "pos_filter":   pos_filter,
+            "book_tokens":  len(toks),
+            "total_ngrams": total_ngrams,
+            "top":          [{"ngram": ng, "count": c} for ng, c in top_pairs],
+        }
+        _log(f"top_ngrams_by_book({pg_id},n={n}) done in "
+             f"{time.perf_counter()-t0:.2f}s, {total_ngrams:,} ngrams")
+        return out
+    except Exception as e:
+        return {"error": "top_ngrams_by_book failed", "details": str(e)}
+
+
 # ============================ TOOL 4: affinity_by_author ============================
 def affinity_by_author(author_regex: str, top: int = 50, min_author_count: int = 5,
                        min_corpus_count: int = 0,
