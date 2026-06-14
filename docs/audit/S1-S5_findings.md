@@ -307,21 +307,25 @@ grounding-контракты); словарь и A/B-фиксы становят
 PR: см. ссылку в конце (база `main`). Воркфлоу `.github/workflows/predeploy.yml` (триггер
 `pull_request → main`, Python **3.11**).
 
-<!-- CI-VERDICT-PLACEHOLDER: заполняется после `gh pr create` + `gh pr checks` -->
+**Факт — CI run [27486698687](https://github.com/Standaoerby/wordcracker/actions/runs/27486698687) (PR #52):**
 
-**Ожидание (с обоснованием):**
-- `tests/v2 (R10 collect + full)` — **должен быть GREEN**: 5 новых тестов = `xfailed` (= pass);
-  чистое добавление, фикстуры не тронуты. (Локально на 3.13: `5 xfailed in 0.52s`; на CI-3.11
-  поведение идентично — тесты версионно-независимы.)
-- `12-probe config sanity` — **GREEN** (конфиг проб не трогали).
-- `Mandatory version-bump` — **ОЖИДАЕМО RED, by design.** Гейт `check_version_bump.py` требует
-  движения `ANALYTICS_VERSION` (`scripts/v2/__version__.py`) на ЛЮБОМ PR→main (exit 3 иначе). Этот PR —
-  audit-доки + xfail-тесты, **изменений analytics-поведения НЕТ**. По safe-max я **намеренно НЕ бампал**
-  версию: бамп — это release/deploy-действие (докстринг `__version__.py`: «bumped by hand on each
-  release»), оно принадлежит реальному фиксу S1/S2 (решение Стэна утром), а не аудит-PR; иначе это
-  ложный release-сигнал. Runbook прямо допускает «красный CI, фикс очевиден/не безопасен в этом режиме →
-  оставить с заметкой». Красный тут — самый ожидаемый и безопасный. **Чтобы загринить:** добавить одну
-  строку-бамп в `__version__.py` (тривиально, обратимо) — но это сознательно оставлено Стэну.
+| Job | Результат | Деталь |
+|---|---|---|
+| `tests/v2 (R10 collect + full)` | ✅ **PASS** (4m56s) | `2511 passed, 15 skipped, 6 xfailed, 678 subtests passed` — **0 failed**. 6 xfail = мои 5 + 1 существующий (`test_cache_ast_fingerprint` D-SF1-4). R10-collect без ошибок; ни один существующий тест не сломан. |
+| `12-probe config sanity` | ✅ **PASS** (10s) | конфиг проб не трогали |
+| `Mandatory version-bump` | ❌ **FAIL** (5s) — **ОЖИДАЕМО, by design** | `[version-bump] ANALYTICS_VERSION did NOT bump: merge-base(origin/main)=fbb7992ea1f7 == current == '2.7.14'. Edit scripts/v2/__version__.py before deploying.` |
+
+**Про version-bump red.** Гейт `check_version_bump.py` требует движения `ANALYTICS_VERSION`
+(`scripts/v2/__version__.py`) на ЛЮБОМ PR→main (exit 3 иначе). Этот PR — audit-доки + xfail-тесты,
+**изменений analytics-поведения НЕТ**. По safe-max версия **намеренно НЕ бампнута**: бамп — это
+release/deploy-действие (докстринг `__version__.py`: «bumped by hand on each release»), принадлежит
+реальному фиксу S1/S2 (решение Стэна), а не аудит-PR; иначе это ложный release-сигнал. Runbook прямо
+допускает «красный CI, фикс очевиден/безопасность в этом режиме под вопросом → оставить с заметкой,
+НЕ долбить». Красный тут — самый ожидаемый и безопасный; долбления не было. **Чтобы загринить:** одна
+строка-бамп в `__version__.py` (тривиально, обратимо) — сознательно оставлено Стэну вместе с go на фикс.
+
+**Вердикт:** содержательные чеки зелёные (тесты + конфиг); единственный red — ожидаемый deploy-гейт,
+объяснён. PR готов к ревью.
 
 ---
 
@@ -331,5 +335,6 @@ PR: см. ссылку в конце (база `main`). Воркфлоу `.githu
 - [x] xfail-тесты-пины на подтверждённые корни (S1×2, S2, S4, S5; S3 — обоснованно отложен).
 - [x] Вердикт по reframe R-29 (подтверждён: пивот на S1+S2).
 - [x] Новые системные корни (N1 хэндсинк-дубли, N2 мёртвый структурный рендер).
-- [ ] CI-вердикт — заполняется после пуша/`gh pr checks` (см. §CI).
+- [x] CI-вердикт — записан (см. §CI): tests/v2 GREEN (0 failed, 6 xfail), probe-config GREEN,
+  version-bump RED (ожидаемо, deploy-гейт).
 - PR ждёт Стэна. **Мерж/деплой — не в этой сессии.**
