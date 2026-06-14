@@ -413,6 +413,54 @@ class ResolveBookE2E(unittest.TestCase):
 
 
 # =====================================================================
+# R-29 WP4 / B108 — RU classics alias-pack (RU title → real corpus work)
+# =====================================================================
+
+
+class RUClassicsAliasPackR29(unittest.TestCase):
+    """B108: common Russian classics named in Russian must resolve to a
+    real corpus work BEFORE the honest text fallback, via the curated
+    KNOWN_BOOKS map (not an LLM «translation» of the title).
+
+    Anchor: «Евгений Онегин» → Eugene Onegin (PG). Pre-fix it fell
+    through to not_found → the 2.7.2 «не найдена в корпусе… попробуй
+    английское название» fallback. (PG ids of the pack are confirmed on
+    SOW via tests/v2/check_titles.py — same gate as every prior entry.)
+    """
+
+    def test_eugene_onegin_nominative_resolves(self):
+        r = er.resolve_book("Евгений Онегин")
+        self.assertEqual(r.decision, "resolved")
+        self.assertEqual(r.resolved["title"], "Eugene Onegin")
+        self.assertTrue((r.resolved["pg_id"] or "").startswith("PG"),
+                        f"expected a PG id, got {r.resolved['pg_id']!r}")
+
+    def test_eugene_onegin_case_forms_resolve(self):
+        # Russian genitive/prepositional are natural phrasings
+        # («что почитать после Евгения Онегина», «как в Евгении Онегине»).
+        for q in ["Евгения Онегина", "Евгении Онегине"]:
+            r = er.resolve_book(q)
+            self.assertEqual(r.decision, "resolved", q)
+            self.assertEqual(r.resolved["title"], "Eugene Onegin", q)
+
+    def test_unknown_ru_title_honest_fallback_no_fabrication(self):
+        # A title that is NOT in the curated pack must NOT be invented into
+        # a resolved book — it stays not_found so the honest text fallback
+        # fires. Mock v1 find_book so the result is corpus-independent.
+        with mock.patch("scripts.rag_tools.find_book",
+                        return_value={"matches": [], "total_matches": 0}):
+            r = er.resolve_book("Квазиблямбенский Трактат о Ничём")
+        self.assertEqual(r.decision, "not_found")
+        self.assertIsNone(r.resolved)
+
+    def test_english_titles_untouched(self):
+        # The pack must not perturb existing EN resolution.
+        r = er.resolve_book("Pride and Prejudice")
+        self.assertEqual(r.decision, "resolved")
+        self.assertEqual(r.resolved["pg_id"], "PG1342")
+
+
+# =====================================================================
 # Prominence index thread-safety + caching
 # =====================================================================
 

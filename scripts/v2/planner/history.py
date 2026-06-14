@@ -201,6 +201,45 @@ def _is_translate_followup(text: str) -> bool:
     has_prior_ref = bool(_PRIOR_OUTPUT_REF.search(text))
     return has_target or has_prior_ref
 
+
+# R-29 WP5 / B107 (repro for B103) — plural-define follow-up. After a
+# turn that listed N words, «дай их значения» / «что значат эти слова» /
+# «их значения» / «значения этих слов» / «define them» asks for the
+# MEANING of the WHOLE prior list. Pre-fix these either weren't seen as
+# follow-ups at all («их» is not a _REF_TRIGGER) or fell through to the
+# head-only word backfill in merge_with_history (`word = words[0]`), so
+# only the FIRST word got defined — Stan's B107 repro returned one word
+# of N. We route them through the SAME prior-words set machinery as the
+# translate follow-up: enrich_word per word returns translation_ru +
+# definition_en (i.e. the «значение» of each word). No new intent / plan
+# / wrapper — reuse translate_word_list.
+#
+# Precision: require BOTH a meaning token AND a plural/list reference, so
+# single-word «что значит ajar» / «значение слова factory» stay on the
+# word_contexts path (no plural ref → no match).
+_DEFINE_MEANING_RE = re.compile(
+    r"значени\w+|значат|означа\w+|смысл\w*|определени\w+|"
+    r"\bmeanings?\b|\bdefinitions?\b|\bdefine\b|\bmean\b",
+    re.IGNORECASE,
+)
+_DEFINE_PLURAL_REF_RE = re.compile(
+    r"\bих\b|\bэти\w*|\bвсех\b|\bтех\b|"
+    r"\bthem\b|\bthese\b|\btheir\b",
+    re.IGNORECASE,
+)
+
+
+def _is_define_followup(text: str) -> bool:
+    """True when the user asks for the MEANINGS of a prior word LIST
+    (plural). Requires a meaning token AND a plural/list reference, so
+    single-word definition queries («что значит X») are not captured —
+    those keep going to word_contexts."""
+    if not text:
+        return False
+    return bool(_DEFINE_MEANING_RE.search(text)
+                and _DEFINE_PLURAL_REF_RE.search(text))
+
+
 # Sprint 19+ — expansion patterns: «покажи все», «полный список»,
 # «все книги серии», «show all», «list all», «give me the full
 # list». User wants the prior intent re-run with a wider top_n
@@ -252,7 +291,8 @@ def _looks_like_followup(text: str) -> bool:
                 or _PROPN_REMOVAL_PATTERNS.search(text)
                 or _is_translate_followup(text)
                 or _is_export_followup(text)
-                or _is_affirmative_opener_followup(text))
+                or _is_affirmative_opener_followup(text)
+                or _is_define_followup(text))
 
 
 # W-1 v2 (2026-05-24): canonical-format reply to author-clarify.
@@ -601,6 +641,14 @@ def infer_followup_intent(text: str,
                 # renderer will see _translate_to=ru and can add
                 # translations to whatever text it generates.
                 return prior_intent.label
+    # R-29 WP5 / B107 — plural-define follow-up («дай их значения», «что
+    # значат эти слова»). Reuse translate_word_list: its plan emits
+    # enrich_word per prior word (translation_ru + definition_en = the
+    # «значение» of each), so the WHOLE prior set is defined, not just
+    # the head. merge_with_history stamps _prior_words below; the plan
+    # builder surfaces an honest clarify when no list is extractable.
+    if _is_define_followup(text) and history:
+        return "translate_word_list"
     # Sprint 20+ B3 — export-followup. «выгрузи в anki/csv/markdown/json»
     # over the prior word-list. Same shape as translate_word_list: when
     # the prior turn was a word-list intent, return export_word_list and
@@ -740,7 +788,11 @@ def merge_with_history(current: Entities, history: list[dict] | None,
     # table column 1) so the plan-builder can chain enrich_word steps
     # over those exact words. v3 finally gets prior-result hand-off for
     # this specific use case — without waiting on v4 LLM planner.
-    if _is_translate_followup(text):
+    # R-29 WP5 / B107 — plural-define follow-up rides the SAME stamp: it
+    # needs the full prior set on _prior_words so _plan_translate_word_list
+    # enriches every word (translation_ru + definition_en = «значение»),
+    # instead of the head-only word backfill above.
+    if _is_translate_followup(text) or _is_define_followup(text):
         rm = dict(backfilled.raw_misc or {})
         rm["_translate_to"] = "ru"
         prior_words = _last_word_list_from_assistant(history)
