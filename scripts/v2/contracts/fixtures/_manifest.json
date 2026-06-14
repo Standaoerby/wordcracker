@@ -6,7 +6,7 @@
   "python_minor": "3.11",
   "results": [
     {
-      "elapsed_s": 0.337,
+      "elapsed_s": 0.339,
       "path": "v2/contracts/fixtures/scripts.rag_tools.top_ngrams_by_book.json",
       "size_bytes": 1238,
       "status": "ok",
