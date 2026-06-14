@@ -31,6 +31,12 @@ TITLES = [
     ("Crime and Punishment", "Dostoyevsky"),
     ("Adventures of Huckleberry Finn", "Twain"),
     ("Alice's Adventures in Wonderland", "Carroll"),
+    # R-29 WP4 / B108 — RU classics alias-pack (KNOWN_BOOKS). Confirm the
+    # PG ids below resolve in SPGC before merging the pack.
+    ("Eugene Onegin", "Pushkin"),            # KNOWN_BOOKS → PG23997
+    ("Dead Souls", "Gogol"),                 # KNOWN_BOOKS → PG1081
+    ("Fathers and Sons", "Turgenev"),        # KNOWN_BOOKS → PG30723
+    ("Notes from the Underground", "Dostoyevsky"),  # KNOWN_BOOKS → PG600
 ]
 
 for title, author in TITLES:
