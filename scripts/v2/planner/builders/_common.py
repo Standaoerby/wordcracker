@@ -396,6 +396,22 @@ def _with_author_copyright_check(builder):
     return wrapped
 
 
+def _ngram_n_from_text(text: str) -> int:
+    """Detect bigram/trigram intent from raw query text → n ∈ {1,2,3}.
+
+    R-29 S1 — shared by `_plan_author_top_words` and `_plan_book_top_words`
+    so the n-bump rule lives in ONE place (the book route mirrors the
+    author route's «топ-15 биграмм у X» → n=2 behaviour). Defaults to 1.
+    """
+    import re
+    t = (text or "").lower()
+    if re.search(r"\bтриграмм|trigram", t):
+        return 3
+    if re.search(r"\bбиграмм|bigram", t):
+        return 2
+    return 1
+
+
 def _need_word(e: Entities) -> QueryPlan:
     return QueryPlan(
         intent="clarify", entities=e, steps=[],

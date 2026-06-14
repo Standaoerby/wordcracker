@@ -1,0 +1,90 @@
+{
+  "book_tokens": 159075,
+  "n": 1,
+  "pg_id": "PG345",
+  "pos_filter": null,
+  "title": "Dracula",
+  "top": [
+    {
+      "count": 1453,
+      "ngram": "me"
+    },
+    {
+      "count": 1156,
+      "ngram": "all"
+    },
+    {
+      "count": 951,
+      "ngram": "him"
+    },
+    {
+      "count": 779,
+      "ngram": "there"
+    },
+    {
+      "count": 570,
+      "ngram": "said"
+    },
+    {
+      "count": 504,
+      "ngram": "one"
+    },
+    {
+      "count": 442,
+      "ngram": "some"
+    },
+    {
+      "count": 394,
+      "ngram": "see"
+    },
+    {
+      "count": 390,
+      "ngram": "know"
+    },
+    {
+      "count": 377,
+      "ngram": "time"
+    },
+    {
+      "count": 376,
+      "ngram": "more"
+    },
+    {
+      "count": 338,
+      "ngram": "come"
+    },
+    {
+      "count": 336,
+      "ngram": "am"
+    },
+    {
+      "count": 329,
+      "ngram": "over"
+    },
+    {
+      "count": 323,
+      "ngram": "van"
+    },
+    {
+      "count": 317,
+      "ngram": "helsing"
+    },
+    {
+      "count": 309,
+      "ngram": "came"
+    },
+    {
+      "count": 299,
+      "ngram": "went"
+    },
+    {
+      "count": 287,
+      "ngram": "only"
+    },
+    {
+      "count": 286,
+      "ngram": "lucy"
+    }
+  ],
+  "total_ngrams": 77696
+}

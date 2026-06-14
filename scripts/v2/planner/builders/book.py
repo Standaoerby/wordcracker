@@ -13,6 +13,7 @@ from scripts.v2.planner.builders._common import (
     PlanStep,
     QueryPlan,
     _need_book,
+    _ngram_n_from_text,
     _smart_clarify_recipe,
     _with_copyright_check,
 )
@@ -214,6 +215,49 @@ def _plan_book_vocab(e: Entities) -> QueryPlan:
             ],
             expected_cost="medium",
             explain=f"find_book → affinity_by_book для «{e.book_title}»",
+        )
+    return _need_book(e)
+
+
+@_with_copyright_check
+def _plan_book_top_words(e: Entities) -> QueryPlan:
+    """R-29 S1 / bug A — honest book-scoped RAW-frequency builder.
+
+    Mirror of `_plan_book_vocab`'s book-fallback mechanic, but routes to
+    `top_ngrams_by_book` (most frequent words/n-grams IN the named book by
+    raw count) — NOT `affinity_by_book` (corpus-relative signature words).
+    Keeps the metric honest: frequency != affinity.
+
+    Reached from `_plan_author_top_words` when the user named a book — the
+    resolved book scope must never collapse into an author aggregate
+    (S1 invariant «book НИКОГДА молча не → author»). `n` mirrors the
+    author route's bigram/trigram bump via the shared `_ngram_n_from_text`.
+    """
+    n = _ngram_n_from_text((e.raw_misc or {}).get("raw_text") or "")
+    top = e.top_n or 20
+    if e.book_id:
+        return QueryPlan(
+            intent="book_top_words", entities=e,
+            steps=[PlanStep(tool="top_ngrams_by_book",
+                            args={"pg_id": e.book_id, "n": n, "top": top,
+                                  "pos_filter": e.pos_filter})],
+            expected_cost="medium",
+            explain=(f"top_ngrams_by_book({e.book_id}, n={n}) — raw frequency "
+                     f"in book (NOT affinity, NOT author aggregate)"),
+        )
+    if e.book_title:
+        return QueryPlan(
+            intent="book_top_words", entities=e,
+            steps=[
+                PlanStep(tool="find_book", args={"title": e.book_title}),
+                PlanStep(tool="top_ngrams_by_book",
+                         args={"n": n, "top": top,
+                               "pos_filter": e.pos_filter},
+                         depends_on=[0], inject_result_as="pg_id"),
+            ],
+            expected_cost="medium",
+            explain=(f"find_book → top_ngrams_by_book для «{e.book_title}» "
+                     f"(n={n}) — raw frequency in book"),
         )
     return _need_book(e)
 

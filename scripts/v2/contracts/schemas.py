@@ -111,6 +111,27 @@ V1TopNgramsByAuthor.__defaults__ = {
 }
 
 
+# R-29 S1 / bug A — book-scoped raw-frequency counterpart to
+# top_ngrams_by_author. Same row shape (ngram, count) so book/author
+# top-words render through the identical path; scoped to ONE book.
+class V1TopNgramsByBook(V1Schema):
+    pg_id: str
+    title: str
+    n: int
+    pos_filter: list[str] | None
+    book_tokens: int
+    total_ngrams: int
+    top: list[dict]
+
+
+V1TopNgramsByBook.__required__ = frozenset({"pg_id", "top"})
+V1TopNgramsByBook.__row_keys__ = frozenset({"ngram", "count"})
+V1TopNgramsByBook.__defaults__ = {
+    "pg_id": "PG345", "title": "", "n": 1, "book_tokens": 0,
+    "total_ngrams": 0, "top": [],
+}
+
+
 class V1AffinityByAuthor(V1Schema):
     author_regex: str
     slug: str
@@ -815,7 +836,8 @@ def _collect_keys(cls: type[V1Schema]) -> frozenset[str]:
 
 _ALL_SCHEMAS: tuple[type[V1Schema], ...] = (
     V1CorpusOverview, V1SemanticSearch, V1CorpusStatsByAuthor,
-    V1TopNgramsByAuthor, V1AffinityByAuthor, V1WordContexts,
+    V1TopNgramsByAuthor, V1TopNgramsByBook, V1AffinityByAuthor,
+    V1WordContexts,
     V1CompareAuthors, V1LexicalDiversity, V1WordCollocates,
     V1BookReadability, V1WordFreqTimeline, V1WordsDisappearingAfter,
     V1WordsAppearingAfter,
@@ -847,7 +869,8 @@ __all__ = [
     "SUCCESS_ERROR_KEYS",
     # rag_tools
     "V1CorpusOverview", "V1SemanticSearch", "V1CorpusStatsByAuthor",
-    "V1TopNgramsByAuthor", "V1AffinityByAuthor", "V1WordContexts",
+    "V1TopNgramsByAuthor", "V1TopNgramsByBook", "V1AffinityByAuthor",
+    "V1WordContexts",
     "V1CompareAuthors", "V1LexicalDiversity", "V1WordCollocates",
     "V1BookReadability", "V1WordFreqTimeline", "V1WordsDisappearingAfter",
     "V1WordsAppearingAfter",

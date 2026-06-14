@@ -101,6 +101,12 @@ LIVE_ARGS: dict[str, dict[str, Any]] = {
         {"author_regex": _WILDE},
     "scripts.rag_tools.top_ngrams_by_author":
         {"author_regex": _AUSTEN, "n": 2},
+    # R-29 S1 / bug A — book-scoped raw-frequency tool. Single-book scan
+    # (fast, NOT a HEAVY_BINDING). Fixture must be re-recorded on prod/SOW
+    # (`record_fixtures`) — until then FixtureCoverageGate flags it RED by
+    # design (bootstrap state; the gate message documents the record step).
+    "scripts.rag_tools.top_ngrams_by_book":
+        {"pg_id": "PG345", "n": 1},
     "scripts.rag_tools.lexical_diversity":
         {"scope": {"author": _STOKER}},
 

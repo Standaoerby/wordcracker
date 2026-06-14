@@ -30,6 +30,7 @@ PROBES = [
     # books
     ("find_book",                {"title": "Pride and Prejudice", "top": 3}),
     ("affinity_by_book",         {"pg_id": "PG1342", "top": 10}),
+    ("top_ngrams_by_book",       {"pg_id": "PG345", "n": 1, "top": 10}),
     ("book_readability",         {"pg_id": "PG1342"}),
     ("book_archaic_words",       {"pg_id": "PG345", "top": 10}),
     # authors

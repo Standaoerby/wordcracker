@@ -15,12 +15,14 @@ from scripts.v2.planner.builders._common import (
     _ambiguous_author_clarify,
     _auto_min_corpus_count,
     _need_author,
+    _ngram_n_from_text,
     _with_author_copyright_check,
     _with_copyright_check,
 )
 from scripts.v2.planner.builders.book import (
     _plan_book_lookup,
     _plan_book_recommendation,
+    _plan_book_top_words,
     _plan_book_vocab,
 )
 
@@ -167,17 +169,21 @@ def _plan_author_top_words(e: Entities) -> QueryPlan:
 
     Stan round 2 Q18: «топ-15 биграмм у Конан Дойла» — same intent but
     n=2. Detect bigram/trigram triggers in raw text and bump `n`.
+
+    R-29 S1 / bug A — book scope is first-class here: «частотные слова в
+    "Онегине"» must route to the book, never collapse into an author
+    aggregate over ~10 books. Mirror of the `_plan_author_vocab` →
+    `_plan_book_vocab` book-fallback, but routed to the honest RAW-frequency
+    book tool (`top_ngrams_by_book`, NOT `affinity_by_book` — frequency is
+    not affinity), and STRENGTHENED to win even when an author is also
+    present: the resolved book is the more specific scope. This is the first
+    concrete instance of the «book НИКОГДА молча не → author» invariant.
     """
+    if e.book_id or e.book_title:
+        return _plan_book_top_words(e)
     if not e.author_regex:
         return _need_author(e)
-    text_lower = (e.raw_misc.get("raw_text") or "").lower()
-    import re
-    if re.search(r"\bтриграмм|trigram", text_lower):
-        n = 3
-    elif re.search(r"\bбиграмм|bigram", text_lower):
-        n = 2
-    else:
-        n = 1
+    n = _ngram_n_from_text((e.raw_misc or {}).get("raw_text") or "")
     return QueryPlan(
         intent="author_top_words", entities=e,
         steps=[PlanStep(tool="top_ngrams_by_author",

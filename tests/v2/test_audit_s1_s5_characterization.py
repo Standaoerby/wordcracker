@@ -53,15 +53,10 @@ from scripts.v2.critic import filter_claims_with_data_evidence
 # fired, never a resolved field.
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "S1 / bug A: _plan_author_top_words (builders/author.py:162-189) ignores "
-    "e.book_id and routes a book-scoped frequency request to "
-    "top_ngrams_by_author on author_regex — book scope collapses into an "
-    "author aggregate. Fix target: a named book is honored (book-scoped "
-    "step), never silently rendered as an author top-words list. Remove this "
-    "xfail when the planner stops collapsing book→author (see "
-    "docs/audit/S1-S5_findings.md §S1)."
-))
+# R-29 S1 FIX LANDED — xfail removed. `_plan_author_top_words` now routes a
+# named book to `top_ngrams_by_book` (book-scoped raw frequency), so this
+# invariant holds and the test passes as a normal green pin. See
+# docs/audit/S1-S5_findings.md §S1 + builders/author.py / builders/book.py.
 def test_s1_book_frequency_does_not_collapse_to_author_aggregate():
     # «самые частотные слова из "Dracula"» — a BOOK-scoped frequency query.
     # Stoker / Dracula (PG345) are public domain — no copyright-refusal path.
@@ -75,14 +70,9 @@ def test_s1_book_frequency_does_not_collapse_to_author_aggregate():
     )
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "S1 / bug A (drop-the-book variant): with a resolved book and no author, "
-    "_plan_author_top_words (builders/author.py:171-172) calls _need_author "
-    "and discards the book, asking the user to name an author instead of "
-    "scoping to the named book. Fix target: a resolved book entity is "
-    "honored, not thrown away. Remove this xfail when the planner stops "
-    "dropping the book (see docs/audit/S1-S5_findings.md §S1)."
-))
+# R-29 S1 FIX LANDED — xfail removed. A resolved book with no author is now
+# honored (routed to top_ngrams_by_book on the book's pg_id) instead of being
+# discarded by _need_author. See docs/audit/S1-S5_findings.md §S1.
 def test_s1_book_frequency_without_author_keeps_the_book():
     e = Entities(book_id="PG345", book_title="Dracula", top_n=20)
     plan = build("author_top_words", e)
