@@ -356,6 +356,41 @@ KNOWN_BOOKS: dict[str, tuple[str, str]] = {
     "войной и миром":             ("PG2600", "War and Peace"),  # inst
     "войну и мир":                ("PG2600", "War and Peace"),  # acc
 
+    # R-29 WP4 / B108 — RU classics alias-pack. «Евгений Онегин» / «Война
+    # и мир» (the latter already covered above) used to fall through to the
+    # honest «не найдена в корпусе… попробуй английское название» fallback
+    # (2.7.2); a curated RU→canonical map resolves расхожая классика to its
+    # real SPGC English translation BEFORE that fallback. PG ids confirmed
+    # id↔title on Project Gutenberg AND must pass tests/v2/check_titles.py
+    # on SOW (same corpus-presence gate as every entry above) before merge.
+    # Only multi-word titles added — bare common words («идиот») are
+    # collision-prone in the unquoted substring scan, so they are omitted.
+    # Eugene Onegin (PG23997, Spalding verse trans.); corpus-attested —
+    # onegin/lensky/tatyana/olga sit in the proper-noun filters.
+    "евгений онегин":             ("PG23997", "Eugene Onegin"),
+    "евгения онегина":            ("PG23997", "Eugene Onegin"),  # gen/acc
+    "евгению онегину":            ("PG23997", "Eugene Onegin"),  # dat
+    "евгением онегиным":          ("PG23997", "Eugene Onegin"),  # inst
+    "евгении онегине":            ("PG23997", "Eugene Onegin"),  # prep
+    "eugene onegin":              ("PG23997", "Eugene Onegin"),
+    "eugene oneguine":            ("PG23997", "Eugene Onegin"),  # PG title spelling
+    # Dead Souls (Gogol, PG1081, Hogarth trans.) — ё and е variants.
+    "мёртвые души":               ("PG1081", "Dead Souls"),
+    "мертвые души":               ("PG1081", "Dead Souls"),
+    "мёртвых душ":                ("PG1081", "Dead Souls"),  # gen
+    "мертвых душ":                ("PG1081", "Dead Souls"),  # gen
+    "dead souls":                 ("PG1081", "Dead Souls"),
+    # Fathers and Sons (Turgenev, PG30723, Garnett; PG title «Fathers and
+    # Children»). Nominative only — gen «отцов и детей» collides with the
+    # generic «отношения отцов и детей».
+    "отцы и дети":                ("PG30723", "Fathers and Sons"),
+    "fathers and sons":           ("PG30723", "Fathers and Sons"),
+    "fathers and children":       ("PG30723", "Fathers and Sons"),
+    # Notes from the Underground (Dostoevsky, PG600, Garnett trans.).
+    "записки из подполья":        ("PG600", "Notes from the Underground"),
+    "notes from the underground": ("PG600", "Notes from the Underground"),
+    "notes from underground":     ("PG600", "Notes from the Underground"),
+
     # Shakespeare — Sprint 17 (Stan readability-compare bug, «Сон в летнюю
     # ночь»). PG1514 is the canonical Project Gutenberg id for A Midsummer
     # Night's Dream; add nominative + genitive + EN apostrophe variants.
