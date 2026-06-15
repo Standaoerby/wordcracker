@@ -104,12 +104,17 @@ class DeployRunner:
         repo_root: Path | str = REPO_ROOT,
         runner_id: str = "deploy_runner",
         audit_path: Path | str | None = None,
+        chat_base_url: Optional[str] = None,
         clock: Optional[Callable[[], str]] = None,
         log: Optional[Callable[..., None]] = None,
     ) -> None:
         self.repo_root = Path(repo_root)
         self.runner_id = runner_id
         self.audit_path = Path(audit_path) if audit_path else (self.repo_root / AUDIT_LOG_NAME)
+        # Live chat endpoint the smoke battery (#3) fires at. Mirrors deploy.sh's
+        # CHAT_BASE_URL default (the local prod chat service on :8890).
+        self.chat_base_url = (chat_base_url or os.environ.get("WC_CHAT_BASE_URL")
+                              or os.environ.get("CHAT_BASE_URL") or "http://127.0.0.1:8890")
         self._clock = clock
         self.log = log if log is not None else print
 
@@ -310,13 +315,25 @@ class DeployRunner:
                           detail="verify OK" if ok else f"verify exit {proc.returncode}")
 
     def run_smoke(self, sha: str) -> StepResult:
-        """=== WP-0 #3 SEAM: smoke-as-code battery (S1-style probes as asserts).
-
-        Returns pass until #3 fills the body. Contract for #3: return
-        `StepResult("smoke", ok=False, detail=...)` on any failed smoke
-        invariant — that triggers the same rollback path as verify/eval. Do
-        NOT change the signature or the `ok` convention."""
-        return StepResult("smoke", ok=True, detail="stub — WP-0 #3 wires smoke-as-code")
+        """WP-0 #3: smoke-as-code battery (runbook §6). Fire the S1-style probe
+        battery at the live chat endpoint. FAIL-CLOSED — a transport error, an
+        empty battery, or any broken invariant returns ok=False and triggers
+        the same rollback path as verify/eval. verify (which gated
+        /health.git_sha == sha) has already run, so the runtime identity is
+        proven before we get here; the battery only asserts behaviour."""
+        # Put the runner's own repo root on sys.path so `scripts.autonomy.smoke`
+        # imports under BOTH `python -m scripts.autonomy.deploy_runner` and a
+        # bare `python scripts/autonomy/deploy_runner.py` invocation.
+        if str(REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT))
+        try:
+            from scripts.autonomy.smoke import run_smoke_battery
+            report = run_smoke_battery(self.chat_base_url, expected_sha=sha)
+        except Exception as e:  # noqa: BLE001 — import OR run failure is fail-closed
+            return StepResult("smoke", ok=False,
+                              detail=f"smoke battery error: {type(e).__name__}: {e}")
+        self.log(f"[runner] {report.detail}")
+        return StepResult("smoke", ok=report.ok, detail=report.detail)
 
     def run_eval_tripwire(self, sha: str) -> StepResult:
         """=== WP-0 #4 SEAM: degradation tripwire (runbook §6).
