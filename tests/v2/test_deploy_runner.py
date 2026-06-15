@@ -140,13 +140,9 @@ class HappyPath(unittest.TestCase):
         self.assertIn(("smoke", "abc123"), r.calls)
         self.assertIn(("eval", "abc123"), r.calls)
 
-    def test_default_eval_tripwire_stub_passes(self):
-        # #4 not yet wired: run_eval_tripwire is still a pass-through stub so the
-        # happy path stays green until that PR lands. (run_smoke is real as of
-        # #3 — its wiring + fail-closed behaviour are pinned in
-        # tests/v2/test_smoke_battery.py.)
-        base = DeployRunner(repo_root=Path("."), log=lambda *a, **k: None)
-        self.assertTrue(base.run_eval_tripwire("x").ok)
+    # run_smoke (#3) and run_eval_tripwire (#4) are now real, fail-closed gates;
+    # their wiring is pinned in tests/v2/test_smoke_battery.py and
+    # tests/v2/test_eval_tripwire.py respectively. No pass-through stub remains.
 
 
 # ---------------------------------------------------------------------------

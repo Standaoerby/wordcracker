@@ -1,0 +1,7 @@
+{
+  "_note": "Eval-tripwire baseline (AUTONOMY_RUNBOOK_R-30 §6) — routing-accuracy degradation detector. UNSTAMPED SEED: pass_rate=null means the tripwire is ARMED-PENDING — scripts/autonomy/eval_tripwire.py runs the eval and reports but NEVER trips while pass_rate is null, so it cannot false-rollback a healthy deploy that merely shows the known-open S1 failures (book->author collapse) which are WP-2/WP-3 work, not a regression. ARM IT on prod once /health.ready=true: `python -m scripts.autonomy.eval_tripwire --update-baseline` records the REAL warm verdicts + pass_rate here (the predeploy_baseline.json pattern; re-stamp is Stan's, runbook S5). The detector LOGIC is fence-protected in scripts/autonomy/; only this DATA file is re-stampable. _note is documentation only — carried forward across re-stamps.",
+  "version": "2.7.20",
+  "recorded_at": null,
+  "pass_rate": null,
+  "verdicts": {}
+}
