@@ -1,0 +1,47 @@
+name: scope-fence
+
+# Cornerstone autonomy gate (AUTONOMY_RUNBOOK_R-30 §5). Hard-fails a PR
+# whose diff reaches the 🔴 (irreversible) zone — deploy-config, CI, secrets,
+# the deploy/destructive scripts, the data/index trees, or a destructive
+# operation (force-push, history rewrite, chroma/DB wipe) smuggled into an
+# allowed file. A red scope-fence ⇒ the PR is not merge-eligible (§3.2), so
+# "max autonomy over everything REVERSIBLE" can never reach the irreversible.
+#
+# pull_request only: the fence gates PRs before merge. (Post-merge on main
+# there is nothing left to fence — and a WP-0 bootstrap PR legitimately
+# touches .github/ + scripts/, so running on push would red main forever.)
+#
+# Stdlib-only engine → no pip install. The 3.11 pin mirrors the rest of CI.
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  scope-fence:
+    name: Scope-fence (🔴 reversibility gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Full history + the PR *head* commit (not the merge commit): the
+          # merge-base diff needs both, exactly like the version-bump job.
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Fetch base branch for merge-base
+        # checkout's narrow refspec may not populate origin/<base>; fetch it
+        # explicitly so `git merge-base HEAD origin/<base>` resolves.
+        run: |
+          git fetch --no-tags origin \
+            "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+
+      - name: Run scope-fence
+        run: |
+          python scripts/scope_fence/check_scope_fence.py \
+            --base-ref "origin/${{ github.base_ref }}"
