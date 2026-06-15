@@ -1,0 +1,102 @@
+# ════════════════════════════════════════════════════════════════════════
+# wordcracker — SCOPE-FENCE DENYLIST                  (AUTONOMY_RUNBOOK §1/§5)
+# ════════════════════════════════════════════════════════════════════════
+#
+# Single source of truth for the 🔴 (irreversible) zone.
+# `scripts/scope_fence/check_scope_fence.py` reads this file and HARD-FAILS
+# the scope-fence CI job (exit 2) when a PR diff:
+#   • touches a DENY path that no ALLOW rescues, OR
+#   • adds a line matching a CONTENT marker (a destructive operation
+#     smuggled into an otherwise-allowed file).
+# A red scope-fence ⇒ the PR is not merge-eligible (runbook §3.2). The 🔴
+# change belongs to Stan's keys, not to an agent (runbook §1).
+#
+# THIS FILE IS SELF-PROTECTED. `DENY scripts/scope_fence/**` below makes any
+# edit to the fence — engine OR this denylist — a violation. Agents cannot
+# widen their own fence (runbook §5). Only Stan, by hand, changes it.
+#
+# ── Directives ──────────────────────────────────────────────────────────
+#   DENY       <glob>    changed path matching it → violation
+#   ALLOW      <glob>    exception; rescues a path a DENY would catch
+#   CONTENT    <regex>   added diff line matching it → violation
+#   SCANEXEMPT <glob>    file whose ADDED lines are NOT content-scanned
+#                        (test fixtures legitimately hold destructive
+#                        strings). Path-DENY still applies to it.
+#
+# Globs: `*`=within one path segment, `?`=one char, `**`=any segments.
+# Matching is on POSIX (`/`) repo-relative, full-path-anchored paths.
+# CONTENT regexes are Python `re` syntax, applied with `search`.
+# `#` lines and blank lines are ignored. The directive value is the rest
+# of the line after the first space (so no inline `#` comments on rules).
+# ════════════════════════════════════════════════════════════════════════
+
+# ── CI / workflows ── autonomy must not edit its own gates ──────────────
+DENY .github/**
+
+# ── Deploy configuration ── compose / image / reverse-proxy / tunnel ────
+DENY Dockerfile
+DENY .dockerignore
+DENY docker-compose*.yml
+DENY compose*.yml
+DENY infra/**
+DENY systemd/**
+
+# ── Secrets / per-host env ── (.env.example template stays editable) ────
+DENY .env
+DENY .env.*
+ALLOW .env.example
+
+# ── Deploy / ship / ops scripts ── the deploy machinery itself ──────────
+DENY scripts/deploy.sh
+DENY scripts/verify_deployed_image.sh
+DENY scripts/predeploy_gate.sh
+DENY scripts/install_systemd_units.sh
+DENY scripts/backup_to_nas.sh
+DENY scripts/ollama_gpu_watcher.sh
+DENY scripts/ship.ps1
+DENY build_lockfile.sh
+
+# ── Destructive / index / DB scripts ── rebuilds & migrations are 🔴 ────
+DENY scripts/migrations/**
+DENY scripts/build_index.py
+DENY scripts/build_index_raw.py
+DENY scripts/build_burrows_vectors.py
+DENY scripts/consolidate_*.sh
+
+# ── Data / corpus / index trees ── never added to or deleted via a PR ───
+DENY data/**
+DENY raw_books/**
+DENY media/**
+
+# ── Autonomy machinery ── self-protected (built across WP-0) ────────────
+# scripts/scope_fence/**  → engine + THIS denylist (self-protection)
+# scripts/autonomy/**     → reserved: runner / tripwire / kill-switch (PR#2,4,5)
+# AUTONOMY_LOG.md         → append-only audit trail; never hand-edited in a PR
+DENY scripts/scope_fence/**
+DENY scripts/autonomy/**
+DENY AUTONOMY_LOG.md
+
+# The fence's own tests must contain destructive strings as fixtures —
+# exempt them from CONTENT scanning. They are not under a DENY path, so an
+# agent editing real app code is still content-scanned.
+SCANEXEMPT tests/v2/test_scope_fence.py
+
+# ── CONTENT markers ── destructive ops / force-push / history rewrite ───
+# These catch a 🔴 operation introduced into a path that is NOT itself
+# denylisted (e.g. app code under scripts/v2/). Kept high-precision to
+# avoid false positives on benign app code.
+#
+# force-push & history rewrite (irreversible on a shared ref)
+CONTENT git\s+push\b[^\n]*(--force\b|\s-f\b|--mirror\b)
+CONTENT git\s+push\b[^\n]*\s\+[\w./*-]+:
+CONTENT git\s+filter-(branch|repo)\b
+CONTENT git\s+reset\s+--hard\s+origin/
+# data / index / secret deletion via shell
+CONTENT rm\s+-[a-zA-Z]*\s+[^\n]*(\bdata\b|\braw_books\b|\bmedia\b|chroma|\.env\b)
+# SQL / collection destruction
+CONTENT (?i)\b(drop\s+(table|database|collection)|truncate\s+table|delete\s+from)\b
+CONTENT \.delete_collection\s*\(
+CONTENT (?i)chroma\w*\.reset\s*\(
+# branch-protection / access changes via API or gh CLI
+CONTENT (?i)branches/[^\s"']+/protection
+CONTENT (?i)gh\s+api\b[^\n]*protection
