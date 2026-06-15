@@ -17,3 +17,9 @@ __pycache__/
 # are deleted on prod separately.
 /test_report_*.md
 /*.bak
+
+# R-30 WP-0 §7: the autonomy audit-log is written at runtime on the prod
+# host by scripts/autonomy/deploy_runner.py (append-only; Stan reads it).
+# Never committed — a tracked AUTONOMY_LOG.md would also be a scope-fence
+# DENY path. Anchored to the repo root.
+/AUTONOMY_LOG.md
