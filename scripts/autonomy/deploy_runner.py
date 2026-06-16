@@ -39,8 +39,11 @@ Clean seams for the rest of WP-0 (override the method, keep the contract —
 `StepResult(ok=False, ...)` from a gate triggers the rollback path):
   * `run_smoke()`        — WP-0 #3 wires the real smoke-as-code battery.
   * `run_eval_tripwire()`— WP-0 #4 wires the 40-q eval + committed baseline.
-  * `write_audit()` / `check_killswitch()` — WP-0 #5 hardens the audit-log
-    (`AUTONOMY_LOG.md`, runbook §7) and the kill-switch.
+  * `write_audit()` / `check_killswitch()` — WP-0 #5: now backed by the shared
+    `scripts/autonomy/control.py` (audit-log + kill-switch, runbook §7), which
+    the merge-step (`scripts/autonomy/merge_gate.py`, §3) imports too — both
+    autonomous paths honour ONE freeze and write ONE audit format, correlated
+    by SHA. No stub remains.
 
 Stdlib-only, no project import — runs on the prod host with a bare interpreter
 and imports instantly (same property as scripts/scope_fence/check_scope_fence.py
@@ -55,14 +58,22 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
 # scripts/autonomy/deploy_runner.py → parents[2] == repo root
 REPO_ROOT = Path(__file__).resolve().parents[2]
+# Bootstrap the repo root onto sys.path so the self-protected `control` sibling
+# (kill-switch + audit-log, #5) imports under BOTH `python -m
+# scripts.autonomy.deploy_runner` AND a bare `python
+# scripts/autonomy/deploy_runner.py` on the prod host — the same dance
+# run_smoke / run_eval_tripwire already do for their siblings.
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+from scripts.autonomy import control  # noqa: E402  (after the sys.path bootstrap)
+
 IMAGE_NAME = "wordcracker-textlab"
-AUDIT_LOG_NAME = "AUTONOMY_LOG.md"
+AUDIT_LOG_NAME = control.AUDIT_LOG_NAME  # re-export — single source lives in control.py
 
 # --- exit codes ------------------------------------------------------------
 # Distinct integers so the caller (and Stan, reading the audit-log) can tell
@@ -236,22 +247,15 @@ class DeployRunner:
             self.log(err)
 
     def check_killswitch(self) -> StepResult:
-        """Kill-switch read (runbook §7). `ok=True` == clear to proceed.
+        """Kill-switch read (runbook §7). `ok=True` == clear to deploy.
 
-        WP-0 #5 OWNS the full semantics (where the flag lives, audit on
-        refuse, the merge-step half). This minimal real check — env
-        `WC_AUTONOMY_KILLSWITCH` truthy, or an `AUTONOMY_KILLSWITCH` flag file
-        at repo root — makes the runner honour a freeze from day one so the
-        seam is proven wired, not stubbed."""
-        env = os.environ.get("WC_AUTONOMY_KILLSWITCH", "").strip().lower()
-        if env not in ("", "0", "false", "no", "off"):
-            return StepResult("killswitch", ok=False,
-                              detail="env WC_AUTONOMY_KILLSWITCH is set")
-        flag = self.repo_root / "AUTONOMY_KILLSWITCH"
-        if flag.exists():
-            return StepResult("killswitch", ok=False,
-                              detail=f"flag file present: {flag.name}")
-        return StepResult("killswitch", ok=True, detail="clear")
+        Delegates to the shared `control.read_killswitch` so the deploy path and
+        the merge-step (`merge_gate.py`) honour the EXACT same freeze — env
+        `WC_AUTONOMY_KILLSWITCH` truthy, or an `AUTONOMY_KILLSWITCH` flag file at
+        the repo root. Engaged → `run()` writes a KILLSWITCH_REFUSE line and
+        refuses before anything is touched."""
+        ks = control.read_killswitch(self.repo_root)
+        return StepResult("killswitch", ok=not ks.engaged, detail=ks.reason)
 
     def sync_main(self) -> StepResult:
         """R-CLEAN-START (runbook §2/§4): `git checkout main && git pull`.
@@ -367,45 +371,41 @@ class DeployRunner:
     def _now(self) -> str:
         if self._clock is not None:
             return self._clock()
-        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return control.now_utc()
 
     def _audit(self, event: str, *, target: Optional[str] = None,
                previous: Optional[str] = None, gate: Optional[str] = None,
                deploy_rc: Optional[int] = None, rollback_rc: Optional[int] = None,
                detail: str = "") -> str:
-        """Build one human-readable audit line and hand it to `write_audit`.
-        Field set covers the deploy side of runbook §7 (timestamp, event,
-        target/previous SHA, which gate, deploy/rollback exit codes); the
-        merge side (PR#, flipped pins, scope-fence, eval-delta) is written by
-        the auto-merge machinery (#5)."""
-        parts = [self._now(), event]
+        """Build one DEPLOY-side audit line (runbook §7) via the shared
+        `control.format_audit_line`, and hand it to `write_audit`. Field set:
+        target/previous SHA, which gate tripped, the deploy.sh / rollback exit
+        codes — the "результат деплоя/отката" half. The MERGE half (PR#, flipped
+        pins, scope-fence, eval-delta) is the merge-step's line (`merge_gate.py`);
+        both share `control`'s one format + one sink, correlated by SHA."""
+        fields: list[tuple[str, object]] = []
         if target is not None:
-            parts.append(f"target={target or '-'}")
+            fields.append(("target", target or "-"))
         if previous is not None:
-            parts.append(f"previous={previous or '-'}")
+            fields.append(("previous", previous or "-"))
         if gate:
-            parts.append(f"gate={gate}")
+            fields.append(("gate", gate))
         if deploy_rc is not None:
-            parts.append(f"deploy_rc={deploy_rc}")
+            fields.append(("deploy_rc", deploy_rc))
         if rollback_rc is not None:
-            parts.append(f"rollback_rc={rollback_rc}")
-        parts.append(f"runner={self.runner_id}")
-        line = "  ".join(parts)
-        if detail:
-            line += f"  :: {detail}"
+            fields.append(("rollback_rc", rollback_rc))
+        fields.append(("runner", self.runner_id))
+        line = control.format_audit_line(self._now(), event, fields, detail)
         self.write_audit(line)
         return line
 
     def write_audit(self, line: str) -> None:
-        """=== WP-0 #5 SEAM: audit-log sink (runbook §7).
-
-        Base impl appends one line to `AUTONOMY_LOG.md` (the file Stan reads).
-        Append-only; written at runtime on the prod host, never hand-edited in
-        a PR (the file is a DENY path in the scope-fence). #5 hardens this
-        (structured fields, the merge-side record, kill-switch integration)."""
-        self.audit_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.audit_path.open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
+        """Audit-log sink (runbook §7) — appends one line to `AUTONOMY_LOG.md`
+        via the shared `control.append_audit` (append-only, parent created on
+        demand). The file is a scope-fence DENY path: written at runtime on the
+        prod host, never hand-edited in a PR. Tests override this to capture
+        lines in memory."""
+        control.append_audit(self.audit_path, line)
 
 
 # ---------------------------------------------------------------------------
