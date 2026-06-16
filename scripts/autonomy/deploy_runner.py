@@ -336,13 +336,21 @@ class DeployRunner:
         return StepResult("smoke", ok=report.ok, detail=report.detail)
 
     def run_eval_tripwire(self, sha: str) -> StepResult:
-        """=== WP-0 #4 SEAM: degradation tripwire (runbook §6).
-
-        Runs the 40-q eval + smoke battery against the committed baseline and
-        trips on pass-rate < baseline-ε. Returns pass until #4 fills the body.
-        Contract for #4: `StepResult("eval_tripwire", ok=False, detail=...)` on
-        a trip → rollback."""
-        return StepResult("eval_tripwire", ok=True, detail="stub — WP-0 #4 wires eval-tripwire")
+        """WP-0 #4: degradation tripwire (runbook §6). Fire the routing-accuracy
+        eval at the live endpoint and trip on pass-rate < baseline−ε. FAIL-SAFE
+        on the baseline side — an unstamped baseline never trips, so it can't
+        false-rollback a healthy deploy — and FAIL-CLOSED on errors (any
+        tripwire import/run error → ok=False → rollback)."""
+        if str(REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT))
+        try:
+            from scripts.autonomy.eval_tripwire import run_eval_tripwire_battery
+            report = run_eval_tripwire_battery(self.chat_base_url, sha=sha)
+        except Exception as e:  # noqa: BLE001 — import OR run failure is fail-closed
+            return StepResult("eval_tripwire", ok=False,
+                              detail=f"eval-tripwire error: {type(e).__name__}: {e}")
+        self.log(f"[runner] {report.detail}")
+        return StepResult("eval_tripwire", ok=report.ok, detail=report.detail)
 
     def run_rollback(self, previous_sha: str) -> StepResult:
         """`bash scripts/deploy.sh --rollback <sha>` — redeploy the previous
