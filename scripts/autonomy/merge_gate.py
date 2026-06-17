@@ -173,3 +173,42 @@ class MergeStep:
         """Audit-log sink (runbook §7) — appends to `AUTONOMY_LOG.md` via the
         shared `control.append_audit`. Tests override this to capture in memory."""
         control.append_audit(self.audit_path, line)
+
+
+class GhMergeStep(MergeStep):
+    """Production `MergeStep` — the auto-merge mechanism wired (R-30 Phase B B2).
+
+    Fills the `do_merge` seam the base class left open with `gh pr merge <pr>
+    --squash --auto`, the way #3 / #4 filled the deploy runner's smoke /
+    eval-tripwire seams. Everything ELSE — the kill-switch gate, the single §7
+    audit line, the never-retry contract — is inherited from `MergeStep.run()`
+    unchanged, so one freeze still stops both the merge and the deploy path and
+    the audit format stays identical across both.
+
+    `--squash` is the locked merge method (one commit per PR, in step with
+    version-bump-per-PR). `--auto` is the server-side backstop: GitHub performs
+    the merge only once the required status checks go green, so the token can
+    never bypass the tests even if it leaks (Phase B B1 risk radius).
+
+    Because `--auto` is asynchronous, ``ok=True`` means **auto-merge was
+    ENABLED**, not that the PR is already merged — GitHub merges later when the
+    checks pass. The post-merge deploy is therefore triggered SEPARATELY off the
+    real main-HEAD advance, never off this return value (Phase B B2 STEP D).
+
+    Requires, on the prod host (SOW): `gh` authenticated with a token that has
+    Pull-requests:write (B1) AND "Allow auto-merge" enabled on the repo (B1).
+    Without either, `gh` exits non-zero → `MergeResult(ok=False)` → `run()`
+    records MERGE_FAILED (loud, correct), no silent half-merge.
+    """
+
+    def do_merge(self, ctx: MergeContext) -> MergeResult:
+        import subprocess
+        proc = subprocess.run(
+            ["gh", "pr", "merge", str(ctx.pr), "--squash", "--auto"],
+            cwd=str(self.repo_root), text=True, capture_output=True,
+        )
+        out = (proc.stdout or "").strip()
+        err = (proc.stderr or "").strip()
+        if proc.returncode == 0:
+            return MergeResult(ok=True, detail=out or f"auto-merge enabled #{ctx.pr}")
+        return MergeResult(ok=False, detail=f"gh exit {proc.returncode}: {err or out}")
