@@ -22,7 +22,7 @@ WHY OUTSIDE THE FENCE:
   gated. Hence `scripts/pr_watch.py`, deliberately not under the fence.
 
 ONE POLL PASS (per open PR authored by the agent):
-  A. gather facts  — `gh pr checks` / `gh pr view` (read-only).
+  A. gather facts  — a single `gh pr view --json …,statusCheckRollup` (read-only).
   B. evaluate()    — the PURE §3 decision (no I/O): MERGE | WAIT | SKIP_FENCED |
                      SKIP_ALREADY. The locked §3 gate (Phase B B1):
                        • required checks (NOT the fence) all SUCCESS, and
@@ -66,9 +66,11 @@ from scripts.autonomy.merge_gate import GhMergeStep, MergeContext  # noqa: E402
 from scripts.autonomy import deploy_runner  # noqa: E402  (exit-code bands, no copy)
 
 # ── The §3 gate inputs (locked, Phase B B1) ────────────────────────────────
-# EXACT job names as GitHub / `gh pr checks --json name` reports them — the
-# `name:` fields of the predeploy + scope-fence workflows. Drift here = a check
-# silently ignored, so they are pinned, not pattern-matched.
+# EXACT job names as `gh pr view --json statusCheckRollup` reports them — the
+# CheckRun `name` (bare job name, NOT prefixed by the workflow) / StatusContext
+# `context` of the predeploy + scope-fence workflows. Drift here = a check
+# silently ignored (→ loud WARN in gather_facts), so they are pinned, not
+# pattern-matched. Verified byte-exact against PR #63's rollup (R-30 B3 hotfix).
 REQUIRED_CHECKS = (
     "tests/v2 (R10 collect + full directory run)",
     "Mandatory version-bump",
@@ -212,6 +214,38 @@ def decide_deploy(remote_sha: str, last_deployed_sha: str,
     return DeployDecision(DEPLOY, f"new main {remote_sha}")
 
 
+# ─────────────────────────────────────────────────────── STEP A helper ──
+def _rollup_state(row) -> Optional[tuple]:
+    """Normalise ONE `statusCheckRollup` row to (check-name, STATE_UPPER), or
+    None for a blank/unusable row. The rollup is a GraphQL union the API mixes:
+
+      • CheckRun     — {name, status, conclusion}: the state is `conclusion`
+        once `status == "COMPLETED"` (SUCCESS / FAILURE / TIMED_OUT / CANCELLED /
+        ACTION_REQUIRED / NEUTRAL / SKIPPED / …); while still running it is the
+        `status` itself (QUEUED / IN_PROGRESS / PENDING / WAITING) — a
+        non-SUCCESS sentinel, so an unfinished run can never read green.
+      • StatusContext — {context, state}: the name is `context`, the state is
+        `state` directly (SUCCESS / FAILURE / PENDING / …).
+
+    Detection keys off `__typename` when present and falls back to the row's own
+    shape, so it also survives a `gh` build that omits `__typename`. The same
+    {name → state} pairs then feed the unchanged aggregation in `gather_facts`."""
+    if not isinstance(row, dict):
+        return None
+    is_status_ctx = (row.get("__typename") == "StatusContext"
+                     or ("__typename" not in row and "context" in row))
+    if is_status_ctx:
+        name, state = row.get("context") or "", row.get("state") or ""
+    else:  # CheckRun (the common case) or an unknown CheckRun-shaped node
+        name = row.get("name") or ""
+        state = ((row.get("conclusion") or "")
+                 if (row.get("status") or "").upper() == "COMPLETED"
+                 else (row.get("status") or ""))
+    if not name:
+        return None
+    return name, state.upper()
+
+
 class PrWatcher:
     """One poll pass of ``wordcracker-pr-watch``: evaluate each open PR (STEP
     A→B→C) and trigger a deploy on a real main advance (STEP D).
@@ -336,20 +370,19 @@ class PrWatcher:
         return subprocess.run(argv, cwd=str(self.repo_root), text=True,
                               capture_output=True)
 
-    def _gh_json(self, argv: List[str], *, accept_nonzero: bool = False):
-        """Run a `gh ... --json ...` command and parse its stdout. Returns the
-        parsed value, or None on a real failure (logged). A read failure
-        degrades to None → the PR is simply re-evaluated next poll, never merged
-        on missing facts.
+    def _gh_json(self, argv: List[str]):
+        """Run a `gh … --json …` command and parse its stdout. Returns the parsed
+        value, or None on a real failure (logged). A read failure degrades to
+        None → the PR is simply re-evaluated next poll, never merged on missing
+        facts.
 
-        `accept_nonzero` is for `gh pr checks`, whose exit code ENCODES the
-        aggregate check state (0 all-pass, 8 pending, non-zero on failure) while
-        STILL emitting the per-check JSON — so a non-zero exit there is not a
-        tool error and its body must be read (else a red fence / pending checks
-        would look like "no facts"). For `gh pr view` / `gh pr list`, a non-zero
-        exit IS a real error (default)."""
+        `gh pr view` / `gh pr list` encode NO state in their exit code, so a
+        non-zero exit IS a real error. (The old `gh pr checks` path — whose exit
+        code did encode check state — was dropped in R-30 B3: the prod-host gh
+        does not support `gh pr checks --json`; check state now comes from
+        `gh pr view --json statusCheckRollup`.)"""
         proc = self._run(argv)
-        if proc.returncode != 0 and not accept_nonzero:
+        if proc.returncode != 0:
             self.log(f"[pr-watch] {' '.join(argv[:3])} failed rc={proc.returncode}: "
                      f"{(proc.stderr or '').strip()}")
             return None
@@ -367,18 +400,29 @@ class PrWatcher:
         return [d["number"] for d in data if isinstance(d, dict) and "number" in d]
 
     def gather_facts(self, pr) -> PrFacts:
-        """STEP A — collect the §3 facts for one PR via read-only `gh`:
-          • `gh pr checks --json name,state` → per-check state (a name counts as
-            SUCCESS only if EVERY row for it is SUCCESS), with the Scope-fence
-            job's state held out separately;
-          • `gh pr view --json labels,autoMergeRequest,headRefOid` → labels,
-            whether auto-merge is already enabled, and the head SHA."""
-        checks_raw = self._gh_json(["gh", "pr", "checks", str(pr),
-                                    "--json", "name,state"], accept_nonzero=True) or []
+        """STEP A — collect the §3 facts for one PR with a SINGLE read-only
+        `gh pr view --json …,statusCheckRollup` call:
+          • `statusCheckRollup` → per-check state (a name counts as SUCCESS only
+            if EVERY row for it is SUCCESS), with the Scope-fence job's state held
+            out separately. The rollup mixes CheckRun + StatusContext rows; both
+            are normalised to one {name → STATE} dict by `_rollup_state`;
+          • `labels` / `autoMergeRequest` / `headRefOid` → labels, whether
+            auto-merge is already enabled, and the head SHA.
+
+        Check state is read from `statusCheckRollup`, NOT `gh pr checks --json`:
+        the prod-host (SOW) `gh` does not support that flag, so the old path
+        returned no rows → every required check looked non-green → a silent,
+        permanent WAIT (R-30 B3 hotfix). `gh pr view --json` works on that gh,
+        and `evaluate`'s input shape is unchanged."""
+        view = self._gh_json(["gh", "pr", "view", str(pr), "--json",
+                              "labels,autoMergeRequest,headRefOid,statusCheckRollup"]) or {}
+
+        rollup = view.get("statusCheckRollup") or []
         agg: dict = defaultdict(list)
-        for c in checks_raw:
-            if isinstance(c, dict):
-                agg[c.get("name", "")].append((c.get("state") or "").upper())
+        for row in rollup:
+            pair = _rollup_state(row)
+            if pair is not None:
+                agg[pair[0]].append(pair[1])
         checks: dict = {}
         for name, states in agg.items():
             if states and all(s == "SUCCESS" for s in states):
@@ -387,8 +431,15 @@ class PrWatcher:
                 non = [s for s in states if s != "SUCCESS"]
                 checks[name] = "FAILURE" if "FAILURE" in non else (non[0] if non else "")
 
-        view = self._gh_json(["gh", "pr", "view", str(pr), "--json",
-                              "labels,autoMergeRequest,headRefOid"]) or {}
+        # Never WAIT in silence on a check-name drift: a NON-EMPTY rollup that
+        # contains not one of the pinned required names means the names moved
+        # (workflow rename / prefix / a gh JSON-shape change) — say so loudly, so
+        # the next mismatch surfaces at the log instead of as a mystery forever-WAIT.
+        if rollup and not any(c in checks for c in REQUIRED_CHECKS):
+            self.log(f"[pr-watch] WARN: required check names not found in rollup for "
+                     f"PR {pr}: got [{', '.join(sorted(checks))}] — expected all of "
+                     f"[{', '.join(REQUIRED_CHECKS)}] (check-name drift?)")
+
         labels = [l.get("name", "") for l in (view.get("labels") or [])
                   if isinstance(l, dict)]
         return PrFacts(
