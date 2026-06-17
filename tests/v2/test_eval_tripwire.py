@@ -6,8 +6,10 @@ Pins:
   - check_tripwire is a pure decision: trips iff pass-rate < baseline − ε;
     FAIL-SAFE — an absent OR unstamped (pass_rate=null) baseline never trips;
   - baseline load/missing/corrupt + re-stamp (write_baseline) round-trip;
-  - the SHIPPED eval cases are well-formed and the SHIPPED baseline ships
-    UNSTAMPED so the tripwire can't false-rollback before a prod re-stamp;
+  - the SHIPPED eval cases are well-formed and the SHIPPED baseline is ARMED
+    (stamped) so the degradation net is live on SOW after the deploy runner's
+    `git pull` — a host-local stamp would be wiped, so arming must ship in the
+    repo (R-30 Phase B B0.1);
   - the runner's run_eval_tripwire maps the report → StepResult, fail-closed on
     any tripwire error.
 
@@ -162,15 +164,27 @@ class ShippedArtifacts(unittest.TestCase):
         self.assertIn("top_ngrams_by_book", called)
         self.assertIn("top_ngrams_by_author", called)
 
-    def test_shipped_baseline_is_unstamped_failsafe(self):
-        # The committed baseline ships with pass_rate=null so the tripwire is
-        # armed-pending and CANNOT false-rollback before a prod re-stamp.
+    def test_shipped_baseline_is_armed_and_wellformed(self):
+        # The committed baseline is intentionally ARMED (stamped), not unstamped:
+        # the deploy runner does `git checkout main && git pull` before reading
+        # it (deploy_runner.sync_main), so a host-local stamp would be wiped —
+        # the degradation net is only live on SOW if the armed pass_rate ships in
+        # the repo (R-30 Phase B B0.1). Pin that it is stamped + well-formed, and
+        # that the armed floor actually behaves.
         baseline = load_baseline(DEFAULT_BASELINE)
         self.assertIsNotNone(baseline, f"shipped baseline missing at {DEFAULT_BASELINE}")
-        self.assertIsNone(baseline.get("pass_rate"),
-                          "shipped baseline must be UNSTAMPED (pass_rate=null) — fail-safe")
-        # and the fail-safe is real: even a 0% run does not trip against it
-        self.assertFalse(check_tripwire(_rep(0.0), baseline)[0])
+        rate = baseline.get("pass_rate")
+        self.assertIsInstance(rate, (int, float),
+                              "shipped baseline must be ARMED (numeric pass_rate) so the "
+                              "tripwire is live on SOW after git pull — R-30 B0.1")
+        self.assertTrue(0.0 <= rate <= 1.0, f"pass_rate out of range: {rate}")
+        self.assertTrue(baseline.get("recorded_at"),
+                        "armed baseline must carry recorded_at provenance")
+        # the armed net is real: a 0% run TRIPS against it; its own rate HOLDS.
+        self.assertTrue(check_tripwire(_rep(0.0), baseline)[0],
+                        "armed baseline must TRIP on a 0% run")
+        self.assertFalse(check_tripwire(_rep(rate), baseline)[0],
+                         "armed baseline must HOLD at its own pass-rate")
 
 
 # ---------------------------------------------------------------------------
