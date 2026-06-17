@@ -42,6 +42,7 @@ from scripts.autonomy.merge_gate import (  # noqa: E402
 from scripts.pr_watch import (  # noqa: E402
     evaluate,
     decide_deploy,
+    _rollup_state,
     PrFacts,
     PrWatcher,
     REQUIRED_CHECKS,
@@ -289,43 +290,167 @@ class Evaluate(unittest.TestCase):
 
 
 # ===========================================================================
-# Phase B B2 — Part 2 / STEP A: gather_facts reads gh output robustly
+# R-30 B3 hotfix / STEP A: gather_facts reads check state from statusCheckRollup
+# (the prod-host gh does NOT support `gh pr checks --json`). Fixtures use the
+# REAL pinned names captured from PR #63's rollup.
 # ===========================================================================
 
+def _checkrun(name, conclusion="SUCCESS", status="COMPLETED"):
+    """A CheckRun rollup node exactly as `gh pr view --json statusCheckRollup`
+    emits it (the #63 ground-truth shape)."""
+    return {"__typename": "CheckRun", "name": name,
+            "status": status, "conclusion": conclusion}
+
+
+def _statusctx(context, state):
+    """A legacy StatusContext rollup node (commit-status API)."""
+    return {"__typename": "StatusContext", "context": context, "state": state}
+
+
+def _all_green_rollup():
+    """Every required check + the scope-fence COMPLETED/SUCCESS — the #63 shape
+    (all CheckRun, the real pinned names)."""
+    return [_checkrun(c) for c in REQUIRED_CHECKS] + [_checkrun(FENCE_JOB)]
+
+
+def _view_with_rollup(rollup, *, labels=(SELF_REVIEW_LABEL,),
+                      auto_merge=None, head="abc"):
+    """The single `gh pr view --json …,statusCheckRollup` payload gather_facts
+    now reads — labels + auto-merge + head SHA + the rollup, in one object."""
+    return json.dumps({
+        "labels": [{"name": n} for n in labels],
+        "autoMergeRequest": auto_merge,
+        "headRefOid": head,
+        "statusCheckRollup": rollup,
+    })
+
+
+class _RollupWatcher(PrWatcher):
+    """PrWatcher whose single `gh pr view` returns a scripted rollup view, and
+    which records every `_run` argv so a test can assert `gh pr checks` is never
+    invoked again (depending on it was the B3 bug)."""
+
+    def __init__(self, view_json, **kw):
+        kw.setdefault("repo_root", Path("."))
+        kw.setdefault("runner_id", "test")
+        kw.setdefault("log", lambda *a, **k: None)
+        super().__init__(**kw)
+        self._view_json = view_json
+        self.argvs = []
+
+    def _run(self, argv):
+        self.argvs.append(list(argv))
+        if "view" in argv:
+            return subprocess.CompletedProcess(argv, 0, self._view_json, "")
+        return subprocess.CompletedProcess(argv, 0, "null", "")  # no other call expected
+
+
 class GatherFacts(unittest.TestCase):
-    def test_checks_parsed_when_gh_checks_exits_nonzero(self):
-        # `gh pr checks` exits non-zero when any check is pending/failing but
-        # STILL emits the JSON. gather_facts must read it — otherwise a red
-        # fence reads as "no facts" → WAIT instead of SKIP_FENCED.
-        rows = [{"name": FENCE_JOB, "state": "FAILURE"}] + \
-               [{"name": c, "state": "SUCCESS"} for c in REQUIRED_CHECKS]
-        checks_json = json.dumps(rows)
-        view_json = json.dumps({"labels": [{"name": SELF_REVIEW_LABEL}],
-                                "autoMergeRequest": None, "headRefOid": "abc"})
+    def test_all_green_rollup_yields_merge(self):
+        # The #63 case that used to hang on WAIT: all required + fence green
+        # (CheckRun, real names) + the self-reviewed label → MERGE.
+        w = _RollupWatcher(_view_with_rollup(_all_green_rollup()))
+        facts = w.gather_facts(63)
+        self.assertEqual(facts.fence_state, "SUCCESS")
+        for c in REQUIRED_CHECKS:
+            self.assertEqual(facts.checks[c], "SUCCESS")
+        self.assertEqual(facts.head_sha, "abc")
+        self.assertEqual(evaluate(facts).action, MERGE)
 
-        class _W(PrWatcher):
-            def _run(self, argv):
-                if "checks" in argv:
-                    return subprocess.CompletedProcess(argv, 8, checks_json, "")  # nonzero
-                return subprocess.CompletedProcess(argv, 0, view_json, "")
+    def test_never_calls_gh_pr_checks(self):
+        # Regression guard for the B3 root cause: fact-gathering must NOT depend
+        # on `gh pr checks` (the prod-host gh rejects `--json` there) — one read,
+        # via `gh pr view`.
+        w = _RollupWatcher(_view_with_rollup(_all_green_rollup()))
+        w.gather_facts(63)
+        self.assertTrue(any("view" in a for a in w.argvs))      # used pr view
+        self.assertFalse(any("checks" in a for a in w.argvs))   # never pr checks
 
-        w = _W(repo_root=Path("."), runner_id="test", log=lambda *a, **k: None)
-        facts = w.gather_facts(58)
+    def test_fence_failure_checkrun_skips_fenced(self):
+        # A red scope-fence (CheckRun COMPLETED/FAILURE) → fence_state FAILURE →
+        # SKIP_FENCED, not WAIT.
+        rollup = [_checkrun(c) for c in REQUIRED_CHECKS] + \
+                 [_checkrun(FENCE_JOB, conclusion="FAILURE")]
+        w = _RollupWatcher(_view_with_rollup(rollup))
+        facts = w.gather_facts(63)
         self.assertEqual(facts.fence_state, "FAILURE")
-        self.assertEqual(evaluate(facts).action, SKIP_FENCED)   # not WAIT
+        self.assertEqual(evaluate(facts).action, SKIP_FENCED)
+
+    def test_in_progress_required_check_is_not_success(self):
+        # A still-running required check (status != COMPLETED) reads as its
+        # status (non-SUCCESS), never green → WAIT.
+        rollup = _all_green_rollup()
+        rollup[0] = _checkrun(REQUIRED_CHECKS[0], conclusion=None, status="IN_PROGRESS")
+        w = _RollupWatcher(_view_with_rollup(rollup))
+        facts = w.gather_facts(63)
+        self.assertEqual(facts.checks[REQUIRED_CHECKS[0]], "IN_PROGRESS")
+        self.assertEqual(evaluate(facts).action, WAIT)
+
+    def test_legacy_status_context_node_parsed(self):
+        # A legacy StatusContext row (context/state) is normalised like a CheckRun;
+        # not being a REQUIRED_CHECK, it does not block the green required set.
+        rollup = _all_green_rollup() + [_statusctx("ci/legacy", "FAILURE")]
+        w = _RollupWatcher(_view_with_rollup(rollup))
+        facts = w.gather_facts(63)
+        self.assertEqual(facts.checks["ci/legacy"], "FAILURE")
+        self.assertEqual(evaluate(facts).action, MERGE)
 
     def test_duplicate_check_name_is_green_only_if_all_green(self):
-        rows = [{"name": "X", "state": "SUCCESS"}, {"name": "X", "state": "FAILURE"}]
-        view_json = json.dumps({"labels": [], "autoMergeRequest": None, "headRefOid": ""})
-
-        class _W(PrWatcher):
-            def _run(self, argv):
-                if "checks" in argv:
-                    return subprocess.CompletedProcess(argv, 1, json.dumps(rows), "")
-                return subprocess.CompletedProcess(argv, 0, view_json, "")
-
-        w = _W(repo_root=Path("."), runner_id="test", log=lambda *a, **k: None)
+        # Same aggregation rule as before, now over rollup rows: any non-green
+        # row for a name makes the name non-green.
+        rollup = [_checkrun("X", conclusion="SUCCESS"),
+                  _checkrun("X", conclusion="FAILURE")]
+        w = _RollupWatcher(_view_with_rollup(rollup, labels=()))
         self.assertEqual(w.gather_facts(1).checks["X"], "FAILURE")
+
+    def test_name_drift_warns_loudly_and_waits(self):
+        # STEP 3: a NON-EMPTY rollup with NONE of the pinned required names →
+        # a loud WARN (never a silent WAIT) and WAIT (required checks all absent).
+        logs = []
+        rollup = [_checkrun("totally / renamed check"),
+                  _statusctx("ci/other", "SUCCESS")]
+        w = _RollupWatcher(_view_with_rollup(rollup), log=logs.append)
+        facts = w.gather_facts(99)
+        self.assertTrue(any("required check names not found in rollup" in m
+                            for m in logs))
+        self.assertEqual(evaluate(facts).action, WAIT)
+
+    def test_empty_rollup_waits_without_drift_warning(self):
+        # No rows yet (checks not started) → plain WAIT, and NO drift WARN — the
+        # warning is only for a non-empty rollup whose names don't match.
+        logs = []
+        w = _RollupWatcher(_view_with_rollup([]), log=logs.append)
+        facts = w.gather_facts(99)
+        self.assertFalse(any("not found in rollup" in m for m in logs))
+        self.assertEqual(evaluate(facts).action, WAIT)
+
+
+class RollupStateNormalise(unittest.TestCase):
+    """Unit coverage for `_rollup_state` — the union-node normaliser."""
+
+    def test_completed_checkrun_uses_conclusion(self):
+        self.assertEqual(_rollup_state(_checkrun("A", "SUCCESS")), ("A", "SUCCESS"))
+        self.assertEqual(_rollup_state(_checkrun("A", "FAILURE")), ("A", "FAILURE"))
+
+    def test_running_checkrun_uses_status_not_conclusion(self):
+        row = _checkrun("A", conclusion=None, status="IN_PROGRESS")
+        self.assertEqual(_rollup_state(row), ("A", "IN_PROGRESS"))
+
+    def test_status_context_uses_context_and_state(self):
+        self.assertEqual(_rollup_state(_statusctx("ci/x", "pending")), ("ci/x", "PENDING"))
+
+    def test_missing_typename_falls_back_to_shape(self):
+        self.assertEqual(
+            _rollup_state({"name": "A", "status": "COMPLETED", "conclusion": "SUCCESS"}),
+            ("A", "SUCCESS"))
+        self.assertEqual(
+            _rollup_state({"context": "ci/x", "state": "SUCCESS"}), ("ci/x", "SUCCESS"))
+
+    def test_blank_or_nameless_row_is_dropped(self):
+        self.assertIsNone(_rollup_state({}))
+        self.assertIsNone(_rollup_state("nonsense"))
+        self.assertIsNone(_rollup_state(
+            {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}))
 
 
 # ===========================================================================
