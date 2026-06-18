@@ -200,10 +200,22 @@ def _plan_author_top_words(e: Entities) -> QueryPlan:
 def _plan_author_vocab(e: Entities) -> QueryPlan:
     # Sprint 18 — book-scope override. «характерные прилагательные в
     # "Dorian Gray"» matched author_vocab intent (pattern «характерные
-    # слов») but the user explicitly named a book, not an author. Fall
-    # through to _plan_book_vocab instead of pestering for an author —
-    # the book entity is enough to compute affinity_by_book signature.
-    if not e.author_regex and (e.book_id or e.book_title):
+    # слов») but the user explicitly named a book, not an author. Route
+    # to _plan_book_vocab → affinity_by_book.
+    #
+    # WP-1 PR-2 (2026-06-18, route-affinity-book-pride) — a NAMED BOOK now
+    # wins UNCONDITIONALLY, even when an author_regex is ALSO present. The
+    # old `not e.author_regex and …` guard was defeated on the live path:
+    # rag_v2._needs_entity_help fires for author_vocab whenever the regex
+    # extractor surfaced a book but no author (it only checks author_regex),
+    # so the LLM entity-help backfills the BOOK's own author («фирменные
+    # слова в книге Pride and Prejudice» → Austen). With the author then
+    # set, the old guard skipped the book branch and widened book→author
+    # (affinity_by_author). This mirrors _plan_author_top_words' own
+    # unconditional book-first check and honours the S1 invariant «book
+    # НИКОГДА молча не → author». (Offline repro + negative test:
+    # tests/v2/test_wp1_pr2_affinity_book_scope.py.)
+    if e.book_id or e.book_title:
         return _plan_book_vocab(e)
     if not e.author_regex:
         return _need_author(e)
