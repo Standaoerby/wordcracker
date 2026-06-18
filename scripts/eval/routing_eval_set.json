@@ -308,10 +308,10 @@
       "id": "route-similar-to-lovecraft",
       "question": "посоветуй что-нибудь в стиле Lovecraft",
       "_visa": "confirmed-2026-06-18",
-      "_note": "Stan visaed: 'в стиле <author>' → author similarity, NOT a book recommendation. Ground-truth intent=author_closest, which _plan_author_closest dispatches as the author_influences tool (closest neighbours by Burrows Delta). The 'посоветуй что-нибудь' phrasing leans book-rec, so the incumbent may route to find_book_by_topic and fail here — that disagreement is exactly what this case measures.",
+      "_note": "Stan visaed: 'в стиле <author>' → author similarity, NOT a book recommendation. The author-similarity reading dispatches the author_influences tool (closest neighbours by Burrows Delta) — that is the ground-truth. The intent LABEL is allowed to be EITHER author_closest OR similar_to: the live router classifies this phrasing as similar_to, whose builder (_plan_similar_to) emits exactly the same author_closest/author_influences plan, so both labels are correct dispatches for the same tool (D-R30-10, WP-1 PR-2 2026-06-18). The tool assert is the real ground-truth; the intent assert accepts both labels so a correct route does not false-fail on the label alone. The 'посоветуй что-нибудь' phrasing leans book-rec, so the incumbent may route to find_book_by_topic and fail the tool asserts here — that disagreement is exactly what this case measures.",
       "assert": [
-        {"kind": "intent_in", "values": ["author_closest"], "reason": "visaed: style-of-an-author = author similarity"},
-        {"kind": "tool_called", "name": "author_influences", "reason": "author_closest intent dispatches the author_influences tool (Burrows Delta neighbours)"},
+        {"kind": "intent_in", "values": ["author_closest", "similar_to"], "reason": "visaed: style-of-an-author = author similarity; both labels dispatch author_influences (D-R30-10)"},
+        {"kind": "tool_called", "name": "author_influences", "reason": "author similarity dispatches the author_influences tool (Burrows Delta neighbours)"},
         {"kind": "tool_not_called", "name": "find_book_by_topic", "reason": "visaed AGAINST the book-recommendation reading"}
       ]
     },
