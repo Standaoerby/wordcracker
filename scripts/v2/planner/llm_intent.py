@@ -51,6 +51,7 @@ from typing import Optional
 import requests
 
 from scripts.v2.planner.intent import INTENTS, IntentMatch
+from scripts.v2.planner.orch_format import orch_format, INTENT_SCHEMA
 
 log = logging.getLogger("wordcracker.v2.planner.llm_intent")
 
@@ -430,7 +431,10 @@ def classify_and_extract(text: str, history: list[dict] | None = None
         # `format=json` forces Ollama to constrain output to valid JSON.
         # Available on recent Ollama; if older runtime ignores it, our
         # _parse_full_json still scrapes a JSON block out of the text.
-        "format": "json",
+        # WP-1 PR-1 (WC_ORCHESTRATOR_FORMAT): "json" by default (no-op);
+        # =schema swaps in INTENT_SCHEMA so Ollama constrains the label to the
+        # real taxonomy + the entity slots the parser reads (structured output).
+        "format": orch_format(INTENT_SCHEMA),
         # num_ctx MUST match the renderer's TokenBudget(model).ctx so the
         # shared wordcracker:v2 runner isn't rebuilt on a ctx flip (S-P2).
         "options": {

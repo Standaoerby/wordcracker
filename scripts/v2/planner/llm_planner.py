@@ -61,6 +61,7 @@ from scripts.v2.planner.plan_spec import (
     validate as validate_plan,
 )
 from scripts.v2.planner.tool_catalog import build_planner_prompt
+from scripts.v2.planner.orch_format import orch_format, PLANNER_SCHEMA
 
 log = logging.getLogger("wordcracker.v2.planner.llm_planner")
 
@@ -354,7 +355,11 @@ def _call_ollama(user_msg: str) -> str:
             {"role": "user", "content": user_msg},
         ],
         "stream": False,
-        "format": "json",
+        # WP-1 PR-1 (WC_ORCHESTRATOR_FORMAT): "json" by default — byte-for-byte
+        # the incumbent. WC_ORCHESTRATOR_FORMAT=schema swaps in PLANNER_SCHEMA so
+        # Ollama constrains the plan to the PlanSpec shape (structured outputs).
+        # temperature / num_ctx / keep_alive are untouched (S-P2 runner share).
+        "format": orch_format(PLANNER_SCHEMA),
         "options": {
             "temperature": 0.0,
             "num_predict": LLM_PLANNER_NUM_PREDICT,
