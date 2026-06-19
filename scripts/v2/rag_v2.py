@@ -1439,7 +1439,9 @@ def ask(
         # bounced out (no author / no book / no word / etc).
         obs_mod.log_request({
             "question_truncated": question[:300],
-            "intent": intent.label,
+            # WP-1 PR-3: log the disposition, mirroring the out_of_scope log.
+            "intent": "clarify",
+            "original_intent": intent.label,
             "intent_confidence": intent.confidence,
             "plan_steps": [],
             "tool_calls": [],
@@ -1469,7 +1471,13 @@ def ask(
             "iterations": 0,
             "model": model,
             "elapsed_sec": round(time.perf_counter() - t0, 2),
-            "intent": intent.label,
+            # WP-1 PR-3: report the DISPOSITION, not the classifier's guess, so
+            # the eval/tripwire matcher (intent_in/intent_not_in:["clarify"])
+            # tests real clarify behaviour. Mirrors the out_of_scope return
+            # below; original_intent preserves the underlying label for any
+            # label-dependent consumer (admin /failed renders "was: X").
+            "intent": "clarify",
+            "original_intent": intent.label,
             "intent_confidence": intent.confidence,
         }
     if plan.out_of_scope_reason:
@@ -1950,7 +1958,12 @@ def ask_stream(
         clarify_answer = plan.clarify_question or ""
         obs_mod.log_request({
             "question_truncated": question[:300],
-            "intent": intent.label,
+            # WP-1 PR-3: disposition + preserved label, consistent with ask()
+            # and with the out_of_scope log below. Log-only — the SSE wire
+            # events (clarify/answer/done) are untouched, so 8890 stays
+            # byte-identical (no fixture re-record).
+            "intent": "clarify",
+            "original_intent": intent.label,
             "intent_confidence": intent.confidence,
             "plan_steps": [],
             "tool_calls": [],
