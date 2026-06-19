@@ -151,6 +151,13 @@ def _drop_author_self_name(author_regex: str, words: list[dict]) -> list[dict]:
             "min_corpus_count": {"type": "integer",
                                  "description": "default 0; bump to 500+ для filtering OOV/имен"},
             "pos_filter":       {"type": "array", "items": {"type": "string"}},
+            "sort_by":          {"type": "string",
+                                 "enum": ["keyness", "logratio", "freq"],
+                                 "description": "ранжирование: keyness=G² (default), "
+                                                "logratio=размер эффекта, freq=старое affinity"},
+            "min_ll":           {"type": "number",
+                                 "description": "порог значимости по G² (default 15.13 ≈ "
+                                                "p<0.0001; 6.63 ≈ p<0.01, 10.83 ≈ p<0.001)"},
         },
         "required": ["author_regex"],
     },
@@ -184,21 +191,34 @@ def _drop_author_self_name(author_regex: str, words: list[dict]) -> list[dict]:
     # the FINAL rows finds zero names AND the cap-ratio verification
     # actually ran). Bump invalidates cached rows recorded by the leaky
     # chain.
-    wrapper_version="v5-r27-propn-gazetteer",
+    # Keyness upgrade (RAG_TASK) — rows now rank by log-likelihood G² with a
+    # LogRatio companion + significance floor; exposes sort_by + min_ll and
+    # surfaces g2/log_ratio in the view. Bump invalidates cached affinity-ratio
+    # rows recorded by the pre-keyness chain.
+    wrapper_version="v6-keyness-g2logratio",
 )
 @v1_contract(v1_fn="scripts.rag_tools.affinity_by_author",
              schema=V1AffinityByAuthor)
 def affinity_by_author(author_regex: str, top: int = 50,
                        min_author_count: int = 5, min_corpus_count: int = 0,
-                       pos_filter: list[str] | None = None) -> ToolResult:
+                       pos_filter: list[str] | None = None,
+                       sort_by: str = "keyness",
+                       min_ll: float | None = None) -> ToolResult:
     from scripts.rag_tools import affinity_by_author as _v1
 
-    raw = _v1(author_regex=author_regex, top=top,
-              min_author_count=min_author_count,
-              min_corpus_count=min_corpus_count, pos_filter=pos_filter)
+    v1_kwargs = {"author_regex": author_regex, "top": top,
+                 "min_author_count": min_author_count,
+                 "min_corpus_count": min_corpus_count, "pos_filter": pos_filter,
+                 "sort_by": sort_by}
+    # Only forward min_ll when explicitly set, so the engine's significance
+    # default (15.13 ≈ p<0.0001) applies otherwise.
+    if min_ll is not None:
+        v1_kwargs["min_ll"] = min_ll
+    raw = _v1(**v1_kwargs)
     query = {"author_regex": author_regex, "top": top,
              "min_author_count": min_author_count,
-             "min_corpus_count": min_corpus_count, "pos_filter": pos_filter}
+             "min_corpus_count": min_corpus_count, "pos_filter": pos_filter,
+             "sort_by": sort_by, "min_ll": min_ll}
 
     if isinstance(raw, dict) and raw.get("error"):
         err = str(raw["error"])
@@ -380,7 +400,7 @@ def affinity_by_author(author_regex: str, top: int = 50,
 
         if not rows:
             view = vb.build_top_n_table(
-                rows=[], columns=["rank", "word", "affinity"],
+                rows=[], columns=["rank", "word", "g2", "log_ratio"],
                 empty_reason=EmptyReason.FILTERED_OUT,
                 empty_message_ru=(
                     f"Нет фирменных слов автора {author_name} при "
@@ -403,19 +423,22 @@ def affinity_by_author(author_regex: str, top: int = 50,
                            data_validity=DataValidity.EMPTY_UNEXPECTED)
             return result
 
-        # Build rows with rank
+        # Build rows with rank. Keyness columns (G² + LogRatio) are the
+        # linguist-facing measures; rel_freq (old affinity) stays in the raw
+        # data for reference but the table leads with the statistics.
+        def _fmt(v, nd):
+            return f"{v:.{nd}f}" if isinstance(v, (int, float)) else "—"
+
         view_rows = []
         for i, r in enumerate(rows[:top], start=1):
             if not isinstance(r, dict):
                 continue
             # V1AffinityByAuthor canonical row key is `word` (rag_tools.py:735).
-            # The pre-Phase-2 fallback to `token` was phantom — v1 never sets it.
             view_rows.append({
                 "rank": i,
                 "word": r.get("word") or "—",
-                "affinity": (f"{r.get('affinity'):.3f}"
-                              if isinstance(r.get("affinity"), (int, float))
-                              else "—"),
+                "g2": _fmt(r.get("g2"), 2),
+                "log_ratio": _fmt(r.get("log_ratio"), 2),
             })
 
         view_caveats: list[str] = []
@@ -431,7 +454,7 @@ def affinity_by_author(author_regex: str, top: int = 50,
 
         view = vb.build_top_n_table(
             rows=view_rows,
-            columns=["rank", "word", "affinity"],
+            columns=["rank", "word", "g2", "log_ratio"],
             headline=f"Фирменные слова — {author_name}",
             requested_n=top,
             caveats=view_caveats,

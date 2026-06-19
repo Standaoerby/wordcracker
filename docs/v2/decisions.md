@@ -6,6 +6,60 @@
 
 ---
 
+## 2026-06-19 — Keyness word-selection: log-likelihood G² + LogRatio replaces the affinity ratio
+
+Ships in **2.7.33** (RAG_TASK_keyness_word_selection). The "characteristic
+vocabulary" output is now a statistically defensible **keyness** measure a corpus
+linguist trusts and can cite — not a raw frequency-ratio.
+
+**Why.** `affinity(w) = (ac/author_tokens)/(cc/corpus_total)` had no significance
+test, so (a) a word 5× in the author / 1× in the corpus scored huge but
+meaningless, and (b) uniqueness-sorted hapax noise outranked genuinely
+characteristic frequent vocabulary. The heavy downstream noise-filter stack was
+compensating for a measure that surfaced noise upstream.
+
+**Decision (corpus-linguistics standard).** Per word, target = author/book,
+reference = **corpus-minus-target** (`corpus_counts.csv` INCLUDES the target's
+own books — verified on live data, so `o2 = cc − ac`, `n2 = corpus_total −
+target_tokens`):
+
+- **G² (Dunning log-likelihood)** — significance; the default ranking key (desc).
+- **LogRatio (Hardie)** — effect size; `log2((o1/n1)/(o2/n2))` with +0.5 smoothing
+  on `o2==0` so unique words get a finite, bounded value instead of dumping at the
+  top. Sign = direction (>0 overused = a positive/​signature key).
+- **rel_freq** — the old ratio, kept as a reference column (not dropped).
+
+Stan's confirmed defaults (2026-06-19): corpus-minus-target reference, G²-default
+sort, `min_ll=15.13` (p<0.0001; 6.63/10.83 documented options), keep `rel_freq`.
+
+**Single source of truth.** `scripts/keyness.py` holds the formula (R6 — no copied
+stats); used by the author engine (`spgc_author_affinity.py`), the book engine
+(inline in `learning_tools.affinity_by_book`) and `learning_words`. CSV columns
+become `[word, author_count, corpus_count, rel_freq, g2, log_ratio]`, sorted G²
+desc. `affinity` is kept in v1 result rows as a back-compat alias = `rel_freq`
+(compare_authors + renderer + tests read it).
+
+**Derived-cache refresh (WP-C).** `AFFINITY_SCHEMA_VERSION=2` in keyness.py;
+`affinity_by_author` treats a CSV as current only if it carries the keyness
+columns (cheap header read) — a stale legacy CSV regenerates on next request, a
+stale `_affinity_clean.csv` is ignored in favour of the regenerated base. No batch
+precompute; runs on SOW (corpus mounted).
+
+**Tools.** `affinity_by_author` / `affinity_by_book` expose `sort_by ∈ {keyness,
+logratio, freq}` + `min_ll`, default to positive keys ranked by G², and surface
+`g2`/`log_ratio` in the typed view + table. Existing noise filters kept (lighter
+now). RENDER_PROMPT rule 15 names the measures (tool-grounded ⇒ no honesty
+caveat). Validation: `tests/v2/test_keyness_stats.py` (hand-worked 2×2, smoothing,
+ranking-differs, unique-5×-word no longer #1, end-to-end v1 sort).
+
+**Fixture follow-up (R-RESTAMP).** v1 output shape changed (new row keys), so the
+affinity_by_author / affinity_by_book / learning_words / compare_authors fixtures
+must be re-recorded on SOW (`record_fixtures`, corpus needed). Until then
+`FixtureFreshnessGate` flags those four bindings stale on CI — expected; the local
+ship pipeline deselects the gate (Python-minor false-fail).
+
+---
+
 ## 2026-06-03 — S-P2c: LLM latency log + fixture determinism + warmup model-only trim
 
 Ships in **2.6.40** (branch `s-p2c-fixture-determinism`, off the merged S-B8

@@ -38,6 +38,13 @@ from scripts.v2.contracts.schemas import V1AffinityByBook
             "pos_filter":          {"type": "array", "items": {"type": "string"}},
             "min_corpus_count":    {"type": "integer", "description": "default 200"},
             "exclude_proper_nouns": {"type": "boolean", "description": "default true"},
+            "sort_by":             {"type": "string",
+                                    "enum": ["keyness", "logratio", "freq"],
+                                    "description": "ранжирование: keyness=G² (default), "
+                                                   "logratio=размер эффекта, freq=старое affinity"},
+            "min_ll":              {"type": "number",
+                                    "description": "порог значимости по G² "
+                                                   "(default 15.13 ≈ p<0.0001)"},
         },
         "required": ["pg_id"],
     },
@@ -55,14 +62,19 @@ from scripts.v2.contracts.schemas import V1AffinityByBook
     # same toponym / character-name classes (Baskerville moor place
     # names, Hound character surnames). Bumping invalidates cached rows
     # that still carry them.
-    wrapper_version="v5-w4-toponym-propn",
+    # Keyness upgrade (RAG_TASK) — book-scope rows now rank by log-likelihood
+    # G² with a LogRatio companion + significance floor; exposes sort_by +
+    # min_ll and surfaces g2/log_ratio. Bump invalidates pre-keyness rows.
+    wrapper_version="v6-keyness-g2logratio",
 )
 @v1_contract(v1_fn="scripts.learning_tools.affinity_by_book",
              schema=V1AffinityByBook)
 def affinity_by_book(pg_id: str, top: int = 50,
                      pos_filter: list[str] | None = None,
                      min_corpus_count: int = 200,
-                     exclude_proper_nouns: bool = True) -> ToolResult:
+                     exclude_proper_nouns: bool = True,
+                     sort_by: str = "keyness",
+                     min_ll: float | None = None) -> ToolResult:
     if not pg_id or (isinstance(pg_id, str) and not pg_id.strip()):
         return ToolResult.fail(
             tool="affinity_by_book", err_type="invalid_args",
@@ -84,13 +96,18 @@ def affinity_by_book(pg_id: str, top: int = 50,
     # (learning_words «results» vs «words»). Read both keys; promote
     # the non-empty one to canonical «top_words» for downstream.
     from scripts.v2.tools._retry_on_empty import retry_with_lower_threshold
+    v1_args = {
+        "pg_id": pg_id, "top": top, "pos_filter": pos_filter,
+        "min_corpus_count": min_corpus_count,
+        "exclude_proper_nouns": exclude_proper_nouns,
+        "sort_by": sort_by,
+    }
+    # Forward min_ll only when set, so the engine significance default applies.
+    if min_ll is not None:
+        v1_args["min_ll"] = min_ll
     raw = retry_with_lower_threshold(
         v1_fn=_v1,
-        v1_args={
-            "pg_id": pg_id, "top": top, "pos_filter": pos_filter,
-            "min_corpus_count": min_corpus_count,
-            "exclude_proper_nouns": exclude_proper_nouns,
-        },
+        v1_args=v1_args,
         threshold_arg="min_corpus_count",
         steps=(100, 50, 20, 10),
         # V1AffinityByBook canonical key is `top` (learning_tools.py:275).
@@ -99,7 +116,8 @@ def affinity_by_book(pg_id: str, top: int = 50,
     )
     query = {"pg_id": pg_id, "top": top, "pos_filter": pos_filter,
              "min_corpus_count": min_corpus_count,
-             "exclude_proper_nouns": exclude_proper_nouns}
+             "exclude_proper_nouns": exclude_proper_nouns,
+             "sort_by": sort_by, "min_ll": min_ll}
     if isinstance(raw, dict) and raw.get("min_corpus_count_used") is not None:
         query["min_corpus_count_used"] = raw["min_corpus_count_used"]
     if isinstance(raw, dict) and raw.get("error"):
@@ -188,7 +206,7 @@ def affinity_by_book(pg_id: str, top: int = 50,
         title = raw.get("title") or pg_id
         if not rows:
             view = vb.build_top_n_table(
-                rows=[], columns=["rank", "word", "affinity"],
+                rows=[], columns=["rank", "word", "g2", "log_ratio"],
                 empty_reason=EmptyReason.FILTERED_OUT,
                 empty_message_ru=f"Нет фирменных слов для {title} при min_corpus_count={min_corpus_count}.",
                 empty_message_en=f"No signature words for {title}.",
@@ -199,24 +217,27 @@ def affinity_by_book(pg_id: str, top: int = 50,
             vb.attach_view(result, view,
                            data_validity=DataValidity.EMPTY_UNEXPECTED)
             return result
+        def _fmt(v, nd):
+            return f"{v:.{nd}f}" if isinstance(v, (int, float)) else "—"
+
         view_rows = []
         for i, r in enumerate(rows[:top], start=1):
             if not isinstance(r, dict):
                 continue
-            # V1AffinityByBook rows: word, book_count, corpus_count, affinity.
+            # V1AffinityByBook rows now carry g2 / log_ratio / rel_freq; the
+            # table leads with the keyness statistics.
             view_rows.append({
                 "rank": i,
                 "word": r.get("word") or "—",
-                "affinity": (f"{r.get('affinity'):.3f}"
-                              if isinstance(r.get("affinity"), (int, float))
-                              else "—"),
+                "g2": _fmt(r.get("g2"), 2),
+                "log_ratio": _fmt(r.get("log_ratio"), 2),
             })
         view_caveats = []
         if raw.get("proper_noun_filter"):
             view_caveats.append(raw["proper_noun_filter"])
         view = vb.build_top_n_table(
             rows=view_rows,
-            columns=["rank", "word", "affinity"],
+            columns=["rank", "word", "g2", "log_ratio"],
             headline=f"Фирменные слова — {title} ({pg_id})",
             requested_n=top,
             caveats=view_caveats,
