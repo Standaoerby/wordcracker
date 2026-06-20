@@ -6,15 +6,39 @@
   "python_minor": "3.11",
   "results": [
     {
-      "elapsed_s": 0.337,
-      "path": "v2/contracts/fixtures/scripts.rag_tools.top_ngrams_by_book.json",
-      "size_bytes": 1238,
+      "elapsed_s": 4.824,
+      "path": "v2/contracts/fixtures/scripts.learning_tools.affinity_by_book.json",
+      "size_bytes": 9461,
       "status": "ok",
-      "v1_fingerprint": "9dfc3c99a660",
-      "v1_qualname": "scripts.rag_tools.top_ngrams_by_book"
+      "v1_fingerprint": "660fc74e152b",
+      "v1_qualname": "scripts.learning_tools.affinity_by_book"
+    },
+    {
+      "elapsed_s": 0.344,
+      "path": "v2/contracts/fixtures/scripts.learning_tools.learning_words.json",
+      "size_bytes": 19310,
+      "status": "ok",
+      "v1_fingerprint": "6b975e0102d0",
+      "v1_qualname": "scripts.learning_tools.learning_words"
+    },
+    {
+      "elapsed_s": 2.523,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.affinity_by_author.json",
+      "size_bytes": 1249,
+      "status": "ok",
+      "v1_fingerprint": "4b9c8b7bd4f7",
+      "v1_qualname": "scripts.rag_tools.affinity_by_author"
+    },
+    {
+      "elapsed_s": 3.46,
+      "path": "v2/contracts/fixtures/scripts.rag_tools.compare_authors.json",
+      "size_bytes": 9757,
+      "status": "ok",
+      "v1_fingerprint": "8f95d3df643c",
+      "v1_qualname": "scripts.rag_tools.compare_authors"
     }
   ],
   "skipped_heavy": [],
-  "targets_attempted": 1,
+  "targets_attempted": 4,
   "v1_contracts_loaded": 33
 }
