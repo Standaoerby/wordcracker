@@ -1,40 +1,57 @@
 {
   "author_regex": "^Austen,",
-  "cached": true,
+  "cached": false,
   "effective_min_corpus_count": 500,
+  "min_ll": 15.13,
   "pos_filter": null,
   "proper_noun_filter": "corpus-diff heuristic dropped 0, spaCy PROPN dropped 9",
   "slug": "austen",
+  "sort_by": "keyness",
   "top": [
+    {
+      "affinity": 3.49,
+      "author_count": 19534,
+      "corpus_count": 14285151,
+      "g2": 20985.54,
+      "log_ratio": 1.805,
+      "rel_freq": 3.49,
+      "word": "her"
+    },
+    {
+      "affinity": 3.14,
+      "author_count": 14611,
+      "corpus_count": 11875554,
+      "g2": 13540.28,
+      "log_ratio": 1.653,
+      "rel_freq": 3.14,
+      "word": "she"
+    },
     {
       "affinity": 347.42,
       "author_count": 1363,
       "corpus_count": 10018,
+      "g2": 13423.85,
+      "log_ratio": 8.651,
+      "rel_freq": 347.42,
       "word": "elinor"
     },
     {
-      "affinity": 345.71,
-      "author_count": 264,
-      "corpus_count": 1950,
-      "word": "ferrars"
+      "affinity": 8.11,
+      "author_count": 2923,
+      "corpus_count": 920411,
+      "g2": 7117.89,
+      "log_ratio": 3.024,
+      "rel_freq": 8.11,
+      "word": "miss"
     },
     {
-      "affinity": 345.48,
-      "author_count": 511,
-      "corpus_count": 3777,
-      "word": "dashwood"
-    },
-    {
-      "affinity": 338.3,
-      "author_count": 270,
-      "corpus_count": 2038,
-      "word": "lizzy"
-    },
-    {
-      "affinity": 131.45,
-      "author_count": 467,
-      "corpus_count": 9072,
-      "word": "jennings"
+      "affinity": 2.03,
+      "author_count": 13904,
+      "corpus_count": 17490019,
+      "g2": 5582.38,
+      "log_ratio": 1.022,
+      "rel_freq": 2.03,
+      "word": "not"
     }
   ],
   "total_unique_words": 7230
