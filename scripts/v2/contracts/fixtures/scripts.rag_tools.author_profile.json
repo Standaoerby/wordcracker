@@ -163,102 +163,150 @@
     "author_regex": "^Shelley, Mary",
     "cached": true,
     "effective_min_corpus_count": 200,
+    "exclude_stopwords": true,
+    "min_ll": 15.13,
     "pos_filter": null,
-    "proper_noun_filter": "corpus-diff heuristic dropped 0, spaCy PROPN dropped 24",
+    "proper_noun_filter": "corpus-diff heuristic dropped 0, spaCy PROPN dropped 16",
     "slug": "shelley",
+    "sort_by": "keyness",
     "top": [
       {
-        "affinity": 885.32,
-        "author_count": 164,
-        "corpus_count": 368,
-        "word": "locock"
+        "affinity": 59.02,
+        "author_count": 317,
+        "corpus_count": 27347,
+        "g2": 1965.68,
+        "log_ratio": 5.9,
+        "rel_freq": 59.02,
+        "word": "shelley"
       },
       {
-        "affinity": 820.65,
-        "author_count": 164,
-        "corpus_count": 397,
-        "word": "cj"
+        "affinity": 13.58,
+        "author_count": 266,
+        "corpus_count": 99724,
+        "g2": 895.6,
+        "log_ratio": 3.767,
+        "rel_freq": 13.58,
+        "word": "misery"
       },
       {
-        "affinity": 581.26,
-        "author_count": 158,
-        "corpus_count": 540,
-        "word": "editio"
-      },
-      {
-        "affinity": 555.2,
-        "author_count": 64,
-        "corpus_count": 229,
-        "word": "demogorgon"
-      },
-      {
-        "affinity": 358.19,
-        "author_count": 141,
-        "corpus_count": 782,
-        "word": "daemon"
-      },
-      {
-        "affinity": 350.18,
-        "author_count": 104,
-        "corpus_count": 590,
-        "word": "woodberry"
-      },
-      {
-        "affinity": 292.87,
-        "author_count": 272,
-        "corpus_count": 1845,
-        "word": "forman"
-      },
-      {
-        "affinity": 267.31,
-        "author_count": 44,
-        "corpus_count": 327,
-        "word": "aery"
-      },
-      {
-        "affinity": 251.31,
-        "author_count": 63,
-        "corpus_count": 498,
-        "word": "esdaile"
-      },
-      {
-        "affinity": 247.09,
-        "author_count": 50,
-        "corpus_count": 402,
-        "word": "athanase"
-      },
-      {
-        "affinity": 244.82,
+        "affinity": 627.48,
         "author_count": 70,
         "corpus_count": 568,
+        "g2": 771.04,
+        "log_ratio": 9.483,
+        "rel_freq": 627.48,
         "word": "ladislas"
       },
       {
-        "affinity": 225.43,
-        "author_count": 32,
-        "corpus_count": 282,
-        "word": "ricciardo"
+        "affinity": 3.13,
+        "author_count": 783,
+        "corpus_count": 1274615,
+        "g2": 720.64,
+        "log_ratio": 1.646,
+        "rel_freq": 3.13,
+        "word": "heart"
       },
       {
-        "affinity": 224.12,
-        "author_count": 147,
-        "corpus_count": 1303,
-        "word": "dowden"
+        "affinity": 10.16,
+        "author_count": 251,
+        "corpus_count": 125771,
+        "g2": 711.74,
+        "log_ratio": 3.348,
+        "rel_freq": 10.16,
+        "word": "despair"
       },
       {
-        "affinity": 189.52,
-        "author_count": 141,
-        "corpus_count": 1478,
-        "word": "silenus"
+        "affinity": 7.47,
+        "author_count": 302,
+        "corpus_count": 205708,
+        "g2": 692.11,
+        "log_ratio": 2.904,
+        "rel_freq": 7.47,
+        "word": "feelings"
       },
       {
-        "affinity": 186.47,
-        "author_count": 156,
-        "corpus_count": 1662,
-        "word": "princeps"
+        "affinity": 31.91,
+        "author_count": 135,
+        "corpus_count": 21541,
+        "g2": 674.24,
+        "log_ratio": 5.005,
+        "rel_freq": 31.91,
+        "word": "windsor"
+      },
+      {
+        "affinity": 9.9,
+        "author_count": 224,
+        "corpus_count": 115233,
+        "g2": 624.56,
+        "log_ratio": 3.31,
+        "rel_freq": 9.9,
+        "word": "miserable"
+      },
+      {
+        "affinity": 10.0,
+        "author_count": 200,
+        "corpus_count": 101790,
+        "g2": 561.5,
+        "log_ratio": 3.325,
+        "rel_freq": 10.0,
+        "word": "beloved"
+      },
+      {
+        "affinity": 205.46,
+        "author_count": 64,
+        "corpus_count": 1586,
+        "g2": 556.85,
+        "log_ratio": 7.742,
+        "rel_freq": 205.46,
+        "word": "evadne"
+      },
+      {
+        "affinity": 8.17,
+        "author_count": 213,
+        "corpus_count": 132756,
+        "g2": 521.17,
+        "log_ratio": 3.032,
+        "rel_freq": 8.17,
+        "word": "countenance"
+      },
+      {
+        "affinity": 9.77,
+        "author_count": 188,
+        "corpus_count": 97953,
+        "g2": 519.87,
+        "log_ratio": 3.291,
+        "rel_freq": 9.77,
+        "word": "cottage"
+      },
+      {
+        "affinity": 20.17,
+        "author_count": 126,
+        "corpus_count": 31800,
+        "g2": 518.05,
+        "log_ratio": 4.34,
+        "rel_freq": 20.17,
+        "word": "quitted"
+      },
+      {
+        "affinity": 5.81,
+        "author_count": 273,
+        "corpus_count": 239395,
+        "g2": 508.63,
+        "log_ratio": 2.539,
+        "rel_freq": 5.81,
+        "word": "happiness"
+      },
+      {
+        "affinity": 7.77,
+        "author_count": 209,
+        "corpus_count": 136905,
+        "g2": 493.18,
+        "log_ratio": 2.96,
+        "rel_freq": 7.77,
+        "word": "grief"
       }
     ],
-    "total_unique_words": 13994
+    "total_unique_words": 7624
   },
   "stats": {
     "author_regex": "^Shelley, Mary",

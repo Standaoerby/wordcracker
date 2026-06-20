@@ -38,23 +38,48 @@ def _words(rows):
     return [(r.get("word") if isinstance(r, dict) else str(r)) for r in (rows or [])]
 
 
+# Self-/character names the scrub chain (self-name drop → literary PROPN
+# blacklist → curated surname blocklist) is known to remove. Asserting against
+# THIS set instead of hard-coded ranking positions makes the contract test
+# robust to keyness re-ranking: the keyness upgrade (G² + stopword exclusion)
+# changes WHICH names land in the recorded top-N, but the invariant — every
+# name that IS present gets scrubbed, and non-name vocabulary survives — holds
+# regardless. (The strict word-level guarantees live in the synthetic
+# E27WodehouseWildeNegative class below, which is ranking-independent.)
+_SCRUBBED_NAMES = frozenset({
+    "austen", "wilde",                                   # self-names
+    "elinor", "ferrars", "dashwood", "willoughby",
+    "collins", "crawford",                               # Austen characters
+    "goring", "worthing", "chasuble", "algernon",
+    "cecily", "cardew", "bunbury", "daubeny", "tetrarch",  # Wilde characters
+})
+
+
 class E27CompareAuthorsGoldenFixture(unittest.TestCase):
-    """Contract test against the real recorded v1 shape (Austen vs Wilde)."""
+    """Contract test against the real recorded v1 shape (Austen vs Wilde).
+
+    Ranking-robust: it derives the pollution to scrub from whatever the
+    fixture currently carries, so a keyness re-record doesn't make it brittle.
+    """
 
     def setUp(self):
         self.v1_raw = json.loads(_FIXTURE.read_text(encoding="utf-8"))
         # Guard: the fixture really is the nested v1 shape we're contracting
-        # against (NOT a pre-flattened mock). If the fixture is ever
-        # re-recorded into a different shape this assertion fails loudly.
+        # against (NOT a pre-flattened mock).
         self.assertIn("author1", self.v1_raw)
         self.assertIn("top_unique", self.v1_raw["author1"])
-        # And it really does carry the pollution this test exists to kill.
-        a1_words = _words(self.v1_raw["author1"]["top_unique"])
-        a2_words = _words(self.v1_raw["author2"]["top_unique"])
-        self.assertIn("austen", a1_words, "fixture should still show the leak")
-        self.assertIn("wilde", a2_words, "fixture should still show the leak")
-        self.assertIn("elinor", a1_words)
-        self.assertIn("goring", a2_words)
+        a1 = set(_words(self.v1_raw["author1"]["top_unique"]))
+        a2 = set(_words(self.v1_raw["author2"]["top_unique"]))
+        # The names actually present in this recording that the scrub must kill.
+        self._a1_names = a1 & _SCRUBBED_NAMES
+        self._a2_names = a2 & _SCRUBBED_NAMES
+        # The fixture must still carry SOME known name on at least one side,
+        # else this contract test has no pollution to assert against (would be
+        # vacuously green — a silent loss of coverage).
+        self.assertTrue(
+            self._a1_names or self._a2_names,
+            "fixture carries no known character/self name to scrub — re-record "
+            "may have changed the corpus or the curated name set drifted.")
 
     def _run(self):
         from scripts.v2.tools.authors.affinity import compare_authors
@@ -63,51 +88,38 @@ class E27CompareAuthorsGoldenFixture(unittest.TestCase):
             return compare_authors("^Austen,", "^Wilde, Oscar$",
                                    min_corpus_count=500)
 
-    def test_self_names_dropped_both_sides(self):
+    def test_names_dropped_both_sides(self):
+        """Every self-/character name present in the fixture is scrubbed from
+        both the flat aliases the renderer reads."""
         r = self._run()
         self.assertTrue(r.ok)
-        a = _words(r.data["top_unique_a"])
-        b = _words(r.data["top_unique_b"])
-        self.assertNotIn("austen", a, "author1 self-name must be dropped")
-        self.assertNotIn("wilde", b, "author2 self-name must be dropped")
+        a = set(_words(r.data["top_unique_a"]))
+        b = set(_words(r.data["top_unique_b"]))
+        self.assertEqual(a & self._a1_names, set(),
+                         f"author1 names not scrubbed: {a & self._a1_names}")
+        self.assertEqual(b & self._a2_names, set(),
+                         f"author2 names not scrubbed: {b & self._a2_names}")
 
-    def test_character_names_dropped_both_sides(self):
+    def test_scrub_is_not_a_blanket_nuke(self):
+        """NEGATIVE half: the scrub removes names, NOT all vocabulary. At least
+        one side must retain non-name signature words after scrubbing."""
         r = self._run()
-        a = _words(r.data["top_unique_a"])
-        b = _words(r.data["top_unique_b"])
-        # Austen characters (curated surname blocklist)
-        for ch in ("elinor", "ferrars", "dashwood", "willoughby",
-                   "collins", "crawford"):
-            self.assertNotIn(ch, a, f"Austen character {ch!r} must be dropped")
-        # Wilde characters (literary PROPN blacklist — NOT in surname list,
-        # which is exactly why the two named filters alone are insufficient)
-        for ch in ("goring", "worthing", "chasuble", "algernon",
-                   "cecily", "cardew", "bunbury", "daubeny", "tetrarch"):
-            self.assertNotIn(ch, b, f"Wilde character {ch!r} must be dropped")
-
-    def test_genuine_signature_words_survive(self):
-        """NEGATIVE half (NOT-X → NOT-Y): the scrub drops names, NOT real
-        stylistic vocabulary. If this fails the filter is too aggressive."""
-        r = self._run()
-        a = _words(r.data["top_unique_a"])
-        b = _words(r.data["top_unique_b"])
-        for w in ("gentlemanlike", "curricle", "charade"):
-            self.assertIn(w, a, f"genuine Austen word {w!r} must survive")
-        for w in ("individualism", "modernity", "nihilists",
-                  "handicraftsmen"):
-            self.assertIn(w, b, f"genuine Wilde word {w!r} must survive")
+        a_nonname = [w for w in _words(r.data["top_unique_a"])
+                     if w not in _SCRUBBED_NAMES]
+        b_nonname = [w for w in _words(r.data["top_unique_b"])
+                     if w not in _SCRUBBED_NAMES]
+        self.assertTrue(
+            a_nonname or b_nonname,
+            "scrub left no non-name vocabulary on either side — too aggressive")
 
     def test_nested_render_payload_also_scrubbed(self):
         """The LLM render payload exposes raw['author1'/'author2'] nested
-        top_unique — those must be cleaned too, not just the flat aliases,
-        else the renderer can still read the polluted nested list."""
+        top_unique — those must be cleaned too, not just the flat aliases."""
         r = self._run()
-        a_nested = _words(r.data["author1"]["top_unique"])
-        b_nested = _words(r.data["author2"]["top_unique"])
-        self.assertNotIn("austen", a_nested)
-        self.assertNotIn("wilde", b_nested)
-        self.assertNotIn("elinor", a_nested)
-        self.assertNotIn("goring", b_nested)
+        a_nested = set(_words(r.data["author1"]["top_unique"]))
+        b_nested = set(_words(r.data["author2"]["top_unique"]))
+        self.assertEqual(a_nested & self._a1_names, set())
+        self.assertEqual(b_nested & self._a2_names, set())
 
 
 class E27WodehouseWildeNegative(unittest.TestCase):

@@ -1,108 +1,326 @@
 {
-  "candidates_examined": 200,
-  "cold_wiktionary_lookups": 50,
+  "candidates_examined": 105,
+  "cold_wiktionary_lookups": 69,
   "family": "germanic",
   "matched": [
     {
-      "affinity": 26.56,
-      "corpus_count": 3076,
+      "affinity": 8.11,
+      "corpus_count": 920411,
       "family_chain": [
         "middle_english",
         "old_english",
         "proto_germanic",
         "proto_indo_european"
       ],
-      "occurrences": 32,
+      "occurrences": 2923,
+      "raw_codes": [
+        "enm",
+        "ang",
+        "gmw-pro",
+        "gem-pro",
+        "ine-pro",
+        "give",
+        "mistress"
+      ],
+      "word": "miss"
+    },
+    {
+      "affinity": 9.62,
+      "corpus_count": 370227,
+      "family_chain": [
+        "middle_english"
+      ],
+      "occurrences": 1395,
+      "raw_codes": [
+        "enm",
+        "brethren",
+        "sistren"
+      ],
+      "word": "sister"
+    },
+    {
+      "affinity": 4.29,
+      "corpus_count": 831830,
+      "family_chain": [
+        "middle_english",
+        "old_english",
+        "proto_germanic"
+      ],
+      "occurrences": 1398,
+      "raw_codes": [
+        "enm",
+        "ang",
+        "gmw-pro",
+        "gem-pro"
+      ],
+      "word": "dear"
+    },
+    {
+      "affinity": 3.35,
+      "corpus_count": 1224672,
+      "family_chain": [
+        "middle_english",
+        "old_english",
+        "proto_germanic",
+        "proto_indo_european"
+      ],
+      "occurrences": 1608,
+      "raw_codes": [
+        "enm",
+        "ang",
+        "gmw-pro",
+        "gem-pro",
+        "ine-pro",
+        "say"
+      ],
+      "word": "soon"
+    },
+    {
+      "affinity": 2.72,
+      "corpus_count": 2022474,
+      "family_chain": [
+        "middle_english",
+        "old_english",
+        "proto_germanic",
+        "proto_indo_european"
+      ],
+      "occurrences": 2157,
+      "raw_codes": [
+        "enm",
+        "ang",
+        "gmw-pro",
+        "gem-pro",
+        "ine-pro"
+      ],
+      "word": "think"
+    },
+    {
+      "affinity": 4.4,
+      "corpus_count": 468496,
+      "family_chain": [
+        "middle_english",
+        "old_norse"
+      ],
+      "occurrences": 807,
+      "raw_codes": [
+        "enm",
+        "non",
+        "hap"
+      ],
+      "word": "happy"
+    },
+    {
+      "affinity": 3.8,
+      "corpus_count": 587623,
+      "family_chain": [
+        "middle_english",
+        "old_english",
+        "proto_germanic",
+        "proto_indo_european"
+      ],
+      "occurrences": 874,
+      "raw_codes": [
+        "enm",
+        "ang",
+        "gmw-pro",
+        "gem-pro",
+        "ine-pro",
+        "wonder",
+        "may"
+      ],
+      "word": "wish"
+    },
+    {
+      "affinity": 2.69,
+      "corpus_count": 1184629,
+      "family_chain": [
+        "middle_english",
+        "old_english",
+        "proto_germanic",
+        "proto_indo_european"
+      ],
+      "occurrences": 1247,
+      "raw_codes": [
+        "enm",
+        "ang",
+        "gmw-pro",
+        "gem-pro",
+        "ine-pro",
+        "mother",
+        "serve",
+        "moth"
+      ],
+      "word": "mother"
+    },
+    {
+      "affinity": 3.15,
+      "corpus_count": 648462,
+      "family_chain": [
+        "middle_english"
+      ],
+      "occurrences": 799,
+      "raw_codes": [
+        "enm",
+        "wow",
+        "gosh"
+      ],
+      "word": "really"
+    },
+    {
+      "affinity": 3.28,
+      "corpus_count": 581511,
+      "family_chain": [
+        "middle_english",
+        "old_english",
+        "proto_germanic",
+        "proto_indo_european"
+      ],
+      "occurrences": 746,
+      "raw_codes": [
+        "enm",
+        "ang",
+        "gmw-pro",
+        "gem-pro",
+        "ine-pro"
+      ],
+      "word": "brother"
+    },
+    {
+      "affinity": 1.87,
+      "corpus_count": 2890007,
+      "family_chain": [
+        "middle_english",
+        "old_english",
+        "proto_germanic",
+        "proto_indo_european"
+      ],
+      "occurrences": 2120,
+      "raw_codes": [
+        "enm",
+        "ang",
+        "gmw-pro",
+        "gem-pro",
+        "ine-pro",
+        "ken",
+        "in",
+        "you"
+      ],
+      "word": "know"
+    },
+    {
+      "affinity": 2.35,
+      "corpus_count": 1266156,
+      "family_chain": [
+        "middle_english",
+        "old_english",
+        "proto_germanic"
+      ],
+      "occurrences": 1163,
+      "raw_codes": [
+        "enm",
+        "ang",
+        "gmw-pro",
+        "gem-pro"
+      ],
+      "word": "thing"
+    },
+    {
+      "affinity": 3.34,
+      "corpus_count": 487319,
+      "family_chain": [
+        "middle_english"
+      ],
+      "occurrences": 637,
+      "raw_codes": [
+        "enm"
+      ],
+      "word": "certainly"
+    },
+    {
+      "affinity": 5.32,
+      "corpus_count": 167644,
+      "family_chain": [
+        "middle_english"
+      ],
+      "occurrences": 349,
+      "raw_codes": [
+        "enm",
+        "fro-nor"
+      ],
+      "word": "carriage"
+    },
+    {
+      "affinity": 1.74,
+      "corpus_count": 3223482,
+      "family_chain": [
+        "middle_english",
+        "old_english",
+        "proto_germanic",
+        "proto_indo_european"
+      ],
+      "occurrences": 2192,
       "raw_codes": [
         "enm",
         "ang",
         "gem-pro",
         "ine-pro",
-        "Compton",
-        "Salcombe"
+        "gmw-pro",
+        "wall"
       ],
-      "word": "combe"
+      "word": "well"
     },
     {
-      "affinity": 24.25,
-      "corpus_count": 5896,
+      "affinity": 4.91,
+      "corpus_count": 181954,
       "family_chain": [
         "middle_english",
-        "old_english"
+        "old_english",
+        "proto_germanic",
+        "proto_indo_european"
       ],
-      "occurrences": 56,
+      "occurrences": 350,
       "raw_codes": [
         "enm",
-        "ang"
+        "ang",
+        "gmw-pro",
+        "gem-pro",
+        "ine-pro",
+        "durst",
+        "dared"
       ],
-      "word": "twelvemonth"
+      "word": "dare"
     },
     {
-      "affinity": 20.22,
-      "corpus_count": 3409,
-      "family_chain": [
-        "middle_english",
-        "old_english"
-      ],
-      "occurrences": 27,
-      "raw_codes": [
-        "enm",
-        "ang"
-      ],
-      "word": "openness"
-    },
-    {
-      "affinity": 20.11,
-      "corpus_count": 889,
+      "affinity": 6.02,
+      "corpus_count": 122580,
       "family_chain": [
         "middle_english"
       ],
-      "occurrences": 7,
+      "occurrences": 289,
       "raw_codes": [
         "enm"
       ],
-      "word": "blamable"
+      "word": "kindness"
     },
     {
-      "affinity": 18.42,
-      "corpus_count": 693,
+      "affinity": 2.51,
+      "corpus_count": 865016,
       "family_chain": [
         "middle_english",
-        "old_norse"
+        "old_english",
+        "proto_germanic",
+        "proto_indo_european"
       ],
-      "occurrences": 5,
+      "occurrences": 850,
       "raw_codes": [
         "enm",
-        "non",
-        "boor",
-        "bound"
+        "ang",
+        "gmw-pro",
+        "gem-pro",
+        "ine-pro",
+        "free"
       ],
-      "word": "bigg"
-    },
-    {
-      "affinity": 16.84,
-      "corpus_count": 3640,
-      "family_chain": [
-        "middle_english"
-      ],
-      "occurrences": 24,
-      "raw_codes": [
-        "enm",
-        "la-lat"
-      ],
-      "word": "patroness"
-    },
-    {
-      "affinity": 16.69,
-      "corpus_count": 765,
-      "family_chain": [
-        "middle_english"
-      ],
-      "occurrences": 5,
-      "raw_codes": [
-        "enm"
-      ],
-      "word": "slyness"
+      "word": "friend"
     },
     {
       "affinity": 14.44,
@@ -115,6 +333,199 @@
         "enm"
       ],
       "word": "ladyship"
+    },
+    {
+      "affinity": 2.41,
+      "corpus_count": 912336,
+      "family_chain": [
+        "middle_english",
+        "old_english",
+        "proto_germanic",
+        "proto_indo_european"
+      ],
+      "occurrences": 860,
+      "raw_codes": [
+        "enm",
+        "ang",
+        "gmw-pro",
+        "ine-pro"
+      ],
+      "word": "felt"
+    },
+    {
+      "affinity": 3.27,
+      "corpus_count": 395482,
+      "family_chain": [
+        "middle_english"
+      ],
+      "occurrences": 507,
+      "raw_codes": [
+        "enm"
+      ],
+      "word": "immediately"
+    },
+    {
+      "affinity": 4.14,
+      "corpus_count": 216433,
+      "family_chain": [
+        "middle_english",
+        "old_english",
+        "proto_germanic",
+        "proto_indo_european"
+      ],
+      "occurrences": 351,
+      "raw_codes": [
+        "enm",
+        "ang",
+        "gmw-pro",
+        "gem-pro",
+        "ine-pro",
+        "sorrow",
+        "I'm",
+        "sorree"
+      ],
+      "word": "sorry"
+    },
+    {
+      "affinity": 3.21,
+      "corpus_count": 374873,
+      "family_chain": [
+        "middle_english",
+        "old_english"
+      ],
+      "occurrences": 471,
+      "raw_codes": [
+        "enm",
+        "ang"
+      ],
+      "word": "hardly"
+    },
+    {
+      "affinity": 2.67,
+      "corpus_count": 579288,
+      "family_chain": [
+        "middle_english",
+        "old_english",
+        "proto_germanic"
+      ],
+      "occurrences": 605,
+      "raw_codes": [
+        "enm",
+        "ang",
+        "gmw-pro",
+        "gem-pro"
+      ],
+      "word": "evening"
+    },
+    {
+      "affinity": 3.18,
+      "corpus_count": 353841,
+      "family_chain": [
+        "middle_english",
+        "old_english",
+        "proto_germanic",
+        "proto_indo_european",
+        "germanic"
+      ],
+      "occurrences": 441,
+      "raw_codes": [
+        "enm",
+        "ang",
+        "gmw-pro",
+        "gem-pro",
+        "ine-pro",
+        "great",
+        "good",
+        "gml"
+      ],
+      "word": "deal"
+    },
+    {
+      "affinity": 2.33,
+      "corpus_count": 810620,
+      "family_chain": [
+        "middle_english",
+        "old_english",
+        "proto_germanic"
+      ],
+      "occurrences": 739,
+      "raw_codes": [
+        "enm",
+        "ang",
+        "gmw-pro",
+        "lief",
+        "in"
+      ],
+      "word": "believe"
+    },
+    {
+      "affinity": 2.12,
+      "corpus_count": 1065346,
+      "family_chain": [
+        "middle_english",
+        "old_english",
+        "proto_germanic",
+        "proto_indo_european"
+      ],
+      "occurrences": 886,
+      "raw_codes": [
+        "enm",
+        "ang",
+        "gmw-pro",
+        "gem-pro",
+        "ine-pro",
+        "for",
+        "to"
+      ],
+      "word": "room"
+    },
+    {
+      "affinity": 2.52,
+      "corpus_count": 590889,
+      "family_chain": [
+        "middle_english",
+        "old_english",
+        "proto_germanic"
+      ],
+      "occurrences": 584,
+      "raw_codes": [
+        "enm",
+        "ang",
+        "gmw-pro",
+        "fele"
+      ],
+      "word": "feel"
+    },
+    {
+      "affinity": 4.22,
+      "corpus_count": 165862,
+      "family_chain": [
+        "middle_english"
+      ],
+      "occurrences": 274,
+      "raw_codes": [
+        "enm",
+        "good-looking",
+        "pretty",
+        "lovely",
+        "beautiful",
+        "hot",
+        "manly",
+        "sexy"
+      ],
+      "word": "handsome"
+    },
+    {
+      "affinity": 3.17,
+      "corpus_count": 316217,
+      "family_chain": [
+        "middle_english"
+      ],
+      "occurrences": 393,
+      "raw_codes": [
+        "enm"
+      ],
+      "word": "married"
     }
   ],
   "scope": {

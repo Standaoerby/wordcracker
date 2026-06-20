@@ -136,6 +136,10 @@ class V1AffinityByAuthor(V1Schema):
     author_regex: str
     slug: str
     pos_filter: list[str] | None
+    # Keyness upgrade (RAG_TASK): the ranking knobs v1 echoes back.
+    sort_by: str
+    min_ll: float
+    exclude_stopwords: bool
     effective_min_corpus_count: int
     total_unique_words: int
     top: list[dict]
@@ -149,8 +153,11 @@ V1AffinityByAuthor.__required__ = frozenset({"author_regex", "top"})
 # T2 (Phase 2): row_keys mirror v1's actual emission (rag_tools.py:735).
 # `token` was a phantom alias the wrapper used to fall back to; v1
 # never sets it. Dropped together with the wrapper-side fallback chain.
+# Keyness upgrade: rows now carry g2 (log-likelihood), log_ratio and
+# rel_freq; `affinity` is kept as a back-compat alias = rel_freq.
 V1AffinityByAuthor.__row_keys__ = frozenset({
     "word", "author_count", "corpus_count", "affinity",
+    "rel_freq", "g2", "log_ratio",
 })
 V1AffinityByAuthor.__defaults__ = {
     "author_regex": "^Author,", "slug": "author", "top": [],
@@ -651,13 +658,20 @@ class V1AffinityByBook(V1Schema):
     book_tokens: int
     book_vocab: int
     pos_filter: list[str] | None
+    # Keyness upgrade (RAG_TASK) — ranking knobs echoed back.
+    sort_by: str
+    min_ll: float
+    exclude_stopwords: bool
     effective_min_corpus_count: int
     top: list[dict]
 
 
 V1AffinityByBook.__required__ = frozenset({"pg_id", "top"})
+# Keyness upgrade: rows carry g2 / log_ratio / rel_freq; `affinity` kept
+# as a back-compat alias = rel_freq.
 V1AffinityByBook.__row_keys__ = frozenset({
     "word", "book_count", "corpus_count", "affinity",
+    "rel_freq", "g2", "log_ratio",
 })
 V1AffinityByBook.__defaults__ = {
     "pg_id": "PG0", "title": "", "author": "",
@@ -677,8 +691,11 @@ class V1LearningWords(V1Schema):
 
 
 V1LearningWords.__required__ = frozenset({"results"})
+# Keyness upgrade: keyness flows into learning rows too (g2 / log_ratio /
+# rel_freq) alongside the legacy affinity ratio.
 V1LearningWords.__row_keys__ = frozenset({
     "word", "scope_count", "corpus_count", "affinity",
+    "rel_freq", "g2", "log_ratio",
     "score", "lemma", "pos",
 })
 V1LearningWords.__defaults__ = {

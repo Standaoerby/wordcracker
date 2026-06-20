@@ -34,11 +34,18 @@ from rag_tools import (
     SPGC_METADATA, SPGC_COUNTS_DIR, SPGC_TOKENS_DIR,
     CHROMA_PATH, COLLECTION_NAME, EMBEDDER_NAME,
     DERIVED_DIR, CORPUS_COUNTS, OLLAMA_HOST,
-    STOPWORDS, _metadata_df, _select_books, _slug,
+    STOPWORDS, SIGNATURE_STOPWORDS, _metadata_df, _select_books, _slug,
     _is_clean_token, _log,
     _counts_path, _tokens_path,
     get_model_ctx,
 )
+
+# Keyness statistics — single source of truth (scripts/keyness.py). Dual
+# import so this works loaded as `scripts.learning_tools` or bare.
+try:
+    from scripts.keyness import keyness, sort_key_for, MIN_LL_DEFAULT
+except ImportError:  # pragma: no cover — bare-name fallback
+    from keyness import keyness, sort_key_for, MIN_LL_DEFAULT
 
 # Spaced-repetition band-pass presets, anchored to corpus_count quantiles
 LEVELS = {
@@ -171,8 +178,21 @@ def affinity_by_book(pg_id: str, top: int = 50,
                      min_corpus_count: int = 200,
                      pos_filter: list[str] | None = None,
                      exclude_proper_nouns: bool = True,
-                     use_ner: bool = True) -> dict:
-    """Affinity for a single book vs the global corpus.
+                     use_ner: bool = True,
+                     sort_by: str = "keyness",
+                     min_ll: float = MIN_LL_DEFAULT,
+                     positive_only: bool = True,
+                     exclude_stopwords: bool = True) -> dict:
+    """Book-scoped *keyness* vs the global corpus (mirrors affinity_by_author).
+
+    Per word it computes log-likelihood ``g2`` (Dunning, significance),
+    ``log_ratio`` (Hardie, effect size) and the legacy ``rel_freq`` ratio
+    against a corpus-minus-book reference, ranked by ``g2`` desc by default.
+
+      sort_by      — "keyness" (g2, default) | "logratio" | "freq" (rel_freq)
+      min_ll       — drop rows with g2 below the significance floor
+                     (default 15.13 ≈ p<0.0001)
+      positive_only — keep only words the book OVERuses (log_ratio > 0)
 
     min_corpus_count: drop words with global corpus_count below this. Default 200
     filters out the proper-noun bleed-through that dominates raw per-book
@@ -247,13 +267,25 @@ def affinity_by_book(pg_id: str, top: int = 50,
                 continue
             if w in known_proper:
                 continue
-            if cc == 0:
-                affinity = None
-            else:
-                affinity = (bc / book_tokens) / (cc / corpus_total)
+            # Drop closed-class function words so the keyness top is distinctive
+            # content vocabulary, not her/she/very (see SIGNATURE_STOPWORDS).
+            if exclude_stopwords and w.lower() in SIGNATURE_STOPWORDS:
+                continue
+            k = keyness(bc, book_tokens, cc, corpus_total)
+            # positive keys only (book OVERuses the word); min_ll significance
+            # floor — a rare unique word's low G² keeps it off the top.
+            if positive_only and not (k["log_ratio"] > 0):
+                continue
+            if min_ll and min_ll > 0 and k["g2"] < min_ll:
+                continue
+            rf = round(k["rel_freq"], 2) if k["rel_freq"] is not None else None
             rows.append({"word": w, "book_count": bc, "corpus_count": cc,
-                         "affinity": round(affinity, 2) if affinity else None})
-        rows.sort(key=lambda r: (r["affinity"] is None, -(r["affinity"] or 0)))
+                         "g2": round(k["g2"], 2),
+                         "log_ratio": round(k["log_ratio"], 3),
+                         "rel_freq": rf,
+                         # back-compat alias = legacy ratio value
+                         "affinity": rf})
+        rows.sort(key=sort_key_for(sort_by), reverse=True)
 
         # Optional POS narrowing via spaCy. Run on top 8x pool so we have
         # candidates left after filtering. When pos_filter is set we narrow
@@ -276,6 +308,8 @@ def affinity_by_book(pg_id: str, top: int = 50,
         out = {"pg_id": pg_id, "title": title, "author": author,
                "book_tokens": book_tokens, "book_vocab": len(book),
                "pos_filter": pos_filter,
+               "sort_by": sort_by, "min_ll": min_ll,
+               "exclude_stopwords": exclude_stopwords,
                "effective_min_corpus_count": effective_min_corpus,
                "top": rows[:top]}
         _log(f"affinity_by_book({pg_id}) done in {time.perf_counter()-t0:.2f}s")
@@ -544,6 +578,22 @@ def learning_words(
     candidates.sort(key=lambda r: r[3], reverse=True)
     candidates = candidates[: top * 2 if lemmatize else top]  # extra room before POS filter
 
+    # Keyness flows into every row alongside the legacy affinity ratio so the
+    # value is consistent with affinity_by_author/book (RAG_TASK WP-D). The
+    # pedagogical `score` stays the ranking key — learning_words is a
+    # learner-facing CEFR band-pass, not the linguist's keyness view.
+    _ct = _corpus_total_tokens()
+
+    def _krow(w, sc, cc, scr, lemma, pos):
+        k = keyness(sc, scope_tokens, cc, _ct)
+        rf = round(k["rel_freq"], 2) if k["rel_freq"] is not None else None
+        return {"word": w, "lemma": lemma, "pos": pos,
+                "scope_count": sc, "corpus_count": cc,
+                "affinity": rf, "rel_freq": rf,
+                "g2": round(k["g2"], 2),
+                "log_ratio": round(k["log_ratio"], 3),
+                "score": round(scr, 3)}
+
     # ---- optional lemmatize + POS filter ----
     if lemmatize and candidates:
         words = [c[0] for c in candidates]
@@ -559,16 +609,10 @@ def learning_words(
             seen_lemmas.add(lemma)
             filtered.append((w, sc, cc, scr, lemma, pos))
         candidates_out = filtered[:top]
-        rows = [{"word": w, "lemma": lemma, "pos": pos,
-                 "scope_count": sc, "corpus_count": cc,
-                 "affinity": round((sc / scope_tokens) / (cc / _corpus_total_tokens()), 2),
-                 "score": round(scr, 3)}
+        rows = [_krow(w, sc, cc, scr, lemma, pos)
                 for w, sc, cc, scr, lemma, pos in candidates_out]
     else:
-        rows = [{"word": w, "lemma": w, "pos": "",
-                 "scope_count": sc, "corpus_count": cc,
-                 "affinity": round((sc / scope_tokens) / (cc / _corpus_total_tokens()), 2),
-                 "score": round(scr, 3)}
+        rows = [_krow(w, sc, cc, scr, w, "")
                 for w, sc, cc, scr in candidates[:top]]
 
     # ---- attach example contexts so enrich_word / LLM see how the word is used ----

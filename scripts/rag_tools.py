@@ -35,6 +35,13 @@ try:
 except ImportError:  # pragma: no cover — bare-name fallback
     from v2.token_budget import get_model_ctx
 
+# Keyness statistics — single source of truth (scripts/keyness.py). Same
+# dual-import dance as above (loaded as `scripts.rag_tools` or bare).
+try:
+    from scripts.keyness import keyness, sort_key_for, MIN_LL_DEFAULT
+except ImportError:  # pragma: no cover — bare-name fallback
+    from keyness import keyness, sort_key_for, MIN_LL_DEFAULT
+
 # ---------- paths ----------
 SPGC_METADATA   = Path("/workspace/spgc/SPGC-metadata-2018-07-18.csv")
 SPGC_COUNTS_DIR = Path("/workspace/spgc/SPGC-counts-2018-07-18")
@@ -92,6 +99,53 @@ STOPWORDS = {
     "will", "shall", "may", "might", "must", "can", "no", "yes", "what", "which",
     "who", "whom", "when", "where", "why", "how", "their", "them", "our", "us",
     "my", "your", "its", "out", "up", "down", "into", "than", "now",
+}
+
+# Function-word list for the KEYNESS "signature words" view (RAG_TASK keyness
+# upgrade). Log-likelihood G² scales with frequency, so high-frequency
+# closed-class words (her/she/not — and very/am/herself, which the smaller
+# STOPWORDS misses) get astronomical G² and flood the top, burying the
+# distinctive CONTENT vocabulary a «фирменные слова» list is for. This set is
+# STOPWORDS extended with reflexive/object/possessive pronouns, copula/modal
+# forms, degree adverbs, prepositions, conjunctions, pro-forms and the archaic
+# function words common in a Gutenberg corpus (thee/thou/hath/unto). It is
+# deliberately closed-class only — content words an author genuinely overuses
+# (sister, miss, money, sea) are NOT here and survive. affinity_by_author /
+# affinity_by_book exclude these by default (exclude_stopwords=True); a linguist
+# wanting raw keyness (function words included, AntConc-style) passes
+# exclude_stopwords=False.
+SIGNATURE_STOPWORDS = STOPWORDS | {
+    # object / possessive / reflexive pronouns
+    "me", "him", "myself", "yourself", "himself", "herself", "itself",
+    "ourselves", "yourselves", "themselves", "oneself",
+    "mine", "hers", "ours", "yours", "theirs", "whose",
+    # copula / modal / aux forms not already above
+    "am", "being", "should", "ought",
+    # determiners / quantifiers
+    "all", "any", "some", "each", "every", "both", "either", "neither",
+    "such", "these", "those", "much", "many", "more", "most", "few",
+    "another", "other", "same", "own", "enough",
+    # degree / focus adverbs
+    "very", "too", "quite", "rather", "almost", "even", "just", "only",
+    "also", "still", "ever", "never", "always", "again", "once",
+    "perhaps", "indeed",
+    # conjunctions
+    "because", "though", "although", "unless", "until", "since", "while",
+    "whilst", "whether", "nor", "yet", "however", "therefore", "thus",
+    "else", "whereas",
+    # prepositions
+    "about", "above", "across", "after", "against", "along", "among",
+    "amongst", "around", "before", "behind", "below", "beneath", "beside",
+    "besides", "between", "beyond", "during", "except", "inside", "near",
+    "off", "outside", "over", "past", "through", "throughout", "toward",
+    "towards", "under", "underneath", "upon", "within", "without", "unto",
+    # pro-forms
+    "here", "there", "anything", "something", "nothing", "everything",
+    "anyone", "someone", "everyone", "anybody", "somebody", "everybody",
+    "nobody",
+    # archaic function words common in Gutenberg English
+    "thee", "thou", "thy", "thine", "ye", "hath", "doth", "hast", "shalt",
+    "wilt", "unto", "ere", "nay", "yea",
 }
 
 CYRILLIC_RE = re.compile(r"[Ѐ-ӿ]")
@@ -861,16 +915,34 @@ def top_ngrams_by_book(pg_id: str, n: int = 1, top: int = 20,
 # ============================ TOOL 4: affinity_by_author ============================
 def affinity_by_author(author_regex: str, top: int = 50, min_author_count: int = 5,
                        min_corpus_count: int = 0,
-                       pos_filter: list[str] | None = None) -> dict:
-    """Per-author affinity vs corpus. Uses cached CSV if present, else runs
-    spgc_author_affinity.py.
+                       pos_filter: list[str] | None = None,
+                       sort_by: str = "keyness",
+                       min_ll: float = MIN_LL_DEFAULT,
+                       positive_only: bool = True,
+                       exclude_stopwords: bool = True) -> dict:
+    """Per-author *keyness* vs corpus. Uses the cached CSV if present and
+    current-schema, else runs spgc_author_affinity.py.
 
-    If a NER-cleaned variant (`{slug}_affinity_clean.csv`) exists, prefer it —
-    these have proper nouns (character names, place names) explicitly filtered
-    out via spaCy NER, so the top is real stylistic markers like "blighter"
-    instead of "Wrykyn" / "Threepwood". For authors without a clean variant we
-    apply an inline heuristic: drop words whose corpus_count is essentially 0
-    (appears only in this author = almost always a proper noun).
+    Ranking (RAG_TASK keyness upgrade): rows carry log-likelihood ``g2``
+    (Dunning, significance), ``log_ratio`` (Hardie, effect size) and the
+    legacy ``rel_freq`` ratio. Default rank is ``g2`` desc — a rare unique
+    word no longer outranks a genuinely characteristic frequent one.
+
+      sort_by      — "keyness" (g2, default) | "logratio" | "freq" (rel_freq)
+      min_ll       — drop rows with g2 below this significance floor
+                     (default 15.13 ≈ p<0.0001; 6.63 ≈ p<0.01, 10.83 ≈ p<0.001)
+      positive_only — keep only words OVERused by the author (log_ratio > 0),
+                     i.e. positive keys = signature words (default True)
+      exclude_stopwords — drop closed-class function words (her/she/very/am/…
+                     via SIGNATURE_STOPWORDS) so the list is distinctive CONTENT
+                     vocabulary (default True). Pass False for raw keyness where
+                     function words are legitimate keywords (AntConc-style).
+
+    If a NER-cleaned variant (`{slug}_affinity_clean.csv`) exists AND carries
+    the keyness columns, prefer it — proper nouns (character/place names) are
+    filtered out via spaCy NER, so the top is real stylistic markers like
+    "blighter" instead of "Wrykyn" / "Threepwood". A stale clean variant
+    (legacy schema) is ignored in favour of the regenerated base CSV.
 
     min_corpus_count: if > 0, drop rows where corpus_count < min_corpus_count.
     Useful for filtering OOV/proper-noun bleed-through that spaCy POS misses
@@ -881,8 +953,25 @@ def affinity_by_author(author_regex: str, top: int = 50, min_author_count: int =
     slug = _slug(author_regex)
     csv_path = DERIVED_DIR / f"{slug}_affinity.csv"
     clean_path = DERIVED_DIR / f"{slug}_affinity_clean.csv"
-    cached = csv_path.exists() or clean_path.exists()
+
+    def _has_keyness_cols(p: Path) -> bool:
+        # A CSV is current-schema iff it carries the keyness columns. Cheap
+        # header-only read; lets a stale legacy (affinity-only) CSV be detected
+        # and regenerated on next request without a separate meta round-trip
+        # (WP-C — schema_version bump invalidates stale derived caches).
+        try:
+            cols = pd.read_csv(p, nrows=0).columns
+            return {"g2", "log_ratio"}.issubset(cols)
+        except Exception:
+            return False
+
     try:
+        # Prefer the NER-cleaned variant only when it ALSO carries the keyness
+        # columns; a legacy clean CSV is ignored in favour of the regenerated
+        # base so we never rank on a stale schema.
+        clean_current = clean_path.exists() and _has_keyness_cols(clean_path)
+        base_current = csv_path.exists() and _has_keyness_cols(csv_path)
+        cached = clean_current or base_current
         if not cached:
             _log(f"running spgc_author_affinity.py for {author_regex!r} (slug={slug})")
             cmd = [
@@ -898,12 +987,13 @@ def affinity_by_author(author_regex: str, top: int = 50, min_author_count: int =
             if proc.returncode != 0:
                 return {"error": "spgc_author_affinity.py failed",
                         "stderr": proc.stderr[-500:]}
-            if not csv_path.exists():
+            if not (csv_path.exists() and _has_keyness_cols(csv_path)):
                 return {"error": "affinity CSV not produced (no matching books?)",
                         "stdout": proc.stdout[-500:]}
 
-        use_clean = clean_path.exists()
-        df = pd.read_csv(clean_path if use_clean else csv_path)
+        use_clean = clean_current
+        source_path = clean_path if use_clean else csv_path
+        df = pd.read_csv(source_path)
         df = df[df["author_count"] >= min_author_count]
         # When narrowing by POS, OOV proper nouns get systematically mis-tagged
         # by spaCy as ADJ/NOUN (czarevitch, mahaffy, tuppy from Wilde). Force
@@ -915,6 +1005,22 @@ def affinity_by_author(author_regex: str, top: int = 50, min_author_count: int =
             effective_min_corpus = max(effective_min_corpus, 1000)
         if effective_min_corpus > 0:
             df = df[df["corpus_count"] >= effective_min_corpus]
+
+        # Keyness gates (RAG_TASK). positive_only keeps words the author
+        # OVERuses (log_ratio > 0) so "signature words" stay signature, not
+        # words the author conspicuously avoids. min_ll drops differences below
+        # the significance floor (15.13 ≈ p<0.0001) — this is what stops a rare
+        # unique 5×-word from topping the list (low count ⇒ low G²).
+        if positive_only and "log_ratio" in df.columns:
+            df = df[df["log_ratio"] > 0]
+        if min_ll and min_ll > 0 and "g2" in df.columns:
+            df = df[df["g2"] >= min_ll]
+        # Exclude closed-class function words. Keyness G² scales with frequency,
+        # so without this the top is her/she/not/very — grammatical, not
+        # distinctive. Content words an author truly overuses (sister, money)
+        # are not in SIGNATURE_STOPWORDS and survive.
+        if exclude_stopwords:
+            df = df[~df["word"].str.lower().isin(SIGNATURE_STOPWORDS)]
         # Stylometric heuristic: a word is a real stylistic marker only if it
         # appears MORE in the corpus-without-this-author than in the author
         # alone. Words with corpus_count ≈ author_count are almost always
@@ -940,7 +1046,16 @@ def affinity_by_author(author_regex: str, top: int = 50, min_author_count: int =
         # (e.g. Wodehouse 'marvis' / 'stanning' which leak through).
         # When pos_filter is set we narrow further to those POS tags
         # ("characteristic adjectives of Wilde" → pos_filter=["ADJ"]).
-        sorted_df = df.sort_values("affinity", ascending=False, na_position="last")
+        rank_field = {"keyness": "g2", "logratio": "log_ratio",
+                      "freq": "rel_freq"}.get((sort_by or "keyness").lower(), "g2")
+        # Robust fallback: a legacy/old-schema df (no keyness columns) must not
+        # KeyError the sort. Prefer g2 → log_ratio → rel_freq; else leave order.
+        if rank_field not in df.columns:
+            rank_field = next((c for c in ("g2", "log_ratio", "rel_freq")
+                               if c in df.columns), None)
+        sorted_df = (df.sort_values(rank_field, ascending=False,
+                                    na_position="last")
+                     if rank_field else df)
         # Pool 8x the requested top when narrowing by POS, since most words
         # won't match the filter; 4x is enough for the default PROPN drop.
         pool_mult = 8 if pos_filter else 4
@@ -985,18 +1100,35 @@ def affinity_by_author(author_regex: str, top: int = 50, min_author_count: int =
                          f"propn via word_dict cache")
         except Exception as e:
             _log(f"propn cache filter skipped: {e}")
-        df = df.sort_values("affinity", ascending=False, na_position="last").head(top)
-        top_rows = [
-            {"word": r["word"], "author_count": int(r["author_count"]),
-             "corpus_count": int(r["corpus_count"]),
-             "affinity": round(float(r["affinity"]), 2)}
-            for _, r in df.iterrows() if pd.notna(r["affinity"])
-        ]
-        total_unique = int(len(pd.read_csv(clean_path if use_clean else csv_path)))
+        df = (df.sort_values(rank_field, ascending=False, na_position="last")
+              if rank_field else df).head(top)
+
+        def _num(v, ndigits):
+            return round(float(v), ndigits) if pd.notna(v) else None
+
+        top_rows = []
+        for _, r in df.iterrows():
+            rf = _num(r.get("rel_freq"), 2)
+            top_rows.append({
+                "word": r["word"],
+                "author_count": int(r["author_count"]),
+                "corpus_count": int(r["corpus_count"]),
+                "g2": _num(r.get("g2"), 2),
+                "log_ratio": _num(r.get("log_ratio"), 3),
+                "rel_freq": rf,
+                # Back-compat alias: compare_authors + existing renderer/tests
+                # read `affinity`; keep it = rel_freq (the old ratio value), so
+                # nothing downstream breaks while keyness becomes primary.
+                "affinity": rf,
+            })
+        total_unique = int(len(pd.read_csv(source_path)))
         out = {
             "author_regex":       author_regex,
             "slug":               slug,
             "pos_filter":         pos_filter,
+            "sort_by":            sort_by,
+            "min_ll":             min_ll,
+            "exclude_stopwords":  exclude_stopwords,
             "effective_min_corpus_count": effective_min_corpus,
             "total_unique_words": total_unique,
             "top":                top_rows,
@@ -1008,7 +1140,7 @@ def affinity_by_author(author_regex: str, top: int = 50, min_author_count: int =
             ),
         }
         _log(f"affinity_by_author done in {time.perf_counter()-t0:.2f}s "
-             f"(cached={cached}, clean={use_clean})")
+             f"(cached={cached}, clean={use_clean}, sort_by={sort_by})")
         return out
     except Exception as e:
         return {"error": "affinity_by_author failed", "details": str(e)}

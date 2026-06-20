@@ -2,39 +2,57 @@
   "author_regex": "^Austen,",
   "cached": true,
   "effective_min_corpus_count": 500,
+  "exclude_stopwords": true,
+  "min_ll": 15.13,
   "pos_filter": null,
-  "proper_noun_filter": "corpus-diff heuristic dropped 0, spaCy PROPN dropped 9",
+  "proper_noun_filter": "corpus-diff heuristic dropped 0, spaCy PROPN dropped 11",
   "slug": "austen",
+  "sort_by": "keyness",
   "top": [
     {
       "affinity": 347.42,
       "author_count": 1363,
       "corpus_count": 10018,
+      "g2": 13423.85,
+      "log_ratio": 8.651,
+      "rel_freq": 347.42,
       "word": "elinor"
     },
     {
-      "affinity": 345.71,
-      "author_count": 264,
-      "corpus_count": 1950,
-      "word": "ferrars"
+      "affinity": 8.11,
+      "author_count": 2923,
+      "corpus_count": 920411,
+      "g2": 7117.89,
+      "log_ratio": 3.024,
+      "rel_freq": 8.11,
+      "word": "miss"
     },
     {
       "affinity": 345.48,
       "author_count": 511,
       "corpus_count": 3777,
+      "g2": 5026.55,
+      "log_ratio": 8.642,
+      "rel_freq": 345.48,
       "word": "dashwood"
     },
     {
-      "affinity": 338.3,
-      "author_count": 270,
-      "corpus_count": 2038,
-      "word": "lizzy"
+      "affinity": 85.08,
+      "author_count": 593,
+      "corpus_count": 17798,
+      "g2": 4117.56,
+      "log_ratio": 6.459,
+      "rel_freq": 85.08,
+      "word": "crawford"
     },
     {
-      "affinity": 131.45,
-      "author_count": 467,
-      "corpus_count": 9072,
-      "word": "jennings"
+      "affinity": 9.62,
+      "author_count": 1395,
+      "corpus_count": 370227,
+      "g2": 3820.81,
+      "log_ratio": 3.271,
+      "rel_freq": 9.62,
+      "word": "sister"
     }
   ],
   "total_unique_words": 7230
