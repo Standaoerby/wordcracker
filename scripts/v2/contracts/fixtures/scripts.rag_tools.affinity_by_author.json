@@ -1,31 +1,14 @@
 {
   "author_regex": "^Austen,",
-  "cached": false,
+  "cached": true,
   "effective_min_corpus_count": 500,
+  "exclude_stopwords": true,
   "min_ll": 15.13,
   "pos_filter": null,
-  "proper_noun_filter": "corpus-diff heuristic dropped 0, spaCy PROPN dropped 9",
+  "proper_noun_filter": "corpus-diff heuristic dropped 0, spaCy PROPN dropped 11",
   "slug": "austen",
   "sort_by": "keyness",
   "top": [
-    {
-      "affinity": 3.49,
-      "author_count": 19534,
-      "corpus_count": 14285151,
-      "g2": 20985.54,
-      "log_ratio": 1.805,
-      "rel_freq": 3.49,
-      "word": "her"
-    },
-    {
-      "affinity": 3.14,
-      "author_count": 14611,
-      "corpus_count": 11875554,
-      "g2": 13540.28,
-      "log_ratio": 1.653,
-      "rel_freq": 3.14,
-      "word": "she"
-    },
     {
       "affinity": 347.42,
       "author_count": 1363,
@@ -45,13 +28,31 @@
       "word": "miss"
     },
     {
-      "affinity": 2.03,
-      "author_count": 13904,
-      "corpus_count": 17490019,
-      "g2": 5582.38,
-      "log_ratio": 1.022,
-      "rel_freq": 2.03,
-      "word": "not"
+      "affinity": 345.48,
+      "author_count": 511,
+      "corpus_count": 3777,
+      "g2": 5026.55,
+      "log_ratio": 8.642,
+      "rel_freq": 345.48,
+      "word": "dashwood"
+    },
+    {
+      "affinity": 85.08,
+      "author_count": 593,
+      "corpus_count": 17798,
+      "g2": 4117.56,
+      "log_ratio": 6.459,
+      "rel_freq": 85.08,
+      "word": "crawford"
+    },
+    {
+      "affinity": 9.62,
+      "author_count": 1395,
+      "corpus_count": 370227,
+      "g2": 3820.81,
+      "log_ratio": 3.271,
+      "rel_freq": 9.62,
+      "word": "sister"
     }
   ],
   "total_unique_words": 7230

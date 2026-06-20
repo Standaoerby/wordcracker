@@ -3,84 +3,13 @@
   "book_tokens": 78326,
   "book_vocab": 6545,
   "effective_min_corpus_count": 200,
+  "exclude_stopwords": true,
   "min_ll": 15.13,
   "pg_id": "PG174",
   "pos_filter": null,
   "sort_by": "keyness",
   "title": "The Picture of Dorian Gray",
   "top": [
-    {
-      "affinity": 2.96,
-      "book_count": 1443,
-      "corpus_count": 17677368,
-      "g2": 1223.69,
-      "log_ratio": 1.568,
-      "rel_freq": 2.96,
-      "word": "you"
-    },
-    {
-      "affinity": 1.94,
-      "book_count": 1693,
-      "corpus_count": 31749444,
-      "g2": 600.2,
-      "log_ratio": 0.953,
-      "rel_freq": 1.94,
-      "word": "i"
-    },
-    {
-      "affinity": 1.83,
-      "book_count": 1541,
-      "corpus_count": 30634991,
-      "g2": 462.13,
-      "log_ratio": 0.869,
-      "rel_freq": 1.83,
-      "word": "he"
-    },
-    {
-      "affinity": 2.22,
-      "book_count": 661,
-      "corpus_count": 10802047,
-      "g2": 328.51,
-      "log_ratio": 1.152,
-      "rel_freq": 2.22,
-      "word": "him"
-    },
-    {
-      "affinity": 2.43,
-      "book_count": 522,
-      "corpus_count": 7814704,
-      "g2": 311.51,
-      "log_ratio": 1.278,
-      "rel_freq": 2.43,
-      "word": "me"
-    },
-    {
-      "affinity": 4.15,
-      "book_count": 232,
-      "corpus_count": 2029875,
-      "g2": 308.18,
-      "log_ratio": 2.053,
-      "rel_freq": 4.15,
-      "word": "am"
-    },
-    {
-      "affinity": 1.64,
-      "book_count": 1343,
-      "corpus_count": 29688733,
-      "g2": 282.3,
-      "log_ratio": 0.716,
-      "rel_freq": 1.64,
-      "word": "it"
-    },
-    {
-      "affinity": 2.55,
-      "book_count": 429,
-      "corpus_count": 6104090,
-      "g2": 282.1,
-      "log_ratio": 1.352,
-      "rel_freq": 2.55,
-      "word": "do"
-    },
     {
       "affinity": 3.23,
       "book_count": 228,
@@ -98,24 +27,6 @@
       "log_ratio": 4.38,
       "rel_freq": 20.8,
       "word": "portrait"
-    },
-    {
-      "affinity": 2.3,
-      "book_count": 398,
-      "corpus_count": 6294965,
-      "g2": 212.3,
-      "log_ratio": 1.199,
-      "rel_freq": 2.3,
-      "word": "what"
-    },
-    {
-      "affinity": 1.71,
-      "book_count": 837,
-      "corpus_count": 17736476,
-      "g2": 204.55,
-      "log_ratio": 0.777,
-      "rel_freq": 1.71,
-      "word": "had"
     },
     {
       "affinity": 19.71,
@@ -145,15 +56,6 @@
       "word": "painter"
     },
     {
-      "affinity": 1.45,
-      "book_count": 1361,
-      "corpus_count": 34156057,
-      "g2": 164.89,
-      "log_ratio": 0.533,
-      "rel_freq": 1.45,
-      "word": "that"
-    },
-    {
       "affinity": 12.28,
       "book_count": 51,
       "corpus_count": 150876,
@@ -161,15 +63,6 @@
       "log_ratio": 3.618,
       "rel_freq": 12.28,
       "word": "lad"
-    },
-    {
-      "affinity": 3.87,
-      "book_count": 126,
-      "corpus_count": 1181771,
-      "g2": 154.23,
-      "log_ratio": 1.953,
-      "rel_freq": 3.87,
-      "word": "something"
     },
     {
       "affinity": 4.93,
@@ -271,15 +164,6 @@
       "word": "art"
     },
     {
-      "affinity": 1.44,
-      "book_count": 996,
-      "corpus_count": 25112167,
-      "g2": 117.83,
-      "log_ratio": 0.526,
-      "rel_freq": 1.44,
-      "word": "his"
-    },
-    {
       "affinity": 3.13,
       "book_count": 127,
       "corpus_count": 1473732,
@@ -287,15 +171,6 @@
       "log_ratio": 1.646,
       "rel_freq": 3.13,
       "word": "things"
-    },
-    {
-      "affinity": 3.46,
-      "book_count": 107,
-      "corpus_count": 1121739,
-      "g2": 113.66,
-      "log_ratio": 1.792,
-      "rel_freq": 3.46,
-      "word": "quite"
     },
     {
       "affinity": 24.41,
@@ -334,24 +209,6 @@
       "word": "lips"
     },
     {
-      "affinity": 4.66,
-      "book_count": 69,
-      "corpus_count": 538023,
-      "g2": 103.94,
-      "log_ratio": 2.22,
-      "rel_freq": 4.66,
-      "word": "everything"
-    },
-    {
-      "affinity": 2.39,
-      "book_count": 176,
-      "corpus_count": 2672492,
-      "g2": 102.11,
-      "log_ratio": 1.258,
-      "rel_freq": 2.39,
-      "word": "never"
-    },
-    {
       "affinity": 8.76,
       "book_count": 39,
       "corpus_count": 161742,
@@ -359,15 +216,6 @@
       "log_ratio": 3.131,
       "rel_freq": 8.76,
       "word": "absolutely"
-    },
-    {
-      "affinity": 1.57,
-      "book_count": 560,
-      "corpus_count": 12913967,
-      "g2": 99.81,
-      "log_ratio": 0.655,
-      "rel_freq": 1.57,
-      "word": "have"
     },
     {
       "affinity": 33.73,
@@ -433,15 +281,6 @@
       "word": "one"
     },
     {
-      "affinity": 2.77,
-      "book_count": 110,
-      "corpus_count": 1441368,
-      "g2": 83.64,
-      "log_ratio": 1.471,
-      "rel_freq": 2.77,
-      "word": "always"
-    },
-    {
       "affinity": 8.77,
       "book_count": 32,
       "corpus_count": 132558,
@@ -451,13 +290,175 @@
       "word": "painted"
     },
     {
-      "affinity": 1.37,
-      "book_count": 915,
-      "corpus_count": 24245614,
-      "g2": 82.03,
-      "log_ratio": 0.455,
-      "rel_freq": 1.37,
-      "word": "is"
+      "affinity": 9.99,
+      "book_count": 29,
+      "corpus_count": 105452,
+      "g2": 81.29,
+      "log_ratio": 3.32,
+      "rel_freq": 9.99,
+      "word": "delightful"
+    },
+    {
+      "affinity": 11.09,
+      "book_count": 27,
+      "corpus_count": 88410,
+      "g2": 80.8,
+      "log_ratio": 3.472,
+      "rel_freq": 11.09,
+      "word": "sins"
+    },
+    {
+      "affinity": 24.46,
+      "book_count": 18,
+      "corpus_count": 26719,
+      "g2": 80.58,
+      "log_ratio": 4.614,
+      "rel_freq": 24.46,
+      "word": "studio"
+    },
+    {
+      "affinity": 3.27,
+      "book_count": 80,
+      "corpus_count": 889098,
+      "g2": 78.41,
+      "log_ratio": 1.708,
+      "rel_freq": 3.27,
+      "word": "round"
+    },
+    {
+      "affinity": 3.0,
+      "book_count": 88,
+      "corpus_count": 1065346,
+      "g2": 76.01,
+      "log_ratio": 1.585,
+      "rel_freq": 3.0,
+      "word": "room"
+    },
+    {
+      "affinity": 8.75,
+      "book_count": 29,
+      "corpus_count": 120411,
+      "g2": 74.42,
+      "log_ratio": 3.129,
+      "rel_freq": 8.75,
+      "word": "artist"
+    },
+    {
+      "affinity": 5.77,
+      "book_count": 40,
+      "corpus_count": 251573,
+      "g2": 74.13,
+      "log_ratio": 2.53,
+      "rel_freq": 5.77,
+      "word": "terrible"
+    },
+    {
+      "affinity": 5.49,
+      "book_count": 41,
+      "corpus_count": 270967,
+      "g2": 72.64,
+      "log_ratio": 2.458,
+      "rel_freq": 5.49,
+      "word": "simply"
+    },
+    {
+      "affinity": 10.96,
+      "book_count": 24,
+      "corpus_count": 79524,
+      "g2": 71.31,
+      "log_ratio": 3.454,
+      "rel_freq": 10.96,
+      "word": "romance"
+    },
+    {
+      "affinity": 2.56,
+      "book_count": 107,
+      "corpus_count": 1515751,
+      "g2": 70.94,
+      "log_ratio": 1.358,
+      "rel_freq": 2.56,
+      "word": "face"
+    },
+    {
+      "affinity": 11.49,
+      "book_count": 23,
+      "corpus_count": 72673,
+      "g2": 70.33,
+      "log_ratio": 3.523,
+      "rel_freq": 11.49,
+      "word": "passions"
+    },
+    {
+      "affinity": 9.34,
+      "book_count": 26,
+      "corpus_count": 101058,
+      "g2": 69.77,
+      "log_ratio": 3.224,
+      "rel_freq": 9.34,
+      "word": "charm"
+    },
+    {
+      "affinity": 2.72,
+      "book_count": 94,
+      "corpus_count": 1252769,
+      "g2": 69.45,
+      "log_ratio": 1.446,
+      "rel_freq": 2.72,
+      "word": "looked"
+    },
+    {
+      "affinity": 2.28,
+      "book_count": 127,
+      "corpus_count": 2022474,
+      "g2": 66.77,
+      "log_ratio": 1.189,
+      "rel_freq": 2.28,
+      "word": "think"
+    },
+    {
+      "affinity": 3.03,
+      "book_count": 76,
+      "corpus_count": 912336,
+      "g2": 66.5,
+      "log_ratio": 1.597,
+      "rel_freq": 3.03,
+      "word": "felt"
+    },
+    {
+      "affinity": 14.47,
+      "book_count": 19,
+      "corpus_count": 47678,
+      "g2": 66.18,
+      "log_ratio": 3.856,
+      "rel_freq": 14.47,
+      "word": "subtle"
+    },
+    {
+      "affinity": 3.8,
+      "book_count": 55,
+      "corpus_count": 525701,
+      "g2": 65.78,
+      "log_ratio": 1.926,
+      "rel_freq": 3.8,
+      "word": "table"
+    },
+    {
+      "affinity": 4.84,
+      "book_count": 41,
+      "corpus_count": 307349,
+      "g2": 64.31,
+      "log_ratio": 2.276,
+      "rel_freq": 4.84,
+      "word": "laughed"
+    },
+    {
+      "affinity": 7.12,
+      "book_count": 28,
+      "corpus_count": 142848,
+      "g2": 61.78,
+      "log_ratio": 2.832,
+      "rel_freq": 7.12,
+      "word": "terror"
     }
   ]
 }
