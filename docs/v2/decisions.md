@@ -52,6 +52,20 @@ now). RENDER_PROMPT rule 15 names the measures (tool-grounded ⇒ no honesty
 caveat). Validation: `tests/v2/test_keyness_stats.py` (hand-worked 2×2, smoothing,
 ranking-differs, unique-5×-word no longer #1, end-to-end v1 sort).
 
+**Stopword exclusion (follow-up, Stan 2026-06-20).** G² scales with frequency,
+so the first keyness cut floated closed-class function words (her/she/not/very/am)
+to the top of «фирменные слова» — statistically valid (a linguist comparing
+Austen to a reference genuinely gets *she*/*her* as keywords) but it buried the
+distinctive CONTENT vocabulary the product view is for. Decision: `affinity_by_*`
+exclude function words by default (`exclude_stopwords=True`) via
+`rag_tools.SIGNATURE_STOPWORDS` (STOPWORDS extended with reflexives / degree
+adverbs / prepositions / conjunctions / archaic *thou*-*hath*-*unto* — closed
+class only, so content an author overuses like *sister*/*money* survives). A
+linguist wanting raw AntConc-style keyness passes `exclude_stopwords=False`. This
+re-ranks the recorded output, so it folds into the same R-RESTAMP re-record.
+`test_e27` was made ranking-robust (derives the names-to-scrub from the fixture)
+so it survives the re-rank.
+
 **Fixture follow-up (R-RESTAMP).** v1 output shape changed (new row keys), so the
 affinity_by_author / affinity_by_book / learning_words / compare_authors fixtures
 must be re-recorded on SOW (`record_fixtures`, corpus needed). Until then

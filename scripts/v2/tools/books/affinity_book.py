@@ -45,6 +45,10 @@ from scripts.v2.contracts.schemas import V1AffinityByBook
             "min_ll":              {"type": "number",
                                     "description": "порог значимости по G² "
                                                    "(default 15.13 ≈ p<0.0001)"},
+            "exclude_stopwords":   {"type": "boolean",
+                                    "description": "default true — отсеять служебные слова, "
+                                                   "чтобы список был содержательным; "
+                                                   "false = сырой keyness"},
         },
         "required": ["pg_id"],
     },
@@ -64,8 +68,10 @@ from scripts.v2.contracts.schemas import V1AffinityByBook
     # that still carry them.
     # Keyness upgrade (RAG_TASK) — book-scope rows now rank by log-likelihood
     # G² with a LogRatio companion + significance floor; exposes sort_by +
-    # min_ll and surfaces g2/log_ratio. Bump invalidates pre-keyness rows.
-    wrapper_version="v6-keyness-g2logratio",
+    # min_ll and surfaces g2/log_ratio. exclude_stopwords (default) drops
+    # function words so the top is content vocabulary. Bump invalidates
+    # pre-keyness / pre-stopword rows.
+    wrapper_version="v7-keyness-stopwords",
 )
 @v1_contract(v1_fn="scripts.learning_tools.affinity_by_book",
              schema=V1AffinityByBook)
@@ -74,7 +80,8 @@ def affinity_by_book(pg_id: str, top: int = 50,
                      min_corpus_count: int = 200,
                      exclude_proper_nouns: bool = True,
                      sort_by: str = "keyness",
-                     min_ll: float | None = None) -> ToolResult:
+                     min_ll: float | None = None,
+                     exclude_stopwords: bool = True) -> ToolResult:
     if not pg_id or (isinstance(pg_id, str) and not pg_id.strip()):
         return ToolResult.fail(
             tool="affinity_by_book", err_type="invalid_args",
@@ -100,7 +107,7 @@ def affinity_by_book(pg_id: str, top: int = 50,
         "pg_id": pg_id, "top": top, "pos_filter": pos_filter,
         "min_corpus_count": min_corpus_count,
         "exclude_proper_nouns": exclude_proper_nouns,
-        "sort_by": sort_by,
+        "sort_by": sort_by, "exclude_stopwords": exclude_stopwords,
     }
     # Forward min_ll only when set, so the engine significance default applies.
     if min_ll is not None:
@@ -117,7 +124,8 @@ def affinity_by_book(pg_id: str, top: int = 50,
     query = {"pg_id": pg_id, "top": top, "pos_filter": pos_filter,
              "min_corpus_count": min_corpus_count,
              "exclude_proper_nouns": exclude_proper_nouns,
-             "sort_by": sort_by, "min_ll": min_ll}
+             "sort_by": sort_by, "min_ll": min_ll,
+             "exclude_stopwords": exclude_stopwords}
     if isinstance(raw, dict) and raw.get("min_corpus_count_used") is not None:
         query["min_corpus_count_used"] = raw["min_corpus_count_used"]
     if isinstance(raw, dict) and raw.get("error"):

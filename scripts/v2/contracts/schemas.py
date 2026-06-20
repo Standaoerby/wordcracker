@@ -139,6 +139,7 @@ class V1AffinityByAuthor(V1Schema):
     # Keyness upgrade (RAG_TASK): the ranking knobs v1 echoes back.
     sort_by: str
     min_ll: float
+    exclude_stopwords: bool
     effective_min_corpus_count: int
     total_unique_words: int
     top: list[dict]
@@ -660,6 +661,7 @@ class V1AffinityByBook(V1Schema):
     # Keyness upgrade (RAG_TASK) — ranking knobs echoed back.
     sort_by: str
     min_ll: float
+    exclude_stopwords: bool
     effective_min_corpus_count: int
     top: list[dict]
 

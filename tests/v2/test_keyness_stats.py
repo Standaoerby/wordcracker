@@ -235,6 +235,73 @@ class V1AffinityByAuthorRanking(unittest.TestCase):
         self.assertEqual(row["affinity"], row["rel_freq"])
 
 
+class StopwordExclusion(unittest.TestCase):
+    """exclude_stopwords (default True) drops closed-class function words so
+    the keyness top is distinctive CONTENT vocabulary, not her/she/very —
+    while genuine content words an author overuses (sister) survive."""
+
+    N1 = 500_000
+    CT = 2_800_000_000
+
+    def _csv(self, path: Path, specs):
+        with open(path, "w", encoding="utf-8", newline="") as fh:
+            w = _csv.writer(fh)
+            w.writerow(["word", "author_count", "corpus_count",
+                        "rel_freq", "g2", "log_ratio"])
+            for word, ac, cc in specs:
+                k = keyness(ac, self.N1, cc, self.CT)
+                w.writerow([word, ac, cc,
+                            f"{k['rel_freq']:.6f}" if k["rel_freq"] else "",
+                            f"{k['g2']:.6f}", f"{k['log_ratio']:.6f}"])
+
+    def _run(self, exclude_stopwords):
+        from scripts import rag_tools
+        specs = [
+            ("her", 19534, 14285151),    # function word, huge G²
+            ("she", 14611, 11875554),    # function word
+            ("very", 3000, 900000),      # function word (SIGNATURE_STOPWORDS only)
+            ("sister", 1500, 120000),    # CONTENT word the author overuses
+            ("curricle", 60, 800),       # CONTENT signature word
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            dd = Path(d)
+            self._csv(dd / "x_affinity.csv", specs)
+            with mock.patch.object(rag_tools, "DERIVED_DIR", dd), \
+                 mock.patch.object(rag_tools, "_slug", return_value="x"), \
+                 mock.patch.object(rag_tools, "_spacy_pos_tags",
+                                   return_value={}):
+                out = rag_tools.affinity_by_author(
+                    "^X,", top=10, min_author_count=1, min_ll=0.0,
+                    exclude_stopwords=exclude_stopwords)
+        return [r["word"] for r in out["top"]]
+
+    def test_default_excludes_function_words_keeps_content(self):
+        words = self._run(exclude_stopwords=True)
+        for fw in ("her", "she", "very"):
+            self.assertNotIn(fw, words, f"function word {fw!r} must be excluded")
+        # genuine content the author overuses survives — NOT a blanket nuke
+        self.assertIn("sister", words)
+        self.assertIn("curricle", words)
+
+    def test_off_keeps_function_words_raw_keyness(self):
+        words = self._run(exclude_stopwords=False)
+        # raw keyness (AntConc-style): function words are legitimate keywords
+        self.assertIn("her", words)
+        self.assertIn("she", words)
+        # and G² ranks them at the top (highest counts → highest G²)
+        self.assertEqual(words[0], "her")
+
+    def test_signature_stopwords_superset_of_stopwords(self):
+        from scripts.rag_tools import STOPWORDS, SIGNATURE_STOPWORDS
+        self.assertTrue(STOPWORDS.issubset(SIGNATURE_STOPWORDS))
+        # covers the gaps the small list missed
+        for fw in ("very", "am", "herself", "myself", "thou", "unto"):
+            self.assertIn(fw, SIGNATURE_STOPWORDS)
+        # but NOT content words an author can legitimately overuse
+        for content in ("sister", "money", "sea", "love", "miss"):
+            self.assertNotIn(content, SIGNATURE_STOPWORDS)
+
+
 class SchemaConstants(unittest.TestCase):
 
     def test_schema_version_bumped(self):

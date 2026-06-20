@@ -34,7 +34,7 @@ from rag_tools import (
     SPGC_METADATA, SPGC_COUNTS_DIR, SPGC_TOKENS_DIR,
     CHROMA_PATH, COLLECTION_NAME, EMBEDDER_NAME,
     DERIVED_DIR, CORPUS_COUNTS, OLLAMA_HOST,
-    STOPWORDS, _metadata_df, _select_books, _slug,
+    STOPWORDS, SIGNATURE_STOPWORDS, _metadata_df, _select_books, _slug,
     _is_clean_token, _log,
     _counts_path, _tokens_path,
     get_model_ctx,
@@ -181,7 +181,8 @@ def affinity_by_book(pg_id: str, top: int = 50,
                      use_ner: bool = True,
                      sort_by: str = "keyness",
                      min_ll: float = MIN_LL_DEFAULT,
-                     positive_only: bool = True) -> dict:
+                     positive_only: bool = True,
+                     exclude_stopwords: bool = True) -> dict:
     """Book-scoped *keyness* vs the global corpus (mirrors affinity_by_author).
 
     Per word it computes log-likelihood ``g2`` (Dunning, significance),
@@ -266,6 +267,10 @@ def affinity_by_book(pg_id: str, top: int = 50,
                 continue
             if w in known_proper:
                 continue
+            # Drop closed-class function words so the keyness top is distinctive
+            # content vocabulary, not her/she/very (see SIGNATURE_STOPWORDS).
+            if exclude_stopwords and w.lower() in SIGNATURE_STOPWORDS:
+                continue
             k = keyness(bc, book_tokens, cc, corpus_total)
             # positive keys only (book OVERuses the word); min_ll significance
             # floor — a rare unique word's low G² keeps it off the top.
@@ -304,6 +309,7 @@ def affinity_by_book(pg_id: str, top: int = 50,
                "book_tokens": book_tokens, "book_vocab": len(book),
                "pos_filter": pos_filter,
                "sort_by": sort_by, "min_ll": min_ll,
+               "exclude_stopwords": exclude_stopwords,
                "effective_min_corpus_count": effective_min_corpus,
                "top": rows[:top]}
         _log(f"affinity_by_book({pg_id}) done in {time.perf_counter()-t0:.2f}s")

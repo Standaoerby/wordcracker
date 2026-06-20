@@ -158,6 +158,11 @@ def _drop_author_self_name(author_regex: str, words: list[dict]) -> list[dict]:
             "min_ll":           {"type": "number",
                                  "description": "порог значимости по G² (default 15.13 ≈ "
                                                 "p<0.0001; 6.63 ≈ p<0.01, 10.83 ≈ p<0.001)"},
+            "exclude_stopwords": {"type": "boolean",
+                                  "description": "default true — отсеять служебные слова "
+                                                 "(her/she/very/am), чтобы список был "
+                                                 "содержательным. false = сырой keyness "
+                                                 "(служебные слова тоже ключевые)"},
         },
         "required": ["author_regex"],
     },
@@ -193,9 +198,10 @@ def _drop_author_self_name(author_regex: str, words: list[dict]) -> list[dict]:
     # chain.
     # Keyness upgrade (RAG_TASK) — rows now rank by log-likelihood G² with a
     # LogRatio companion + significance floor; exposes sort_by + min_ll and
-    # surfaces g2/log_ratio in the view. Bump invalidates cached affinity-ratio
-    # rows recorded by the pre-keyness chain.
-    wrapper_version="v6-keyness-g2logratio",
+    # surfaces g2/log_ratio in the view. exclude_stopwords (default) drops
+    # closed-class function words so the top is content vocabulary, not
+    # her/she/very. Bump invalidates cached pre-keyness / pre-stopword rows.
+    wrapper_version="v7-keyness-stopwords",
 )
 @v1_contract(v1_fn="scripts.rag_tools.affinity_by_author",
              schema=V1AffinityByAuthor)
@@ -203,13 +209,14 @@ def affinity_by_author(author_regex: str, top: int = 50,
                        min_author_count: int = 5, min_corpus_count: int = 0,
                        pos_filter: list[str] | None = None,
                        sort_by: str = "keyness",
-                       min_ll: float | None = None) -> ToolResult:
+                       min_ll: float | None = None,
+                       exclude_stopwords: bool = True) -> ToolResult:
     from scripts.rag_tools import affinity_by_author as _v1
 
     v1_kwargs = {"author_regex": author_regex, "top": top,
                  "min_author_count": min_author_count,
                  "min_corpus_count": min_corpus_count, "pos_filter": pos_filter,
-                 "sort_by": sort_by}
+                 "sort_by": sort_by, "exclude_stopwords": exclude_stopwords}
     # Only forward min_ll when explicitly set, so the engine's significance
     # default (15.13 ≈ p<0.0001) applies otherwise.
     if min_ll is not None:
@@ -218,7 +225,8 @@ def affinity_by_author(author_regex: str, top: int = 50,
     query = {"author_regex": author_regex, "top": top,
              "min_author_count": min_author_count,
              "min_corpus_count": min_corpus_count, "pos_filter": pos_filter,
-             "sort_by": sort_by, "min_ll": min_ll}
+             "sort_by": sort_by, "min_ll": min_ll,
+             "exclude_stopwords": exclude_stopwords}
 
     if isinstance(raw, dict) and raw.get("error"):
         err = str(raw["error"])
