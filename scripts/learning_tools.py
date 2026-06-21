@@ -97,6 +97,15 @@ def _save_word_dict(d: dict) -> None:
 # ============================ helper: per-book NER cache ============================
 _BOOK_PROPN_DIR = Path("/workspace/spgc/derived/book_propn_cache")
 
+# NER-sampling strategy (WP-C, 2.7.36). The version is part of the cache
+# filename so a strategy change invalidates books cached under the old one:
+# a `PG345.json` computed by the 2.7.35 single-window 400k sample is ignored,
+# a fresh `PG345.v2.json` covering the whole book is computed instead. Bump the
+# version string whenever the windowing below changes.
+_PROPN_CACHE_VERSION = "v2"
+_PROPN_N_WINDOWS = 3
+_PROPN_WINDOW_CHARS = 200_000
+
 # Entity types from spaCy en_core_web_sm we treat as proper nouns. Some
 # (DATE, MONEY, QUANTITY, CARDINAL, ORDINAL, PERCENT) are intentionally
 # excluded — they aren't names, even though spaCy tags them.
@@ -111,22 +120,73 @@ _GUTENBERG_FTR = re.compile(
     re.IGNORECASE)
 
 
-def _book_propn_set(pg_id: str, sample_chars: int = 400_000) -> set[str]:
+def _propn_cache_path(pg_id: str) -> Path:
+    """Versioned per-book NER-cache path (WP-C, 2.7.36).
+
+    The version suffix (`_PROPN_CACHE_VERSION`) invalidates caches written
+    under an older sampling strategy without deleting them: a stale
+    `PG345.json` from the 400k single-window era is simply not read, and a
+    fresh `PG345.v2.json` is computed.
+    """
+    return _BOOK_PROPN_DIR / f"{pg_id.upper()}.{_PROPN_CACHE_VERSION}.json"
+
+
+def _propn_sample_windows(text_len: int,
+                          n_windows: int = _PROPN_N_WINDOWS,
+                          window_chars: int = _PROPN_WINDOW_CHARS
+                          ) -> list[tuple[int, int]]:
+    """(start, end) char offsets of the NER sampling windows over a book of
+    length `text_len` — position-independent coverage (WP-C, 2.7.36).
+
+    The 2.7.35 code sampled `text[:400_000]`, so a name first appearing in the
+    final chapters (Dracula's `galatz`, beyond the cut) was invisible to NER
+    and survived into the archaism list. Here the last window always ends at
+    `text_len`, so the tail is always seen.
+
+      * Book fits the budget (`text_len <= n_windows * window_chars`): a single
+        `(0, text_len)` window — the whole book, no seams. Strictly more
+        coverage than the old 400k truncation.
+      * Larger: `n_windows` windows of `window_chars`, evenly spaced so the
+        first starts at 0 and the last ends at `text_len` (head / middle /
+        tail). Cost is bounded by `n_windows * window_chars` regardless of
+        book size — a 3M-char tome costs the same as a 600k one.
+
+    Windows never overlap in the strided branch (span/(n-1) > window there);
+    the small gaps between them are harmless because named entities recur, so
+    a character/place in a gap still lands in an adjacent window. The caller
+    unions the per-window NER output, so order and de-duplication are free.
+    """
+    if text_len <= 0:
+        return []
+    n_windows = max(1, n_windows)
+    if text_len <= n_windows * window_chars:
+        return [(0, text_len)]
+    if n_windows == 1:
+        return [(0, window_chars)]
+    span = text_len - window_chars  # offset the last window starts at
+    starts = [round(i * span / (n_windows - 1)) for i in range(n_windows)]
+    return [(s, s + window_chars) for s in starts]
+
+
+def _book_propn_set(pg_id: str) -> set[str]:
     """Set of lowercased tokens spaCy NER tagged as PERSON / GPE / LOC / ... in
-    the book's raw text. Cached at /data/spgc/derived/book_propn_cache/<id>.json
-    so the cost is paid once per book ever.
+    the book's raw text. Cached at
+    /data/spgc/derived/book_propn_cache/<id>.v2.json so the cost is paid once
+    per book ever.
 
     For Pride and Prejudice this turns the affinity_by_book top from
         longbourn / darcy / bennet / lizzy / gracechurch / hertfordshire
     into actual Austen lexemes
         civility / elopement / discomposure / apologising / perverseness.
 
-    Sample 400k chars (~70-100k tokens) — enough for NER to see every named
-    entity in any plausibly-sized novel. spaCy en_core_web_sm CPU pass:
-    ~3-10s per book. Result is a flat set of lowercased token strings.
+    The text is sampled in head/middle/tail windows (`_propn_sample_windows`)
+    rather than a single leading slice, so a name confined to the final
+    chapters is still seen (WP-C, 2.7.36). spaCy en_core_web_sm CPU pass over
+    the ~600k-char budget: ~5-15s per book, once. Result is a flat set of
+    lowercased token strings.
     """
     pg = pg_id.upper()
-    cache_path = _BOOK_PROPN_DIR / f"{pg}.json"
+    cache_path = _propn_cache_path(pg)
     if cache_path.exists():
         try:
             with open(cache_path, encoding="utf-8") as fh:
@@ -143,22 +203,25 @@ def _book_propn_set(pg_id: str, sample_chars: int = 400_000) -> set[str]:
         if m: text = text[m.end():]
         m = _GUTENBERG_FTR.search(text)
         if m: text = text[:m.start()]
-        text = text[:sample_chars]
 
         import spacy
         try:
             nlp = spacy.load("en_core_web_sm", disable=["lemmatizer", "tagger", "parser", "attribute_ruler"])
         except OSError:
             return set()
-        doc = nlp(text)
-        propn = set()
-        for ent in doc.ents:
-            if ent.label_ not in _PROPN_ENT_LABELS:
-                continue
-            for tok in ent.text.split():
-                t = re.sub(r"[^A-Za-z']+", "", tok).lower()
-                if len(t) >= 3:
-                    propn.add(t)
+
+        # Per-window NER, unioned. Windows are processed separately (not
+        # concatenated) so a book-position seam never fabricates an entity.
+        propn: set[str] = set()
+        for start, end in _propn_sample_windows(len(text)):
+            doc = nlp(text[start:end])
+            for ent in doc.ents:
+                if ent.label_ not in _PROPN_ENT_LABELS:
+                    continue
+                for tok in ent.text.split():
+                    t = re.sub(r"[^A-Za-z']+", "", tok).lower()
+                    if len(t) >= 3:
+                        propn.add(t)
 
         _BOOK_PROPN_DIR.mkdir(parents=True, exist_ok=True)
         try:
@@ -877,7 +940,14 @@ def book_archaic_words(pg_id: str, top: int = 30,
         is_seed = w in _KNOWN_ARCHAISMS
         if not (is_seed or w in cache_archaic):
             continue
-        if w in proper_nouns:
+        # WP-B (2.7.36) — the proper-noun gate applies to cache candidates
+        # only, never to the seed. The seed is a curated inventory of archaic
+        # *forms*; a one-book surface collision with a character name («Art» =
+        # Arthur Holmwood in Dracula → spaCy tags PERSON) must not hide the
+        # archaic verb «thou art». So dropped_propn counts real cache drops
+        # only (galatz-class), not seed homographs (Q-B1). The `art` homograph
+        # caveat below still fires for the count it surfaces.
+        if w in proper_nouns and not is_seed:
             dropped_propn += 1
             continue
         note = cache_notes.get(w, "")

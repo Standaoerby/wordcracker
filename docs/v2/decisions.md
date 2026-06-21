@@ -6,6 +6,54 @@
 
 ---
 
+## 2026-06-21 — book_archaic precision #2: structural NER coverage + seed exemption (2.7.36)
+
+Ships in **2.7.36** (RAG_TASK_book_archaic_precision_2). Eyeball of the 2.7.35
+prod output left three regressions: `art` (a real seed archaism) **vanished**,
+and `galatz/calèche/chloral` survived as cache false-positives. This sprint
+makes the proper-noun gate **structural** (not cache-dependent) and stops it
+eating curated seed forms. *Labels WP-B/C/D here are scoped to precision #2 and
+do **not** map to the same letters in the 2.7.35 entry below.*
+
+**Why (verified in code).**
+- `art` was dropped because «Art» = Arthur Holmwood is NER-tagged PERSON in
+  Dracula, so `art ∈ _book_propn_set` — and the gate applied the proper-noun
+  drop to seed candidates, not just cache ones.
+- `galatz` was caught only by the cache, never by NER: `_book_propn_set`
+  sampled `text[:400_000]` and the chase to Galatz is in Dracula's final
+  chapters (~900k chars), beyond the cut. The cache was acting as a structural
+  crutch the RAG_TASK explicitly forbids.
+
+**Decision.**
+- **WP-C (priority, the cure)** — `_book_propn_set` samples head/middle/tail
+  windows (`_propn_sample_windows`, pure + unit-tested) instead of one leading
+  slice, so entity position no longer matters; cost is bounded by
+  `n_windows × window_chars` (600k) regardless of book size. The per-book NER
+  cache key is **versioned** (`_propn_cache_path` → `<id>.v2.json`) so books
+  cached under the old 400k strategy are recomputed, not silently reused.
+  Whole-book fallback for books ≤ budget (strictly more coverage than 400k).
+- **WP-B** — the gate drops cache candidates only (`… and not is_seed`). The
+  seed is a curated inventory of archaic *forms*; a one-book surface collision
+  with a character name must not hide it. `dropped_propn` now counts real cache
+  drops only (Q-B1). `art` returns, keeping its WP-F homograph caveat.
+- **WP-D** — `migrate_archaic_cache.pass2_reenrich_violators` merges the
+  re-enriched verdict back into the dict `main()` persists; the 2.7.35 code
+  computed it but let the final `_save_word_dict` clobber pass 2 with the
+  pass-1-only dict. `key` always pre-exists → corrects in place, no doubling.
+
+**Contract.** `_book_propn_set` is a depth-1 callee of **three** wrapped tools —
+`book_archaic_words` (PG84), `affinity_by_book` (PG174) **and `learning_words`
+(PG1342)** (the RAG_TASK named only the first two). WP-C flips all three
+fingerprints; WP-B also edits `book_archaic_words`. → full `record_fixtures` on
+SOW (no `--only`/`--skip-heavy`); three goldens + `_manifest.json` re-recorded.
+Golden diffs are an improvement (fuller propn set), not a regression. The
+`book_propn_cache` `.v2.json` files are recomputed at record time.
+
+A *measured* (diachronic) archaicity signal and a POS-aware homograph count for
+`art` remain future engines (RAG_TASK §6), explicitly out of scope.
+
+---
+
 ## 2026-06-21 — book_archaic precision: trustworthy archaism list (precision-first)
 
 Ships in **2.7.35** (RAG_TASK_book_archaic_precision). The same disease keyness

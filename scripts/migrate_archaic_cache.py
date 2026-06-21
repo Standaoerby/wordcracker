@@ -100,6 +100,14 @@ def pass2_reenrich_violators(cache: dict, apply: bool) -> list[str]:
                 print(f"  ! enrich failed for {key}: {res['error']}",
                       file=sys.stderr)
                 continue
+            # WP-D (2.7.36) — write the re-enriched verdict back into the dict
+            # main() persists. enrich_word(force_refresh=True) writes its own
+            # copy to the file, but main()'s final _save_word_dict(cache) is the
+            # canonical last-write-wins; without this merge-back that final save
+            # clobbers pass-2 with the stale pass-1-only dict (the 2.7.35 bug).
+            # `key` already exists (we never invent entries), so this corrects
+            # in place — no doubling. Strip enrich_word's internal `_`-keys.
+            cache[key] = {k: v for k, v in res.items() if not k.startswith("_")}
             print(f"  re-enriched {key}: archaic "
                   f"{before.get('archaic')} → {res.get('archaic')}, "
                   f"propn {before.get('proper_noun')} → {res.get('proper_noun')}")
