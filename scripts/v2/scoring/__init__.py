@@ -529,6 +529,121 @@ class Dice:
                 f"c_neighbor={scored.extra.get('c_neighbor')})")
 
 
+class LogLikelihood:
+    """Dunning's log-likelihood G² on the 2×2 co-occurrence table.
+
+    Measures statistical SIGNIFICANCE of a (target, neighbor) collocation
+    — how surprised we are by the observed co-occurrence under the
+    independence null. Unlike PMI/NPMI (association strength), G² scales
+    with evidence: a pair seen 40× outranks a 3× pair even when the 3×
+    pair has higher PMI. Rank by G² for "is this real", read PMI/logDice
+    for "how tight".
+
+    2×2 contingency (window-slot model, W = 2*window slots per token):
+        Z   = N * W                      total window slots
+        R1  = c_target * W               slots inside a target window
+        C1  = c_neighbor * W             slots occupied by the neighbor
+        O11 = c_pair                     neighbor inside target window
+        O12 = R1 - O11   O21 = C1 - O11  O22 = Z - R1 - C1 + O11
+        E11 = R1*C1/Z   (etc.)
+        G²  = 2·Σ O·ln(O/E) over the 4 cells, skipping any cell with O≤0
+              or E≤0 (the x·ln(x)→0 limit).
+
+    NOTE: this is the FULL 4-cell table — distinct from the 2-cell
+    keyness.log_likelihood_g2 (target-vs-reference word frequency). Same
+    Dunning family, different contingency; not reusable across the two.
+    """
+    name = "loglikelihood"
+    kinds = ("word_pair",)
+    cost = "cheap"
+
+    def compute(self, query: ScoringQuery) -> list[ScoredItem]:
+        if query.kind != "word_pair":
+            return []
+        unpacked = _wordpair_unpack(query)
+        if unpacked is None:
+            return []
+        N, c_target, W, _ = unpacked
+        Z = N * W
+        R1 = c_target * W
+        out: list[ScoredItem] = []
+        for cand in query.candidates:
+            nc = _candidate_counts(cand)
+            if nc is None:
+                continue
+            word, c_pair, c_neighbor = nc
+            C1 = c_neighbor * W
+            O11 = c_pair
+            O12 = R1 - O11
+            O21 = C1 - O11
+            O22 = Z - R1 - C1 + O11
+            E11 = R1 * C1 / Z if Z else 0.0
+            E12 = R1 - E11
+            E21 = C1 - E11
+            E22 = Z - E11 - E12 - E21
+            g2 = 0.0
+            for o, e in ((O11, E11), (O12, E12), (O21, E21), (O22, E22)):
+                if o > 0 and e > 0:
+                    g2 += o * math.log(o / e)
+            g2 *= 2.0
+            out.append(ScoredItem(
+                id=word, score=g2, direction="higher_better",
+                extra={"c_pair": c_pair, "c_neighbor": c_neighbor,
+                       "expected": round(E11, 3), "observed": c_pair,
+                       "over": c_pair > E11},
+            ))
+        out.sort(key=lambda s: s.score, reverse=True)
+        return out
+
+    def explain(self, scored: ScoredItem) -> str:
+        d = "над" if scored.extra.get("over") else "под"
+        return (f"G² {scored.score:.2f} ({d}-представлено; "
+                f"c_pair={scored.extra.get('c_pair')}, "
+                f"E={scored.extra.get('expected')})")
+
+
+class LogDice:
+    """logDice (Rychlý 2008) — bounded, corpus-size-independent collocation
+    strength. logDice = 14 + log2(2·c_pair / (c_target·W + c_neighbor)).
+
+    Independent of N (unlike PMI), so values are comparable across scopes.
+    Theoretical max 14 (every target window holds the neighbor and vice
+    versa); typical strong collocations land 7–10.
+    """
+    name = "logdice"
+    kinds = ("word_pair",)
+    cost = "cheap"
+
+    def compute(self, query: ScoringQuery) -> list[ScoredItem]:
+        if query.kind != "word_pair":
+            return []
+        unpacked = _wordpair_unpack(query)
+        if unpacked is None:
+            return []
+        _N, c_target, W, _ = unpacked
+        out: list[ScoredItem] = []
+        for cand in query.candidates:
+            nc = _candidate_counts(cand)
+            if nc is None:
+                continue
+            word, c_pair, c_neighbor = nc
+            denom = c_target * W + c_neighbor
+            if denom <= 0 or c_pair <= 0:
+                continue
+            logdice = 14.0 + math.log2(2.0 * c_pair / denom)
+            out.append(ScoredItem(
+                id=word, score=logdice, direction="higher_better",
+                extra={"c_pair": c_pair, "c_neighbor": c_neighbor},
+            ))
+        out.sort(key=lambda s: s.score, reverse=True)
+        return out
+
+    def explain(self, scored: ScoredItem) -> str:
+        return (f"logDice {scored.score:.3f} "
+                f"(c_pair={scored.extra.get('c_pair')}, "
+                f"c_neighbor={scored.extra.get('c_neighbor')})")
+
+
 # ---------- Registry ----------
 
 REGISTRY: dict[str, ScoringPlugin] = {
@@ -539,6 +654,8 @@ REGISTRY: dict[str, ScoringPlugin] = {
     "pmi":            PMI(),
     "npmi":           NPMI(),
     "dice":           Dice(),
+    "loglikelihood":  LogLikelihood(),
+    "logdice":        LogDice(),
 }
 
 

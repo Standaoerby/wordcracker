@@ -584,6 +584,7 @@ def build_collocates(
     collocates: list[dict],          # [{token, npmi, count}]
     window: int,
     scope_label: str,
+    metric_label: str = "NPMI",      # rendered header for the score column
     headline: str | None = None,
     caveats: list[str] | None = None,
     provenance: Provenance | None = None,
@@ -605,6 +606,7 @@ def build_collocates(
             "collocates": collocates,
             "window": window,
             "scope_label": scope_label,
+            "metric_label": metric_label,
         },
         headline=headline,
         caveats=list(caveats or []),
