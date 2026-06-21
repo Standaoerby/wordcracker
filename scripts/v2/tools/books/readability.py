@@ -213,11 +213,26 @@ def book_archaic_words(pg_id: str, top: int = 30) -> ToolResult:
                 "word": r.get("word") or "—",
                 "frequency": r.get("book_count") or "—",
             })
+        # 2.7.35 WP-D — honest coverage caption rendered verbatim by
+        # template_executor.render_caveats (the LLM can't paraphrase the
+        # count into "проверено N слов" = text size). N = distinct word-forms
+        # (freq>=2) checked, M = archaic hits.
+        checked = raw.get("checked_book_vocab") or 0
+        hits = raw.get("seed_or_cache_hits") or 0
+        dropped = raw.get("dropped_propn") or 0
+        caveats = [
+            f"Проверено {checked} различных словоформ книги (частота ≥2) "
+            f"против списка архаизмов; найдено {hits}"
+        ]
+        if dropped:
+            caveats.append(
+                f"отброшено {dropped} имён собственных (NER-фильтр)")
         view = vb.build_top_n_table(
             rows=view_rows,
             columns=["rank", "word", "frequency"],
             headline=f"Архаизмы — {title} ({pg_id})",
             requested_n=top,
+            caveats=caveats,
             language="ru",
         )
         vb.attach_view(result, view, data_validity=DataValidity.OK)

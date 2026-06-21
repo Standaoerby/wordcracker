@@ -321,6 +321,34 @@ def _plan_book_readability(e: Entities) -> QueryPlan:
     return _need_book(e)
 
 
+# 2.7.35 (quality / book_archaic precision) — render honesty notes. The
+# renderer is free-form LLM (rag_v2._llm_render) and SEES raw
+# data.checked_book_vocab, so it paraphrased «проверено 4920 слов» (the
+# coverage count read as text size) and occasionally invented word-rows
+# (morrow/amidst) the tool never returned. These ride plan.render_notes →
+# surfaced as priority [plan] instructions. See RAG_TASK WP-D / WP-E.
+_ARCHAIC_RENDER_NOTES = [
+    # WP-D — honest coverage caption.
+    "ПОДПИСЬ ОХВАТА: data.checked_book_vocab — это число РАЗЛИЧНЫХ "
+    "словоформ книги с частотой ≥2, сверенных со списком архаизмов, а НЕ "
+    "размер текста и НЕ «слов в книге». Формулируй честно: «Проверено N "
+    "различных словоформ (частота ≥2); найдено M архаизмов», где "
+    "N=data.checked_book_vocab, M=data.seed_or_cache_hits. НЕ пиши "
+    "«проверено N слов» в смысле объёма текста.",
+    # WP-E(a) — no-invention guard (prompt side; deterministic row-drop is a
+    # follow-up, RAG_TASK §6).
+    "СТРОГО ПО ДАННЫМ: выведи РОВНО слова из data.top и не добавляй ни "
+    "одного слова, которого там нет (частая ошибка — дописать по памяти "
+    "morrow/amidst/amongst). Каждая строка таблицы обязана иметь "
+    "соответствие в data.top по полю word; чего нет в data.top — того нет "
+    "в ответе.",
+    # WP-B provenance — let the renderer disclose the propn cleanup.
+    "Если data.dropped_propn>0 — список уже очищен от data.dropped_propn "
+    "имён собственных (топонимы/персонажи книги); можешь это упомянуть как "
+    "признак точности, но не выдумывай конкретные отброшенные слова.",
+]
+
+
 @_with_copyright_check
 def _plan_book_archaic(e: Entities) -> QueryPlan:
     if e.book_id:
@@ -330,6 +358,7 @@ def _plan_book_archaic(e: Entities) -> QueryPlan:
                             args={"pg_id": e.book_id, "top": e.top_n or 30})],
             expected_cost="medium",
             explain=f"book_archaic_words({e.book_id})",
+            render_notes=list(_ARCHAIC_RENDER_NOTES),
         )
     if e.book_title:
         return QueryPlan(
@@ -342,6 +371,7 @@ def _plan_book_archaic(e: Entities) -> QueryPlan:
             ],
             expected_cost="medium",
             explain="find_book → book_archaic_words",
+            render_notes=list(_ARCHAIC_RENDER_NOTES),
         )
     return _need_book(e)
 

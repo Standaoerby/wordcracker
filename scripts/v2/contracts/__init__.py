@@ -165,6 +165,10 @@ INTERNAL_V2_KEYS = frozenset({
     "n_books", "n_authors",
     # filter-drop counters wrappers stamp onto raw
     "_filter_drops",
+    # book_archaic_words proper-noun gate counter (2.7.35) — v1 emits it,
+    # the readability wrapper reads it for the coverage caveat. Per RAG_TASK
+    # §5 this lives here, NOT in the v1 schema (min_ll pattern).
+    "dropped_propn",
     # scope-arg reads (scope.get("book") / scope.get("author")) —
     # the scope dict is a wrapper-input arg, not a v1 result. AST can't
     # distinguish so we admit them globally.

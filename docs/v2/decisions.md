@@ -6,6 +6,54 @@
 
 ---
 
+## 2026-06-21 — book_archaic precision: trustworthy archaism list (precision-first)
+
+Ships in **2.7.35** (RAG_TASK_book_archaic_precision). The same disease keyness
+treated for affinity: "archaic" was *declared by a hand-list*, not derived from
+data. This sprint cleans the list and its application so a linguist trusts the
+output from the first row. A *measured* (diachronic) archaicity signal is a
+future engine (RAG_TASK §6.2); recall is explicitly **out of scope**.
+
+**Why (verified, learning_tools.py:784).** `book_archaic_words` tagged a word
+archaic from two sources only — `_KNOWN_ARCHAISMS` seed + `word_dictionary.json`
+cache — with **no POS / proper-noun / homograph filter**. Dracula's prod output
+led with `amongst` (standard formal English, a seed false-positive) and carried
+`galatz` (a Danube port — GPE the LLM mis-tagged), `calèche`/`chloral` (dated
+*referents*, not archaic *words*), plus renderer-invented rows and a misleading
+"проверено 4920 слов" caption.
+
+**Decision.**
+- **WP-A** — prune the seed: drop `amongst, amidst, ought, albeit, hence, ado,
+  bespoke, fortnight` (modern formal) and `clad, smitten, wrought, aye` (live
+  homograph/dialect); keep defensible forms (`thee…thou`, `ye, ere, whither,
+  behold, tarry, oft, alas`). Q2 verdicts in the RAG_TASK plan.
+- **WP-B** — proper-noun gate reusing **existing** machinery: the cache
+  `proper_noun` flag **and** the per-book spaCy **NER** set `_book_propn_set`
+  (the same pass `affinity_by_book` runs, cached per book). NER-in-context, not
+  isolated-token POS — the latter mistags OOV archaisms (`ye/nay/quoth`) as
+  PROPN and would drop *real* archaisms. Empty NER set (no raw text) ⇒ no-op.
+- **WP-C** — `ENRICH_PROMPT` now separates an archaic *word/form* from a dated
+  *referent* (`calèche/chloral` → archaic=false; `proper_noun ⇒ archaic=false`).
+  One-shot bounded cache migration `scripts/migrate_archaic_cache.py` flips
+  `archaic∧proper_noun` and re-enriches a small violator list (no full-cache
+  re-enrich — VRAM/time).
+- **WP-D/E** — honesty: a deterministic coverage caveat in the view ("N distinct
+  word-forms freq≥2; found M") + `plan.render_notes` instructing the free-form
+  renderer to phrase coverage honestly and emit **exactly** `data.top` rows
+  (no invented words). Deterministic row-drop deferred (E-b, follow-up).
+- **WP-F** — `art` homograph (verb «thou art» vs noun) is disclosed in the row
+  `note`; POS-aware counts are a future sprint.
+
+**Contract.** WP-B edits the recorded v1 body → `ast_fingerprint` flips →
+`FixtureFreshnessGate` red until a full `record_fixtures` on SOW (3.11 + corpus)
+re-stamps `_manifest.json` + the PG84 golden into the branch (R-RESTAMP, keyness
+#71 / collocation #72 pattern; `--only` forbidden — green-but-blind). v2 surface
+(`pg_id`,`top`) unchanged; `dropped_propn` lives in `INTERNAL_V2_KEYS`, not the
+v1 schema (min_ll pattern). `enrich_word` is `FIXTURE_EXEMPT` (LLM-generative) →
+the prompt change is live-only, nothing to re-record there.
+
+---
+
 ## 2026-06-19 — Keyness word-selection: log-likelihood G² + LogRatio replaces the affinity ratio
 
 Ships in **2.7.33** (RAG_TASK_keyness_word_selection). The "characteristic
