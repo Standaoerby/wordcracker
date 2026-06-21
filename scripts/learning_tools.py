@@ -674,12 +674,17 @@ Return JSON ONLY, no other text. Keys:
 - "definition_en": one-sentence simple English definition (10-15 words)
 - "example_sentence": one short example sentence using the word
 - "cefr_estimate": "A2"/"B1"/"B2"/"C1"/"C2"
-- "archaic": true if the word is archaic / obsolete / no longer in everyday
-    modern English (Victorian-era or earlier register only). False if still
-    in current use. Examples of archaic=true: thee, thou, hath, ere, oft,
-    nay, wherefore, betwixt, prithee, methinks, anon, forsooth, doth, ye,
-    yon, hither, perchance. Examples archaic=false: house, run, terrible,
-    candle, gentleman (still in use).
+- "archaic": true ONLY if the *word / form itself* has fallen out of use
+    (Victorian-era or earlier register). A modern-spellable noun that merely
+    NAMES a historical object or technology is NOT archaic — set
+    archaic=false; it is a *dated referent*, not an archaic word. If
+    proper_noun=true, archaic MUST be false. Examples archaic=true (the form
+    is obsolete): thee, thou, hath, ere, oft, nay, wherefore, betwixt,
+    prithee, methinks, anon, forsooth, doth, ye, yon, hither, perchance.
+    Examples archaic=false, still in current use: house, run, terrible,
+    candle, gentleman. Examples archaic=false, dated REFERENT but ordinary
+    modern word: calèche, chloral, corset, telegram, brougham (the object is
+    old; the word is not).
 - "archaic_note": one short phrase explaining the archaism if archaic=true,
     otherwise empty string. e.g. "Middle English 2nd-person singular pronoun";
     "older 'before/until' conjunction"; "King-James-Bible style affirmation".
@@ -760,24 +765,35 @@ def enrich_word(word: str, contexts: list[str] | None = None,
 # archaic=True regardless of LLM verdict, so 'archaisms in Dracula' returns
 # something useful immediately without first round-tripping every candidate
 # through enrich_word.
+#
+# 2.7.35 (quality / book_archaic precision, WP-A) — pruned so a linguist
+# trusts the list from the first row. REMOVED as standard-but-formal modern
+# English (not archaic): amongst, amidst, ought, albeit, hence, ado, bespoke,
+# fortnight. REMOVED as having a dominant live sense that pollutes the count
+# (homograph / current usage): clad ("clad in", "iron-clad"), smitten
+# ("smitten with"), wrought ("wrought iron/havoc"), aye (Scots/nautical/
+# parliamentary "the ayes have it" — the archaic-affirmation slot stays via
+# `yea`). KEPT borderline forms with no live everyday sense: behold, tarry,
+# oft, alas. Duplicate entries (betimes/withal/albeit/ado) also collapsed.
+# See RAG_TASK_book_archaic_precision.md WP-A / Q2.
 _KNOWN_ARCHAISMS = {
     "thee", "thou", "thy", "thine", "ye", "yon", "yonder",
     "hath", "doth", "dost", "art", "wast", "wert", "shalt", "wilt",
-    "ere", "oft", "nay", "yea", "aye",
-    "wherefore", "whither", "whence", "hence", "thence", "hither", "thither",
-    "betwixt", "amongst", "amidst", "athwart", "anon", "betimes",
+    "ere", "oft", "nay", "yea",
+    "wherefore", "whither", "whence", "thence", "hither", "thither",
+    "betwixt", "athwart", "anon", "betimes",
     "prithee", "methinks", "perchance", "mayhap", "forsooth", "verily",
     "fain", "alack", "alas", "lo", "behold",
-    "gainsay", "vouchsafe", "bespoke", "bestrid", "begat", "begot",
+    "gainsay", "vouchsafe", "bestrid", "begat", "begot",
     "quoth", "saith", "speakest", "hearest", "knowest",
-    "naught", "aught", "ought", "wot",
-    "ado", "albeit", "anent", "haply", "natheless", "withal",
+    "naught", "aught", "wot",
+    "anent", "haply", "natheless", "withal",
     "morrow", "yestreen", "eventide", "tarry",
     "varlet", "knave", "wench", "swain", "damsel", "yeoman", "burgess",
-    "smite", "smote", "smitten", "wrought",
-    "thrice", "fortnight", "sennight",
-    "perforce", "betimes", "withal", "albeit",
-    "ado", "bade", "clad", "spake", "girt", "girded",
+    "smite", "smote",
+    "thrice", "sennight",
+    "perforce",
+    "bade", "spake", "girt", "girded",
 }
 
 
@@ -790,9 +806,13 @@ def book_archaic_words(pg_id: str, top: int = 30,
     Strategy:
       1. Walk the book's counts file.
       2. Two sources of 'archaic=True' verdicts:
-         - _KNOWN_ARCHAISMS curated seed list (instant, ~80 well-known forms)
+         - _KNOWN_ARCHAISMS curated seed list (instant, ~70 well-known forms)
          - word_dictionary.json cache: any previously-enriched word whose
            archaic flag was set True by the LLM (D36 enrich_word prompt).
+      2.5 Proper-noun gate (2.7.35, WP-B): drop any candidate that is a name
+         — flagged by the cache `proper_noun` field OR present in the per-book
+         spaCy NER set (`_book_propn_set`). Reports the count as
+         `dropped_propn`. Kills the galatz/varna/bistritz false-positives.
       3. Optionally (enrich_unknown=True), for the next `enrich_budget`
          mid-frequency candidates not in either source, run enrich_word and
          tag the result. This is the slow path — disabled by default; agent
@@ -813,13 +833,31 @@ def book_archaic_words(pg_id: str, top: int = 30,
     cache = _load_word_dict()
     cache_archaic: set[str] = set()
     cache_notes: dict[str, str] = {}
+    cache_propn: set[str] = set()
     for key, info in cache.items():
+        w = key.split("|", 1)[0]
+        if info.get("proper_noun") is True:
+            cache_propn.add(w)
         if info.get("archaic") is True:
-            w = key.split("|", 1)[0]
             cache_archaic.add(w)
             note = info.get("archaic_note") or ""
             if note:
                 cache_notes[w] = note
+
+    # WP-B (2.7.35) — proper-noun gate. Two reused signals, no new machinery:
+    #   1. cache `proper_noun=True` — the LLM already opted the name out
+    #      (enrich_word's ENRICH_PROMPT asks for this flag);
+    #   2. the per-book spaCy NER set `_book_propn_set(pg)` — catches names
+    #      the LLM mis-tagged. galatz/varna/bistritz/borgo/whitby are
+    #      GPE/LOC/PERSON in Dracula's actual text but leaked into the
+    #      archaic cache with proper_noun=false. This is the SAME NER pass
+    #      affinity_by_book already runs, cached once per book.
+    # We deliberately do NOT POS-tag the isolated archaic words: spaCy
+    # mistags OOV lowercase forms (ye/nay/quoth/anent) as PROPN and would
+    # drop REAL archaisms — the opposite of precision. NER-in-context is the
+    # safe signal. With no raw text (tests/CI) the NER set is empty → the
+    # gate is a harmless no-op. NER tokens are len>=3, so ye/lo are immune.
+    proper_nouns = cache_propn | _book_propn_set(pg)
 
     # 1) seed pass
     book_counts: dict[str, int] = {}
@@ -834,15 +872,25 @@ def book_archaic_words(pg_id: str, top: int = 30,
             book_counts[w] = c
 
     rows: list[dict] = []
+    dropped_propn = 0
     for w, c in book_counts.items():
-        if w in _KNOWN_ARCHAISMS:
-            rows.append({"word": w, "book_count": c,
-                         "source": "seed",
-                         "note": cache_notes.get(w, "")})
-        elif w in cache_archaic:
-            rows.append({"word": w, "book_count": c,
-                         "source": "enrich_cache",
-                         "note": cache_notes.get(w, "")})
+        is_seed = w in _KNOWN_ARCHAISMS
+        if not (is_seed or w in cache_archaic):
+            continue
+        if w in proper_nouns:
+            dropped_propn += 1
+            continue
+        note = cache_notes.get(w, "")
+        # WP-F (2.7.35) — `art` is a counted homograph: the seed flags the
+        # archaic verb «thou art», but `.counts` can't split it from the noun
+        # «art», so the count conflates both. Disclose it rather than silently
+        # overcount. POS-aware split is a future sprint (RAG_TASK §6.3).
+        if w == "art":
+            _art = "счёт включает современное значение (искусство)"
+            note = f"{note}; {_art}" if note else _art
+        rows.append({"word": w, "book_count": c,
+                     "source": "seed" if is_seed else "enrich_cache",
+                     "note": note})
 
     # 2) optional enrich pass for mid-frequency candidates
     enriched_count = 0
@@ -868,17 +916,27 @@ def book_archaic_words(pg_id: str, top: int = 30,
         for w, c, cc in candidates[:enrich_budget]:
             res = enrich_word(w, contexts=[""], lemma_hint=w, pos_hint="")
             enriched_count += 1
+            # Same proper-noun gate as the seed/cache pass (WP-B): a live
+            # enrich verdict can name a place/person too.
+            if res.get("proper_noun") is True or w in proper_nouns:
+                if res.get("archaic") is True:
+                    dropped_propn += 1
+                continue
             if res.get("archaic") is True:
                 rows.append({"word": w, "book_count": c,
                              "source": "enrich_live",
                              "note": res.get("archaic_note", "")})
 
     rows.sort(key=lambda r: -r["book_count"])
+    if dropped_propn:
+        _log(f"book_archaic_words({pg}) dropped {dropped_propn} proper-noun "
+             f"false-positive(s) via NER+cache gate")
     return {
         "id": pg,
         "checked_book_vocab": len(book_counts),
         "seed_or_cache_hits": len(rows) - sum(1 for r in rows if r["source"] == "enrich_live"),
         "enriched_now": enriched_count,
+        "dropped_propn": dropped_propn,
         "top": rows[:top],
         "_elapsed_s": round(time.perf_counter() - t0, 2),
     }

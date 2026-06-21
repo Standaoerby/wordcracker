@@ -150,6 +150,7 @@ CI на каждом PR: mandatory version-bump, probe-config sanity,
 
 | Версии | Дата | Что |
 |---|---|---|
+| **2.7.35** | **2026-06-21** | book_archaic precision: чистка seed-словаря (amongst/amidst/ought/…), proper-noun NER-гейт (galatz/varna/bistritz), архаичное СЛОВО vs устаревший РЕФЕРЕНТ в enrich-промпте, честная подпись охвата |
 | **2.7.9–2.7.10** | **2026-06-11** | learning-polish (low-temp render, table-aware critic payload) + честный учебный контент (этимология/примеры только из данных, propn-гейт переводов) |
 | 2.7.6–2.7.8 | 2026-06-11 | learning_books + meta-пак + fail-fast; words+translations композиция; books-vs-authors дизамбигуация |
 | 2.7.4–2.7.5 | 2026-06-11 | honest filtering: propn gazetteer+cap-ratio, claimed-vs-shown критик, numeric table trust |
