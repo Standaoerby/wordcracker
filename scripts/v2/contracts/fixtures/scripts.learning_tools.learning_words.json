@@ -9,19 +9,6 @@
   "pos_filter": [],
   "results": [
     {
-      "affinity": 270.0,
-      "corpus_count": 885,
-      "example_context": "the present concern to the little town of [LAMBTON] the scene of former residence and where she",
-      "g2": 92.16,
-      "lemma": "lambton",
-      "log_ratio": 8.093,
-      "pos": "PROPN",
-      "rel_freq": 270.0,
-      "scope_count": 10,
-      "score": 7.17,
-      "word": "lambton"
-    },
-    {
       "affinity": 50.51,
       "corpus_count": 5677,
       "example_context": "was to have a lieutenant commission in the [SHIRE] she had been watching him the last hour",
@@ -295,19 +282,6 @@
       "word": "easiness"
     },
     {
-      "affinity": 41.07,
-      "corpus_count": 2327,
-      "example_context": "their route he did trace them easily to [CLAPHAM] but no further for on entering that place",
-      "g2": 21.92,
-      "lemma": "clapham",
-      "log_ratio": 5.363,
-      "pos": "PROPN",
-      "rel_freq": 41.07,
-      "scope_count": 4,
-      "score": 5.468,
-      "word": "clapham"
-    },
-    {
       "affinity": 55.18,
       "corpus_count": 1299,
       "example_context": "could there be finer symptoms is not general [INCIVILITY] the very essence of love oh yes of",
@@ -412,6 +386,19 @@
       "word": "teasing"
     },
     {
+      "affinity": 28.98,
+      "corpus_count": 3298,
+      "example_context": "saturday before to make up her pool of [QUADRILLE] in the evening lady catherine was reckoned proud",
+      "g2": 19.21,
+      "lemma": "quadrille",
+      "log_ratio": 4.859,
+      "pos": "PROPN",
+      "rel_freq": 28.98,
+      "scope_count": 4,
+      "score": 5.196,
+      "word": "quadrille"
+    },
+    {
       "affinity": 26.8,
       "corpus_count": 3567,
       "example_context": "very dances and to have collins instead her [LIVELINESS] had never been worse timed there was no",
@@ -449,19 +436,6 @@
       "scope_count": 7,
       "score": 5.1,
       "word": "condescension"
-    },
-    {
-      "affinity": 31.51,
-      "corpus_count": 2275,
-      "example_context": "a few moments it was first broken by [ANNESLEY] a genteel woman whose endeavour to introduce some",
-      "g2": 14.9,
-      "lemma": "annesley",
-      "log_ratio": 4.98,
-      "pos": "PROPN",
-      "rel_freq": 31.51,
-      "scope_count": 3,
-      "score": 5.076,
-      "word": "annesley"
     },
     {
       "affinity": 20.67,
@@ -594,19 +568,6 @@
       "word": "repine"
     },
     {
-      "affinity": 23.54,
-      "corpus_count": 3045,
-      "example_context": "and dismissed the chaise that brought them from [EPSOM] all that is known after this is that",
-      "g2": 13.21,
-      "lemma": "epsom",
-      "log_ratio": 4.559,
-      "pos": "PROPN",
-      "rel_freq": 23.54,
-      "scope_count": 3,
-      "score": 4.842,
-      "word": "epsom"
-    },
-    {
       "affinity": 19.41,
       "corpus_count": 4925,
       "example_context": "her about it directly she is a very [HEADSTRONG] foolish girl and does not know her own",
@@ -657,6 +618,45 @@
       "scope_count": 6,
       "score": 4.789,
       "word": "conceited"
+    },
+    {
+      "affinity": 15.7,
+      "corpus_count": 7612,
+      "example_context": "accomplished for her age her performance on the [PIANOFORTE] is it is amazing to me said bingley",
+      "g2": 18.17,
+      "lemma": "pianoforte",
+      "log_ratio": 3.973,
+      "pos": "NOUN",
+      "rel_freq": 15.7,
+      "scope_count": 5,
+      "score": 4.746,
+      "word": "pianoforte"
+    },
+    {
+      "affinity": 21.05,
+      "corpus_count": 3405,
+      "example_context": "de bourgh exerted herself so far as to [CURTSEY] and hold out her hand to both chapter",
+      "g2": 12.57,
+      "lemma": "curtsey",
+      "log_ratio": 4.397,
+      "pos": "VERB",
+      "rel_freq": 21.05,
+      "scope_count": 3,
+      "score": 4.745,
+      "word": "curtsey"
+    },
+    {
+      "affinity": 21.03,
+      "corpus_count": 3409,
+      "example_context": "bingley was endeared to darcy by the easiness [OPENNESS] and ductility of his temper though no disposition",
+      "g2": 12.56,
+      "lemma": "openness",
+      "log_ratio": 4.395,
+      "pos": "NOUN",
+      "rel_freq": 21.03,
+      "scope_count": 3,
+      "score": 4.744,
+      "word": "openness"
     }
   ],
   "scope": "book:PG1342",
