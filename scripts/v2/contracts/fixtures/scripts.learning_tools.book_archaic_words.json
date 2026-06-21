@@ -1,10 +1,16 @@
 {
   "checked_book_vocab": 3993,
-  "dropped_propn": 2,
+  "dropped_propn": 0,
   "enriched_now": 0,
   "id": "PG84",
-  "seed_or_cache_hits": 16,
+  "seed_or_cache_hits": 18,
   "top": [
+    {
+      "book_count": 20,
+      "note": "",
+      "source": "seed",
+      "word": "alas"
+    },
     {
       "book_count": 18,
       "note": "",
@@ -16,6 +22,12 @@
       "note": "",
       "source": "seed",
       "word": "thou"
+    },
+    {
+      "book_count": 13,
+      "note": "",
+      "source": "seed",
+      "word": "behold"
     },
     {
       "book_count": 10,
@@ -52,18 +64,6 @@
       "note": "",
       "source": "seed",
       "word": "bade"
-    },
-    {
-      "book_count": 4,
-      "note": "",
-      "source": "seed",
-      "word": "morrow"
-    },
-    {
-      "book_count": 4,
-      "note": "",
-      "source": "seed",
-      "word": "whence"
     }
   ]
 }
