@@ -527,6 +527,11 @@ def _render_collocates(view: RenderableView) -> str:
     scope = safe_str(p.get("scope_label"), default="")
     window_raw = p.get("window")
     window = safe_str(window_raw, default="?") if window_raw is not None else "?"
+    # Header names the active metric (G²/logDice/PMI/Dice/NPMI). The score
+    # value lives in the single "npmi" payload slot regardless of metric —
+    # word_collocates stamps c.get(metric_lc) there; default "NPMI" keeps
+    # count / emotion_collocates byte-identical.
+    metric_label = safe_str(p.get("metric_label"), default="NPMI")
 
     parts = [f"### Коллокаты — «{word}» ({scope}, окно ±{window})\n"]
     rows = []
@@ -536,7 +541,7 @@ def _render_collocates(view: RenderableView) -> str:
             format_float(c.get("npmi"), digits=3),
             format_int(c.get("count")),
         ])
-    parts.append(md_table(["Слово", "NPMI", "Вхождений"], rows))
+    parts.append(md_table(["Слово", metric_label, "Вхождений"], rows))
     return "\n".join(parts) + render_caveats(view.caveats)
 
 

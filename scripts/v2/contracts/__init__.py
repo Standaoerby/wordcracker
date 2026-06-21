@@ -172,7 +172,7 @@ INTERNAL_V2_KEYS = frozenset({
     # scoring-plugin row fields and v2-built collocates metadata
     "score", "npmi", "c_pair", "c_neighbor",
     "scope_total_tokens", "scope_target_count", "scope_books_scanned",
-    "min_cooccurrence",
+    "min_cooccurrence", "min_ll",
     # legacy emotion/etymology phantom fallbacks moved to schema row_keys;
     # any leftover transitional reads. (`etymology_chain` dropped in T2 —
     # never emitted by v1, no longer read by any wrapper.)

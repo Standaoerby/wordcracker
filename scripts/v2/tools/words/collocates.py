@@ -25,6 +25,7 @@ from scripts.v2.tool_registry import tool
 from scripts.v2._types import Coverage, ToolResult, ToolWarning
 from scripts.v2.contracts import v1_contract
 from scripts.v2.contracts.schemas import V1WordCollocates
+from scripts.keyness import MIN_LL_P0001  # χ²₁ p<0.0001 = 15.13 (single-source)
 
 
 # W-15 (2026-05-24) — defense-in-depth at the v2 wrapper layer.
@@ -51,12 +52,24 @@ def _wrapper_stopword_set() -> frozenset[str]:
         })
 
 
+# E40 follow-up: the COLLOCATES view stores the active metric's score in a
+# single payload slot, but the rendered column header must NAME the metric
+# the user actually got (G²/logDice ≠ NPMI). word_collocates passes the
+# display label; emotion_collocates / count fall through to the "NPMI"
+# default so their rendered output is unchanged.
+_METRIC_COLUMN_LABEL = {
+    "npmi": "NPMI", "pmi": "PMI", "dice": "Dice",
+    "loglikelihood": "G²", "logdice": "logDice",
+}
+
+
 @tool(
     name="word_collocates",
     category="words",
     description=("Слова в окне ±N токенов вокруг target word в scope. "
-                 "Опциональный metric=pmi|npmi|dice для рерэнка по силе ассоциации "
-                 "(вместо сырого count)."),
+                 "Опциональный metric=pmi|npmi|dice|loglikelihood|logdice для "
+                 "рерэнка по силе ассоциации (npmi/pmi/dice) или статистической "
+                 "значимости (loglikelihood=G², logdice) вместо сырого count."),
     input_schema={
         "type": "object",
         "properties": {
@@ -66,8 +79,9 @@ def _wrapper_stopword_set() -> frozenset[str]:
             "top":                {"type": "integer", "description": "default 20"},
             "exclude_stopwords":  {"type": "boolean", "description": "default true"},
             "max_books":          {"type": "integer", "description": "default 8000"},
-            "metric":             {"type": "string",  "description": "count|pmi|npmi|dice (default npmi — W-15)"},
+            "metric":             {"type": "string",  "description": "count|pmi|npmi|dice|loglikelihood|logdice (default npmi — W-15)"},
             "min_cooccurrence":   {"type": "integer", "description": "filter pairs with c(t,w) below this (default 5)"},
+            "min_ll":             {"type": "number",  "description": "G² floor for metric=loglikelihood (default 15.13 ≈ χ²₁ p<0.0001)"},
         },
         "required": ["scope", "word"],
     },
@@ -80,9 +94,13 @@ def _wrapper_stopword_set() -> frozenset[str]:
     # exclude_stopwords on). Bump wrapper_version so old npmi=None rows
     # in cache get recomputed.
     # W-15 polish (2026-05-24) — wrapper-level stopword filter added
-    # (defense-in-depth over v1 _HIGH_FREQ_NEIGHBOR_DROP). Bump again
-    # so cached top-lists carrying off/under/there get invalidated.
-    wrapper_version="v4-w15-extended-stopwords",
+    # (defense-in-depth over v1 _HIGH_FREQ_NEIGHBOR_DROP).
+    # Collocation-significance (2026-06-21) — +loglikelihood (G²) / logdice
+    # opt-in metrics + min_ll floor. Bump so cached top-lists recompute
+    # under the new metric dispatch. Keep "w15" in the label: the W-15
+    # stopword filter is still active above, and W15WrapperVersionBumped
+    # locks that lineage (cache-invalidation provenance).
+    wrapper_version="v5-w15-significance-metrics",
 )
 @v1_contract(v1_fn="scripts.rag_tools.word_collocates",
              schema=V1WordCollocates)
@@ -90,7 +108,8 @@ def word_collocates(scope, word: str, window: int = 4, top: int = 20,
                     exclude_stopwords: bool = True,
                     max_books: int = 8000,
                     metric: str = "npmi",
-                    min_cooccurrence: int = 5) -> ToolResult:
+                    min_cooccurrence: int = 5,
+                    min_ll: float = MIN_LL_P0001) -> ToolResult:
     # Late binding via fresh import so tests can `mock.patch
     # ("scripts.rag_tools.word_collocates")` without re-loading the
     # wrapper module. The top-level import above is kept solely to bind
@@ -172,6 +191,11 @@ def word_collocates(scope, word: str, window: int = 4, top: int = 20,
                         options={"c_target": c_target, "N": N,
                                  "window": window},
                     ))
+                    # G² significance floor — only loglikelihood. Drop pairs
+                    # below the χ²₁ critical value (default p<0.0001) BEFORE
+                    # trimming to top, so the top-N is significance-clean.
+                    if metric_lc == "loglikelihood":
+                        scored = [s for s in scored if s.score >= min_ll]
                     if scored:
                         new_rows = []
                         for s in scored[:top]:
@@ -189,6 +213,8 @@ def word_collocates(scope, word: str, window: int = 4, top: int = 20,
                             raw["top_collocates"] = new_rows
                             raw["metric"] = metric_lc
                             raw["min_cooccurrence"] = min_cooccurrence
+                            if metric_lc == "loglikelihood":
+                                raw["min_ll"] = min_ll
                             raw["scope_total_tokens"] = N
                             raw["scope_target_count"] = c_target
                             raw["scope_books_scanned"] = n_books_scanned
@@ -256,6 +282,7 @@ def word_collocates(scope, word: str, window: int = 4, top: int = 20,
             collocates=collocates,
             window=window,
             scope_label=scope_str,
+            metric_label=_METRIC_COLUMN_LABEL.get(metric_lc, "NPMI"),
             language="ru",
         )
         validity = DataValidity.OK if collocates else DataValidity.EMPTY_EXPECTED
