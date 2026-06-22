@@ -912,6 +912,63 @@ def top_ngrams_by_book(pg_id: str, n: int = 1, top: int = 20,
         return {"error": "top_ngrams_by_book failed", "details": str(e)}
 
 
+AUTHOR_PROPN_DIR = DERIVED_DIR / "author_propn_cache"
+
+
+def _author_propn_set(author_regex: str, slug: str) -> set[str]:
+    """Union of `_book_propn_set(pg)` over the author's regex-matched books —
+    the author-level proper-noun shield for affinity_by_author (WP-A, 2.7.37).
+
+    This is the structural NER defence the dunwich leak proved we need:
+    `dunwich` is a real Suffolk village (corpus 528 ≫ author 38) so the
+    corpus-diff heuristic, isolated-token spaCy POS and the word_dict cache all
+    pass it — only NER over the raw text in context (PERSON/GPE/LOC/...) catches
+    it. We re-match the author regex here (same `mask_lang & mask_auth` as
+    spgc_author_affinity.py) so the shield works for ALREADY-cached authors
+    without a base regen — Q1 default, self-contained.
+
+    Cached per-slug at /…/derived/author_propn_cache/<slug>.v1.json; the
+    per-book `_book_propn_set` cache underneath is shared and often warm from
+    affinity_by_book / book_archaic. Cold cost (a prolific author × ~5-15s/book)
+    is paid once. Degrades to an empty set when raw text is absent (CI / local
+    dev) → no over-drop, the existing filters still apply.
+    """
+    cache_path = AUTHOR_PROPN_DIR / f"{slug}.v1.json"
+    if cache_path.exists():
+        try:
+            with open(cache_path, encoding="utf-8") as fh:
+                return set(json.load(fh))
+        except Exception as e:
+            _log(f"author_propn cache read failed for {slug}: {e}")
+
+    try:
+        from learning_tools import _book_propn_set
+    except Exception as e:
+        _log(f"_book_propn_set import failed: {e}")
+        return set()
+
+    try:
+        sel = _select_books(author_regex)
+    except Exception as e:
+        _log(f"_author_propn_set book select failed for {slug}: {e}")
+        return set()
+
+    propn: set[str] = set()
+    for pg in sel["id"]:
+        try:
+            propn |= _book_propn_set(pg)
+        except Exception as e:
+            _log(f"_book_propn_set({pg}) skipped in author union: {e}")
+
+    try:
+        AUTHOR_PROPN_DIR.mkdir(parents=True, exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as fh:
+            json.dump(sorted(propn), fh, ensure_ascii=False)
+    except Exception as e:
+        _log(f"author_propn cache write failed for {slug}: {e}")
+    return propn
+
+
 # ============================ TOOL 4: affinity_by_author ============================
 def affinity_by_author(author_regex: str, top: int = 50, min_author_count: int = 5,
                        min_corpus_count: int = 0,
@@ -943,6 +1000,15 @@ def affinity_by_author(author_regex: str, top: int = 50, min_author_count: int =
     filtered out via spaCy NER, so the top is real stylistic markers like
     "blighter" instead of "Wrykyn" / "Threepwood". A stale clean variant
     (legacy schema) is ignored in favour of the regenerated base CSV.
+
+    Structural NER shield (WP-A, 2.7.37): regardless of which CSV is served,
+    candidates are filtered against `_author_propn_set` — the union of whole-book
+    spaCy NER (`_book_propn_set`) over the author's books — before the final top.
+    This is the in-code defence the `dunwich` leak proved we need: a real
+    toponym (corpus 528 ≫ author 38) passes the corpus-diff heuristic, the
+    isolated-token POS pass and the word_dict cache, and the offline clean CSV
+    had silently disabled itself (legacy schema). Same `_book_propn_set` that
+    killed `galatz` in book_archaic (WP-C); see decisions.md 2026-06-22.
 
     min_corpus_count: if > 0, drop rows where corpus_count < min_corpus_count.
     Useful for filtering OOV/proper-noun bleed-through that spaCy POS misses
@@ -1100,6 +1166,28 @@ def affinity_by_author(author_regex: str, top: int = 50, min_author_count: int =
                          f"propn via word_dict cache")
         except Exception as e:
             _log(f"propn cache filter skipped: {e}")
+
+        # Final, structural NER shield (WP-A 2.7.37). The three filters above
+        # are all too weak for a real toponym like `dunwich` (Suffolk village,
+        # corpus 528 ≫ author 38 → passes corpus-diff; lowercased single token →
+        # spaCy POS unreliable; absent from word_dict). Drop any candidate that
+        # whole-book NER tagged as a proper name (PERSON/GPE/LOC/ORG/NORP/...)
+        # across the author's books — the same `_book_propn_set` that fixed the
+        # `galatz` leak in book_archaic (WP-C). Mirror book_archaic: match on the
+        # lowercased word, like exclude_stopwords above.
+        author_ner_dropped = 0
+        try:
+            propn_set = _author_propn_set(author_regex, slug)
+            if propn_set and len(df):
+                pre = len(df)
+                df = df[~df["word"].str.lower().isin(propn_set)]
+                author_ner_dropped = pre - len(df)
+                if author_ner_dropped:
+                    _log(f"affinity_by_author dropped {author_ner_dropped} "
+                         f"propn via author-NER union")
+        except Exception as e:
+            _log(f"author-NER filter skipped: {e}")
+
         df = (df.sort_values(rank_field, ascending=False, na_position="last")
               if rank_field else df).head(top)
 
@@ -1135,7 +1223,8 @@ def affinity_by_author(author_regex: str, top: int = 50, min_author_count: int =
             "cached":             cached,
             "proper_noun_filter": (
                 f"corpus-diff heuristic dropped {heuristic_dropped}, "
-                f"spaCy PROPN dropped {propn_dropped}"
+                f"spaCy PROPN dropped {propn_dropped}, "
+                f"author-NER dropped {author_ner_dropped}"
                 + (" (over NER-cleaned base)" if use_clean else "")
             ),
         }
