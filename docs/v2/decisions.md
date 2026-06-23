@@ -5,6 +5,78 @@
 > One section per decision. Newest at the top.
 
 ---
+## 2026-06-22 — author-keyness: structural NER shield for proper nouns (the dunwich leak) (2.7.37)
+
+**Spec:** `RAG_TASK_author_keyness_propn.md` (Russian). Status: APPROVED — WP-A.
+
+### Why
+`dunwich` (a toponym — "The Dunwich Horror" + a real village in Suffolk) leaked into
+Lovecraft's keyness output (`compare_authors` / `affinity_by_author`; prod screenshots,
+2.7.36). Root cause: the one in-context NER defense — the NER-cleaned variant
+`{slug}_affinity_clean.csv` produced by `ner_filter_affinity.py` — is bypassed. The clean
+variants on disk pre-date the 2.7.33 keyness upgrade, so they lack the `g2` / `log_ratio`
+columns → `_has_keyness_cols(clean_path)` returns False (rag_tools.py:~985) → the non-NER
+base CSV is served instead. Structural gap on top: the regen path
+(`spgc_author_affinity.py`, called on cache-miss) produces ONLY the base CSV — it never
+emits a clean variant at all, so a freshly-queried author has no NER cleaning whatsoever.
+The three live proper-noun filters in `affinity_by_author` are all too weak for `dunwich`:
+the corpus-diff heuristic (drop if `corpus_count - author_count < max(10, author_count*0.5)`)
+passes it because Dunwich is a real place (corpus 528 ≫ author 38 → not author-unique);
+isolated-token spaCy POS is unreliable on a single lowercased token; the `word_dict` cache
+does not flag it. Same disease as the `galatz` leak in book_archaic.
+
+### Decision
+**WP-A — author-level NER in the live serving path.** Build an author proper-noun set as the
+union of `_book_propn_set(pg)` over the author's regex-matched books (regex re-matched against
+metadata inside `affinity_by_author`); drop any candidate word in that set, after the existing
+corpus-diff / POS / word_dict filters, before the final `head(top)`. Cache the union per-slug
+at `/data/spgc/derived/author_propn_cache/<slug>.v1.json`; the per-book `_book_propn_set` cache
+is shared (often warm from `affinity_by_book` / `book_archaic`).
+
+Q-defaults (Code proceeds on these unless blocked): Q1 = re-match regex in `affinity_by_author`
+(self-contained, works for already-cached authors without a base regen). Q2 = per-slug union
+cache + a pre-warm batch for prolific/commonly-compared authors in the PR; cap/parallelize if
+needed. Q3 = `en_core_web_sm` via `_book_propn_set` (shared cache, consistent with book_archaic).
+Q4 = `_book_propn_set`'s NER label set as-is (PERSON/GPE/LOC/ORG/NORP/FAC...).
+
+### Why WP-A over WP-B
+WP-B (resurrect the offline clean pass: wire `ner_filter_affinity.py` into the regen path so it
+emits a current-schema clean, + a freshness trigger to regenerate when the clean is stale, +
+remove the silent non-NER fallback) keeps NER offline — amortized over an author's many books,
+and `en_core_web_trf` is more accurate. But it keeps a derived keyness-schema artifact, and a
+derived artifact drifts out of schema and silently disables itself — which is the exact root of
+both this bug and `galatz`. WP-A is consistent with the book_archaic WP-C fix (same
+`_book_propn_set`, already shipped and in prod) and kills that class permanently: there is no
+keyness-schema artifact left to drift, and NER-in-code ships via the image. Cost (a prolific
+author × ~5-15s/book cold) is mitigated by the shared per-book cache + per-slug union cache +
+PR pre-warm. Principle, already load-bearing here: cache/precompute is a belt; NER-in-code is the
+structural defense.
+
+### Scope boundary
+WP-A removes proper nouns (`dunwich`; character names like `lenore`). It does NOT remove
+Lovecraft's amateur-journalism vocabulary (`united / amended / official / members / organ /
+press / journalism / editorial / amateurs / verse / prose / critic`) — that is issue №1, a
+CORPUS-COMPOSITION matter (his SPGC corpus is dominated by his UAPA / amateur-press non-fiction,
+which by volume buries his fiction), not a code bug, and it hits any author with voluminous
+essays/letters/editorials in PG. Separate product decision (split fiction/non-fiction in
+attribution, or honestly label coverage). Acceptance must NOT be "Lovecraft now looks like weird
+fiction." Issue №3 (compare_authors renderer narrative — invented per-word glosses; "common
+words" should be exactly the tool's `shared_high_affinity`; cosine ≈ 0 is by-design, structural)
+is cosmetic and tracked separately.
+
+### Contract / R-RESTAMP
+Editing `affinity_by_author` flips its `ast_fingerprint`; `compare_authors` is a depth-1 caller
+→ its fingerprint flips too; `_book_propn_set` enters as a callee. → full `record_fixtures`
+(no `--only`) on Server-on-Wheels via the dev-overlay. Golden fixtures for
+`affinity_by_author` / `compare_authors` WILL change (dunwich and other proper nouns drop from
+top) — that is the intended outcome, not a regression. `spgc_author_affinity.py` is not a wrapped
+v2 tool; touching it (only if we later persist `used_ids` to meta) does not flip a fingerprint.
+
+### Acceptance
+`dunwich` gone from Lovecraft's keyness; character/place names (lenore-class) gone; common-noun
+signatures intact (nevermore/soul/horror for Poe; the journalism vocab stays — that's №1); no mass
+over-drop of real lexemes on 2-3 authors. Eyeball: `compare_authors(Poe, Lovecraft)` + standalone
+Lovecraft keyness + one control author (Doyle/Wodehouse).
 
 ## 2026-06-21 — book_archaic precision #2: structural NER coverage + seed exemption (2.7.36)
 

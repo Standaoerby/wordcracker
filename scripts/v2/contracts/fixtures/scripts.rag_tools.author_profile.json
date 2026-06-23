@@ -166,100 +166,10 @@
     "exclude_stopwords": true,
     "min_ll": 15.13,
     "pos_filter": null,
-    "proper_noun_filter": "corpus-diff heuristic dropped 0, spaCy PROPN dropped 16",
+    "proper_noun_filter": "corpus-diff heuristic dropped 0, spaCy PROPN dropped 4, author-NER dropped 530",
     "slug": "shelley",
     "sort_by": "keyness",
     "top": [
-      {
-        "affinity": 59.02,
-        "author_count": 317,
-        "corpus_count": 27347,
-        "g2": 1965.68,
-        "log_ratio": 5.9,
-        "rel_freq": 59.02,
-        "word": "shelley"
-      },
-      {
-        "affinity": 13.58,
-        "author_count": 266,
-        "corpus_count": 99724,
-        "g2": 895.6,
-        "log_ratio": 3.767,
-        "rel_freq": 13.58,
-        "word": "misery"
-      },
-      {
-        "affinity": 627.48,
-        "author_count": 70,
-        "corpus_count": 568,
-        "g2": 771.04,
-        "log_ratio": 9.483,
-        "rel_freq": 627.48,
-        "word": "ladislas"
-      },
-      {
-        "affinity": 3.13,
-        "author_count": 783,
-        "corpus_count": 1274615,
-        "g2": 720.64,
-        "log_ratio": 1.646,
-        "rel_freq": 3.13,
-        "word": "heart"
-      },
-      {
-        "affinity": 10.16,
-        "author_count": 251,
-        "corpus_count": 125771,
-        "g2": 711.74,
-        "log_ratio": 3.348,
-        "rel_freq": 10.16,
-        "word": "despair"
-      },
-      {
-        "affinity": 7.47,
-        "author_count": 302,
-        "corpus_count": 205708,
-        "g2": 692.11,
-        "log_ratio": 2.904,
-        "rel_freq": 7.47,
-        "word": "feelings"
-      },
-      {
-        "affinity": 31.91,
-        "author_count": 135,
-        "corpus_count": 21541,
-        "g2": 674.24,
-        "log_ratio": 5.005,
-        "rel_freq": 31.91,
-        "word": "windsor"
-      },
-      {
-        "affinity": 9.9,
-        "author_count": 224,
-        "corpus_count": 115233,
-        "g2": 624.56,
-        "log_ratio": 3.31,
-        "rel_freq": 9.9,
-        "word": "miserable"
-      },
-      {
-        "affinity": 10.0,
-        "author_count": 200,
-        "corpus_count": 101790,
-        "g2": 561.5,
-        "log_ratio": 3.325,
-        "rel_freq": 10.0,
-        "word": "beloved"
-      },
-      {
-        "affinity": 205.46,
-        "author_count": 64,
-        "corpus_count": 1586,
-        "g2": 556.85,
-        "log_ratio": 7.742,
-        "rel_freq": 205.46,
-        "word": "evadne"
-      },
       {
         "affinity": 8.17,
         "author_count": 213,
@@ -270,33 +180,6 @@
         "word": "countenance"
       },
       {
-        "affinity": 9.77,
-        "author_count": 188,
-        "corpus_count": 97953,
-        "g2": 519.87,
-        "log_ratio": 3.291,
-        "rel_freq": 9.77,
-        "word": "cottage"
-      },
-      {
-        "affinity": 20.17,
-        "author_count": 126,
-        "corpus_count": 31800,
-        "g2": 518.05,
-        "log_ratio": 4.34,
-        "rel_freq": 20.17,
-        "word": "quitted"
-      },
-      {
-        "affinity": 5.81,
-        "author_count": 273,
-        "corpus_count": 239395,
-        "g2": 508.63,
-        "log_ratio": 2.539,
-        "rel_freq": 5.81,
-        "word": "happiness"
-      },
-      {
         "affinity": 7.77,
         "author_count": 209,
         "corpus_count": 136905,
@@ -304,6 +187,123 @@
         "log_ratio": 2.96,
         "rel_freq": 7.77,
         "word": "grief"
+      },
+      {
+        "affinity": 14.5,
+        "author_count": 135,
+        "corpus_count": 47396,
+        "g2": 471.02,
+        "log_ratio": 3.862,
+        "rel_freq": 14.5,
+        "word": "endeavoured"
+      },
+      {
+        "affinity": 26.9,
+        "author_count": 82,
+        "corpus_count": 15520,
+        "g2": 382.42,
+        "log_ratio": 4.757,
+        "rel_freq": 26.9,
+        "word": "fiend"
+      },
+      {
+        "affinity": 3.41,
+        "author_count": 365,
+        "corpus_count": 545501,
+        "g2": 379.22,
+        "log_ratio": 1.769,
+        "rel_freq": 3.41,
+        "word": "fear"
+      },
+      {
+        "affinity": 6.06,
+        "author_count": 192,
+        "corpus_count": 161203,
+        "g2": 371.61,
+        "log_ratio": 2.602,
+        "rel_freq": 6.06,
+        "word": "lovely"
+      },
+      {
+        "affinity": 116.8,
+        "author_count": 49,
+        "corpus_count": 2136,
+        "g2": 370.48,
+        "log_ratio": 6.901,
+        "rel_freq": 116.8,
+        "word": "cottagers"
+      },
+      {
+        "affinity": 4.34,
+        "author_count": 257,
+        "corpus_count": 301760,
+        "g2": 358.72,
+        "log_ratio": 2.117,
+        "rel_freq": 4.34,
+        "word": "tears"
+      },
+      {
+        "affinity": 5.59,
+        "author_count": 195,
+        "corpus_count": 177598,
+        "g2": 351.12,
+        "log_ratio": 2.484,
+        "rel_freq": 5.59,
+        "word": "gentle"
+      },
+      {
+        "affinity": 252.82,
+        "author_count": 36,
+        "corpus_count": 725,
+        "g2": 328.44,
+        "log_ratio": 8.055,
+        "rel_freq": 252.82,
+        "word": "dæmon"
+      },
+      {
+        "affinity": 2.82,
+        "author_count": 398,
+        "corpus_count": 717826,
+        "g2": 312.16,
+        "log_ratio": 1.498,
+        "rel_freq": 2.82,
+        "word": "became"
+      },
+      {
+        "affinity": 3.96,
+        "author_count": 243,
+        "corpus_count": 312742,
+        "g2": 305.33,
+        "log_ratio": 1.985,
+        "rel_freq": 3.96,
+        "word": "loved"
+      },
+      {
+        "affinity": 6.37,
+        "author_count": 150,
+        "corpus_count": 119888,
+        "g2": 302.72,
+        "log_ratio": 2.673,
+        "rel_freq": 6.37,
+        "word": "waves"
+      },
+      {
+        "affinity": 13.7,
+        "author_count": 87,
+        "corpus_count": 32322,
+        "g2": 294.39,
+        "log_ratio": 3.78,
+        "rel_freq": 13.7,
+        "word": "sensations"
+      },
+      {
+        "affinity": 9.68,
+        "author_count": 104,
+        "corpus_count": 54703,
+        "g2": 285.82,
+        "log_ratio": 3.277,
+        "rel_freq": 9.68,
+        "word": "abode"
       }
     ],
     "total_unique_words": 7624
