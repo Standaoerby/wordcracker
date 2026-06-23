@@ -5,9 +5,55 @@
   "exclude_stopwords": true,
   "min_ll": 15.13,
   "pos_filter": null,
-  "proper_noun_filter": "corpus-diff heuristic dropped 0, spaCy PROPN dropped 11, author-NER dropped 7",
+  "proper_noun_filter": "corpus-diff heuristic dropped 0, spaCy PROPN dropped 0, author-NER dropped 573",
   "slug": "austen",
   "sort_by": "keyness",
-  "top": [],
+  "top": [
+    {
+      "affinity": 2.72,
+      "author_count": 2157,
+      "corpus_count": 2022474,
+      "g2": 1593.09,
+      "log_ratio": 1.446,
+      "rel_freq": 2.72,
+      "word": "think"
+    },
+    {
+      "affinity": 3.65,
+      "author_count": 1090,
+      "corpus_count": 762553,
+      "g2": 1240.62,
+      "log_ratio": 1.869,
+      "rel_freq": 3.65,
+      "word": "sure"
+    },
+    {
+      "affinity": 4.4,
+      "author_count": 807,
+      "corpus_count": 468496,
+      "g2": 1144.56,
+      "log_ratio": 2.139,
+      "rel_freq": 4.4,
+      "word": "happy"
+    },
+    {
+      "affinity": 3.8,
+      "author_count": 874,
+      "corpus_count": 587623,
+      "g2": 1045.62,
+      "log_ratio": 1.927,
+      "rel_freq": 3.8,
+      "word": "wish"
+    },
+    {
+      "affinity": 16.65,
+      "author_count": 268,
+      "corpus_count": 41113,
+      "g2": 1005.06,
+      "log_ratio": 4.066,
+      "rel_freq": 16.65,
+      "word": "attachment"
+    }
+  ],
   "total_unique_words": 7230
 }
