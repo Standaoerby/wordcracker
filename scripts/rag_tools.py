@@ -1122,8 +1122,62 @@ def affinity_by_author(author_regex: str, top: int = 50, min_author_count: int =
         sorted_df = (df.sort_values(rank_field, ascending=False,
                                     na_position="last")
                      if rank_field else df)
+        # Structural NER shield (WP-A 2.7.37). Apply the two cheap set-based
+        # drops to the FULL sorted_df BEFORE the pool truncation below. These
+        # are O(n) `isin` filters (no spaCy calls), so running them over the
+        # whole ranked list is cheap — and it is the only correct place. The
+        # expensive spaCy-POS pass truncates to head(top * pool_mult); for a
+        # name-heavy author (Austen: 20+ character names with g² above the real
+        # signature words) the pool is ALL names, so dropping inside the pool
+        # empties it and head(top) returns [] — the over-drop bug §8 found. The
+        # union itself is correct (compare_authors proves it cleanly strips
+        # names and keeps a rich list); only the point of application was wrong.
+        #
+        # Drop any candidate that whole-book NER tagged as a proper name
+        # (PERSON/GPE/LOC/ORG/NORP/...) across the author's books — the same
+        # `_book_propn_set` that fixed the `galatz` leak in book_archaic (WP-C)
+        # and the `dunwich` toponym leak here (corpus 528 ≫ author 38 → passes
+        # corpus-diff; lowercased single token → spaCy POS unreliable; absent
+        # from word_dict). Mirror book_archaic: match on the lowercased word,
+        # like exclude_stopwords above.
+        author_ner_dropped = 0
+        try:
+            propn_set = _author_propn_set(author_regex, slug)
+            if propn_set and len(sorted_df):
+                pre = len(sorted_df)
+                sorted_df = sorted_df[~sorted_df["word"].str.lower().isin(propn_set)]
+                author_ner_dropped = pre - len(sorted_df)
+                if author_ner_dropped:
+                    _log(f"affinity_by_author dropped {author_ner_dropped} "
+                         f"propn via author-NER union")
+        except Exception as e:
+            _log(f"author-NER filter skipped: {e}")
+
+        # v1.1.5 Q12 fix — second-line defence via word_dictionary cache.
+        # spaCy POS on isolated lowercase words mistags real proper nouns
+        # (mahaffy/arcady/algy from Wilde's circle) as ADJ. enrich_word
+        # has likely seen these in previous learning_words runs and
+        # tagged them proper_noun=True. Drop them (also on the full sorted_df,
+        # before the pool — same over-drop reason as the author-NER union).
+        try:
+            from learning_tools import _load_word_dict
+            wd = _load_word_dict()
+            propn_words = {key.split("|", 1)[0]
+                           for key, info in wd.items()
+                           if info.get("proper_noun")}
+            if propn_words and len(sorted_df):
+                pre = len(sorted_df)
+                sorted_df = sorted_df[~sorted_df["word"].isin(propn_words)]
+                if pre != len(sorted_df):
+                    _log(f"affinity_by_author dropped {pre-len(sorted_df)} extra "
+                         f"propn via word_dict cache")
+        except Exception as e:
+            _log(f"propn cache filter skipped: {e}")
+
         # Pool 8x the requested top when narrowing by POS, since most words
-        # won't match the filter; 4x is enough for the default PROPN drop.
+        # won't match the filter; 4x is enough for the default PROPN drop. The
+        # pool is now drawn from the name-filtered sorted_df, so it holds real
+        # candidates instead of the block of character names.
         pool_mult = 8 if pos_filter else 4
         candidate_pool = sorted_df.head(top * pool_mult).copy()
         if len(candidate_pool):
@@ -1146,47 +1200,7 @@ def affinity_by_author(author_regex: str, top: int = 50, min_author_count: int =
                 df = sorted_df
         else:
             propn_dropped = 0
-
-        # v1.1.5 Q12 fix — second-line defence via word_dictionary cache.
-        # spaCy POS on isolated lowercase words mistags real proper nouns
-        # (mahaffy/arcady/algy from Wilde's circle) as ADJ. enrich_word
-        # has likely seen these in previous learning_words runs and
-        # tagged them proper_noun=True. Drop them.
-        try:
-            from learning_tools import _load_word_dict
-            wd = _load_word_dict()
-            propn_words = {key.split("|", 1)[0]
-                           for key, info in wd.items()
-                           if info.get("proper_noun")}
-            if propn_words and len(df):
-                pre = len(df)
-                df = df[~df["word"].isin(propn_words)]
-                if pre != len(df):
-                    _log(f"affinity_by_author dropped {pre-len(df)} extra "
-                         f"propn via word_dict cache")
-        except Exception as e:
-            _log(f"propn cache filter skipped: {e}")
-
-        # Final, structural NER shield (WP-A 2.7.37). The three filters above
-        # are all too weak for a real toponym like `dunwich` (Suffolk village,
-        # corpus 528 ≫ author 38 → passes corpus-diff; lowercased single token →
-        # spaCy POS unreliable; absent from word_dict). Drop any candidate that
-        # whole-book NER tagged as a proper name (PERSON/GPE/LOC/ORG/NORP/...)
-        # across the author's books — the same `_book_propn_set` that fixed the
-        # `galatz` leak in book_archaic (WP-C). Mirror book_archaic: match on the
-        # lowercased word, like exclude_stopwords above.
-        author_ner_dropped = 0
-        try:
-            propn_set = _author_propn_set(author_regex, slug)
-            if propn_set and len(df):
-                pre = len(df)
-                df = df[~df["word"].str.lower().isin(propn_set)]
-                author_ner_dropped = pre - len(df)
-                if author_ner_dropped:
-                    _log(f"affinity_by_author dropped {author_ner_dropped} "
-                         f"propn via author-NER union")
-        except Exception as e:
-            _log(f"author-NER filter skipped: {e}")
+            df = sorted_df
 
         df = (df.sort_values(rank_field, ascending=False, na_position="last")
               if rank_field else df).head(top)

@@ -185,5 +185,86 @@ class AffinityByAuthorNERShield(unittest.TestCase):
         self.assertIn("author-NER dropped 0", out["proper_noun_filter"])
 
 
+class AffinityByAuthorOverDropFix(unittest.TestCase):
+    """Fix #1 (R-review 2.7.37, §8) — the shield must run on the FULL ranked
+    list, not the spaCy-POS pool. A name-heavy author with a small `top`
+    (Austen, top=5) used to return [] because the cheap set-based drops ran
+    AFTER `head(top * pool_mult)`: the pool was all character names → all
+    dropped → empty top. Real signature words ranked below the name block never
+    entered the pool. This fails on pre-fix code (empty list) and passes once
+    the author-NER + word_dict drops move above the pool truncation."""
+
+    # Character names that dominate Austen's top by g² — every one passes the
+    # corpus-diff heuristic (corpus ≫ author), the keyness gates and the
+    # stopword filter, so before the fix they filled the 20-row pool wholesale.
+    _NAMES = [
+        "elinor", "dashwood", "crawford", "marianne", "willoughby", "ferrars",
+        "brandon", "jennings", "middleton", "palmer", "steele", "edward",
+        "fanny", "norris", "bertram", "rushworth", "yates", "fairfax",
+        "knightley", "woodhouse", "wentworth", "elliot",
+    ]
+    # Genuine signature content-words, ranked BELOW the name block (lower g²).
+    _SIGNATURES = ["think", "sure", "happy", "wish", "attachment"]
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="wc-overdrop-")
+        rows = []
+        # Names: high g² (2100 → ~1575, all above the signatures), corpus 10×
+        # author so corpus-diff lets them through — exactly the leak shape.
+        g2 = 2100.0
+        for name in self._NAMES:
+            rows.append({"word": name, "author_count": 200,
+                         "corpus_count": 2000, "g2": g2, "log_ratio": 3.5,
+                         "rel_freq": 5.0})
+            g2 -= 25.0
+        # Signatures: lower g² (~1450 ↓), so they rank after all 22 names and
+        # land outside head(top*pool_mult) until the names are removed.
+        sg2 = 1450.0
+        for w in self._SIGNATURES:
+            rows.append({"word": w, "author_count": 400, "corpus_count": 8000,
+                         "g2": sg2, "log_ratio": 1.6, "rel_freq": 2.0})
+            sg2 -= 10.0
+        df = pd.DataFrame(rows)
+        self._csv = Path(self._tmp) / "austen_affinity.csv"
+        df.to_csv(self._csv, index=False)
+        # Real shield wiring; per-book NER faked to return the name set (corpus
+        # absent in CI). _author_propn_set unions it; the drop is the real one.
+        self._fake_lt = types.ModuleType("learning_tools")
+        self._fake_lt._book_propn_set = lambda pg: set(self._NAMES)
+        self._saved_lt = sys.modules.get("learning_tools")
+        sys.modules["learning_tools"] = self._fake_lt
+        self._patches = [
+            mock.patch.object(rag_tools, "DERIVED_DIR", Path(self._tmp)),
+            mock.patch.object(rag_tools, "AUTHOR_PROPN_DIR", Path(self._tmp)),
+            mock.patch.object(rag_tools, "_spacy_pos_tags", return_value={}),
+            mock.patch.object(rag_tools, "_select_books",
+                              return_value=pd.DataFrame({"id": ["PG1"]})),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+        if self._saved_lt is not None:
+            sys.modules["learning_tools"] = self._saved_lt
+        else:
+            sys.modules.pop("learning_tools", None)
+
+    def test_name_heavy_author_small_top_not_empty(self):
+        out = rag_tools.affinity_by_author("^Austen", top=5, min_corpus_count=0)
+        self.assertNotIn("error", out, out)
+        words = [r["word"] for r in out["top"]]
+        # The bug: pre-fix this list is empty (pool was all names).
+        self.assertGreater(len(words), 0, "name-heavy author returned []")
+        # Real signature words survive — intersection is non-empty.
+        self.assertTrue(
+            set(words) & set(self._SIGNATURES),
+            f"no signature words survived: {words}")
+        # And the names are gone — none of the character names leak through.
+        for name in ("elinor", "dashwood", "crawford"):
+            self.assertNotIn(name, words)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
