@@ -1,9 +1,12 @@
 # wordcracker
 
-NLP-аналитический сервис над корпусом Project Gutenberg (~55 000 книг).
-Веб-чат с LLM-агентом, частотная аналитика, стилометрия, контексты, vocabulary
-learning, hybrid retrieval (FTS5 + semantic). Хост — RTX 3090 / Ubuntu 24.04
-в Docker.
+ИИ-компаньон для чтения и изучения языка над корпусом Project Gutenberg
+(~55 000 книг). Вопрос на естественном языке (RU/EN) про авторов, слова, стиль
+и эпохи → ответ **обоснован реальными текстами, а не выдуман**. Стилометрия
+(keyness, Burrows Delta), конкорданс и коллокации, диахрония, этимология,
+учебная лексика по уровням CEFR с экспортом в Anki, hybrid retrieval
+(FTS5 + semantic). Для лингвистов и изучающих английский. Хост — RTX 3090 /
+Ubuntu 24.04 в Docker.
 
 **Live:** <https://slovoeb.net> (chat), <https://status.slovoeb.net> (health
 dashboard), <https://admin.slovoeb.net> (upload новых книг). Сервис в закрытой
@@ -11,13 +14,17 @@ dashboard), <https://admin.slovoeb.net> (upload новых книг). Серви
 
 ---
 
-## v2.7.10 (2026-06-11) — текущая версия
+## v2.7.38 (2026-06-25) — текущая версия
 
 Линейка 2.7.x (июнь 2026): **веб-слой** (FastAPI + React поверх того же
 v2-движка), **вертикаль честности** (система не сообщает ничего, чего нет
 в данных инструментов, — на уровне промпта, критика и детерминированных
-санитайзеров) и **learning-интенты** (рекомендация книг по уровню CEFR,
-учебные списки с переводами, fail-fast вместо 40-секундных отказов).
+санитайзеров), **learning-интенты** (рекомендация книг по уровню CEFR,
+учебные списки с переводами, fail-fast вместо 40-секундных отказов) и
+**точность стилометрии** — структурные NER-щиты в живом пути не дают именам
+и топонимам протекать в keyness и архаизмы (2.7.35–2.7.37: book_archaic
+precision + author-keyness щит против «dunwich-leak», с добором сигнатурных
+слов на полном списке кандидатов).
 
 ```
 user → input caps (64KB / 4K chars / 50 turns) + control-char strip
@@ -76,6 +83,27 @@ user → input caps (64KB / 4K chars / 50 turns) + control-char strip
 - meta-пак: «у вас есть <автор>?», «самый популярный автор» и т.п.
 - fail-fast: нераспознанное → мгновенный clarify с рабочими примерами
   (вместо 40s LLM-попыток)
+
+## Возможности
+
+Для **лингвиста**: «фирменные» слова автора (keyness G²/log-ratio,
+`affinity_by_author`), сравнение словарей (`compare_authors`), стилистические
+влияния по Burrows Delta (`author_influences`), атрибуция текста
+(`author_attribution`); KWIC-конкорданс (`word_contexts` / `word_contexts_global`),
+коллокации (`word_collocates`), POS-распределение для полисемии
+(`word_pos_distribution`), слова вокруг эмоции (`emotion_collocates`); диахрония —
+частотная кривая (`word_freq_timeline`), нео-/устаревающие слова
+(`words_appearing_after` / `words_disappearing_after`), архаизмы книги
+(`book_archaic_words`); этимология (`word_etymology` и `find_words_by_etymology`:
+germanic/norse/romance/greek/celtic/slavic/arabic/pie); характерные n-граммы,
+лексическое разнообразие (TTR), семантический поиск.
+
+Для **изучающего английский**: учебная лексика из книги/автора по уровню CEFR
+(`learning_words`: basic/intermediate/advanced/rare) с экспортом в **Anki**
+(`export_word_list`); живые примеры употребления (`word_contexts`); подбор книги
+под уровень (`book_readability` + `book_archaic_words`); рекомендации чтения
+(`find_book`, `semantic_search`, `top_books_by_downloads` / `top_books_by_recency`);
+глоссы и определения (`enrich_word`).
 
 ## Корпус
 
@@ -150,6 +178,8 @@ CI на каждом PR: mandatory version-bump, probe-config sanity,
 
 | Версии | Дата | Что |
 |---|---|---|
+| **2.7.38** | **2026-06-25** | docs: продуктовое описание README + раздел «Возможности» (лингвист / изучающий), синхронизация версии |
+| **2.7.37** | **2026-06-23** | author-keyness propn shield: структурный NER-щит в живом пути `affinity_by_author`/`compare_authors` (union `_book_propn_set` по книгам автора, кэш per-slug) против «dunwich-leak»; фикс over-drop — set-дропы применяются к полному ранжированному списку до усечения POS-пула, малый `top` больше не обнуляется; деплой прогревает `author_propn_cache` перед probe-gate |
 | **2.7.36** | **2026-06-21** | book_archaic precision #2: `_book_propn_set` покрывает всю книгу (head/middle/tail-окна + версионированный кэш) — поздне-книжные топонимы (`galatz`) ловятся NER-ом структурно; seed-архаизмы исключены из propn-дропа (возврат `art`); починка затирания pass-2 в миграции кэша |
 | **2.7.35** | **2026-06-21** | book_archaic precision: чистка seed-словаря (amongst/amidst/ought/…), proper-noun NER-гейт (galatz/varna/bistritz), архаичное СЛОВО vs устаревший РЕФЕРЕНТ в enrich-промпте, честная подпись охвата |
 | **2.7.9–2.7.10** | **2026-06-11** | learning-polish (low-temp render, table-aware critic payload) + честный учебный контент (этимология/примеры только из данных, propn-гейт переводов) |
